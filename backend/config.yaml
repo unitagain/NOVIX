@@ -1,0 +1,56 @@
+# NOVIX Configuration / NOVIX 配置文件
+
+# LLM Providers / 大模型提供商配置
+llm:
+  default_provider: openai
+  providers:
+    openai:
+      api_key: ${OPENAI_API_KEY}
+      model: gpt-4o
+      max_tokens: 8000
+      temperature: 0.7
+    anthropic:
+      api_key: ${ANTHROPIC_API_KEY}
+      model: claude-3-5-sonnet-20241022
+      max_tokens: 8000
+      temperature: 0.7
+    deepseek:
+      api_key: ${DEEPSEEK_API_KEY}
+      model: deepseek-chat
+      max_tokens: 8000
+      temperature: 0.7
+
+# Agent Configuration / Agent 配置
+agents:
+  archivist:
+    provider: openai
+    temperature: 0.3
+  writer:
+    provider: anthropic
+    temperature: 0.7
+  reviewer:
+    provider: openai
+    temperature: 0.2
+  editor:
+    provider: anthropic
+    temperature: 0.5
+
+# Context Budget / 上下文预算
+context_budget:
+  total_tokens: 128000
+  system_rules: 0.05
+  cards: 0.15
+  canon: 0.10
+  summaries: 0.20
+  current_draft: 0.30
+  output_reserve: 0.20
+
+# Session Configuration / 会话配置
+session:
+  max_iterations: 5
+  auto_save_interval: 60  # seconds / 秒
+
+# Storage Configuration / 存储配置
+storage:
+  data_dir: ../data
+  encoding: utf-8
