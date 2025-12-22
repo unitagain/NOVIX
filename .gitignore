@@ -37,8 +37,8 @@ frontend/build/
 .DS_Store
 Thumbs.db
 
-# Project data (optional - uncomment if you don't want to commit writing projects)
-# data/
+# Project data - exclude test/user writing projects
+data/
 
 # Logs
 *.log
