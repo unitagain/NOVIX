@@ -23,7 +23,7 @@ if errorlevel 1 (
 REM Check if node_modules exists
 if not exist "node_modules\" (
     echo [1/2] Installing dependencies...
-    npm install
+    call npm install
     if errorlevel 1 (
         echo.
         echo ERROR: npm install failed.
@@ -38,4 +38,4 @@ echo   Frontend: http://localhost:3000
 echo   Backend:  http://localhost:8000 (make sure it is running)
 echo.
 
-npm run dev
+call npm run dev
