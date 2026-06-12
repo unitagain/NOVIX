@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 
 import ErrorBoundary from './components/ErrorBoundary';
+import UpdateAvailableBanner from './components/cloud/UpdateAvailableBanner';
 import { projectsAPI } from './api';
 import { t } from './i18n';
 import { subscribeDesktopCommands, subscribeDesktopDeepLinks } from './utils/desktop';
@@ -147,6 +148,7 @@ function App() {
           <Route path="/system" element={<Navigate to="/" replace />} />
         </Routes>
       </Suspense>
+      <UpdateAvailableBanner />
     </ErrorBoundary>
   );
 }

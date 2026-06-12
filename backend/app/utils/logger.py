@@ -8,6 +8,7 @@ Centralized logger helpers for WenShape.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -20,6 +21,11 @@ DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def _resolve_log_dir() -> Path:
+    desktop_log_dir = str(os.getenv("WENSHAPE_DESKTOP_LOG_DIR") or "").strip()
+    if desktop_log_dir:
+        candidate = Path(desktop_log_dir).expanduser()
+        return candidate if candidate.is_absolute() else (Path.cwd() / candidate).resolve()
+
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "logs"
     return Path(__file__).resolve().parents[2] / "logs"
@@ -27,7 +33,7 @@ def _resolve_log_dir() -> Path:
 
 def _build_handlers(debug_enabled: bool) -> list[logging.Handler]:
     log_dir = _resolve_log_dir()
-    log_dir.mkdir(exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG if debug_enabled else logging.INFO)

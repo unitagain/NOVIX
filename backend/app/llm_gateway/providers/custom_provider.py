@@ -5,8 +5,8 @@ OpenAI-compatible custom provider adapter.
 """
 
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from openai import AsyncOpenAI
 from app.llm_gateway.providers.base import BaseLLMProvider
+from app.utils.openai_client import create_async_openai_client
 
 
 class CustomProvider(BaseLLMProvider):
@@ -25,7 +25,7 @@ class CustomProvider(BaseLLMProvider):
         # But for 'custom', user likely provides a specific URL.
         # If user leaves it blank but uses 'custom', it behaves like standard OpenAI?
         # Better to pass it explicitely.
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url if base_url else None)
+        self.client = create_async_openai_client(api_key=api_key, base_url=base_url if base_url else None)
 
     async def chat(
         self,

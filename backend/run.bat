@@ -8,6 +8,16 @@ setlocal EnableExtensions
 
 set PYTHONUTF8=1
 set PYTHONIOENCODING=utf-8
+set "PYTHON_CMD=python"
+set "PYTHON_ARGS="
+
+REM Pin Windows launcher to Python 3.12 by default
+if /I "%OS%"=="Windows_NT" (
+  py -3.12 --version >nul 2>&1
+  if errorlevel 1 goto :python_missing
+  set "PYTHON_CMD=py"
+  set "PYTHON_ARGS=-3.12"
+)
 
 echo ========================================
 echo   WenShape Backend Server
@@ -15,18 +25,18 @@ echo ========================================
 echo.
 
 REM Check Python installation
-python --version >nul 2>&1
+"%PYTHON_CMD%" %PYTHON_ARGS% --version >nul 2>&1
 if errorlevel 1 goto :python_missing
 
 echo [1/3] Checking dependencies...
-python "scripts/check_requirements_installed.py" "requirements.txt" >nul 2>&1
+"%PYTHON_CMD%" %PYTHON_ARGS% "scripts/check_requirements_installed.py" "requirements.txt" >nul 2>&1
 if errorlevel 1 goto :install_deps
 echo [OK] Pinned backend dependencies already installed.
 goto :deps_ready
 
 :install_deps
 echo [INFO] Missing or mismatched packages detected. Installing pinned dependencies...
-python -m pip install -r requirements.txt -q --disable-pip-version-check
+"%PYTHON_CMD%" %PYTHON_ARGS% -m pip install -r requirements.txt -q --disable-pip-version-check
 if errorlevel 1 goto :pip_failed
 
 :deps_ready
@@ -65,18 +75,21 @@ echo.
 
 echo [3/3] Server running...
 if "%WENSHAPE_AUTO_PORT%"=="" set "WENSHAPE_AUTO_PORT=1"
-python -m app.main
+"%PYTHON_CMD%" %PYTHON_ARGS% -m app.main
 
 pause
 exit /b 0
 
 :python_missing
-echo ERROR: Python is not installed or not in PATH.
+echo ERROR: Python 3.12 is required on Windows and was not found.
 echo.
-echo Please install Python 3.10+ from:
+echo Please install Python 3.12 from:
 echo   https://www.python.org/downloads/
 echo.
-echo IMPORTANT: During installation, check "Add python.exe to PATH"
+echo IMPORTANT:
+echo   1) Install Python 3.12
+echo   2) Enable "Add python.exe to PATH"
+echo   3) Ensure "py -3.12 --version" works
 echo.
 pause
 exit /b 1
@@ -86,7 +99,7 @@ echo.
 echo ERROR: Dependency installation failed.
 echo This usually means your network/proxy cannot reach PyPI, or some pinned wheel is temporarily unavailable.
 echo If dependencies are already installed, rerun backend\\run.bat and the offline checker will skip pip.
-echo Otherwise try running: python -m pip install -r requirements.txt
+echo Otherwise try running: py -3.12 -m pip install -r requirements.txt
 echo to see detailed error messages.
 pause
 exit /b 1

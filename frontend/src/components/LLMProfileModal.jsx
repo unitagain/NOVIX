@@ -57,6 +57,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
     const [fetchingModels, setFetchingModels] = useState(false);
     const [testingModel, setTestingModel] = useState(false);
     const [fetchWarning, setFetchWarning] = useState('');
+    const [actionFeedback, setActionFeedback] = useState(null);
     const [deleting, setDeleting] = useState(false);
     const [customModelInput, setCustomModelInput] = useState(false);
 
@@ -79,6 +80,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                 : [];
             setFetchedModels(persistedModels);
             setFetchWarning('');
+            setActionFeedback(null);
             setCustomModelInput(false);
             if (profile) {
                 setFormData({
@@ -110,6 +112,10 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
     }, [open, profile, t]);
 
     if (!open) return null;
+
+    const showFeedback = (type, message) => {
+        setActionFeedback({ type, message: String(message || '').trim() });
+    };
 
     const PROVIDERS = [
         { id: 'anthropic', label: 'Anthropic' },
@@ -200,15 +206,16 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
 
     const handleFetchModels = async () => {
         if (!formData.api_key) {
-            alert(t('llmModal.pleaseEnterKey'));
+            showFeedback('error', t('llmModal.pleaseEnterKey'));
             return;
         }
         if (!formData.base_url) {
-            alert(t('llmModal.fillRequiredBeforeTest'));
+            showFeedback('error', t('llmModal.fillRequiredBeforeTest'));
             return;
         }
 
         setFetchingModels(true);
+        setActionFeedback(null);
         try {
             const res = await configAPI.fetchModels({
                 provider: formData.provider,
@@ -230,12 +237,17 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                 if (!formData.model && models.length > 0) {
                     setFormData(prev => ({ ...prev, model: models[0] }));
                 }
+                if (models.length > 0) {
+                    showFeedback('success', `${t('llmModal.fetchModels')}：${models.length}`);
+                } else {
+                    showFeedback('info', t('llmModal.fetching'));
+                }
             }
 
         } catch (error) {
             logger.error("Failed to fetch models", error);
             setFetchWarning('');
-            alert(t('llmModal.fetchFailed', { message: extractErrorDetail(error) }));
+            showFeedback('error', t('llmModal.fetchFailed', { message: extractErrorDetail(error) }));
         } finally {
             setFetchingModels(false);
         }
@@ -250,11 +262,12 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
 
     const handleTestModel = async () => {
         if (!canTestModel) {
-            alert(t('llmModal.fillRequiredBeforeTest'));
+            showFeedback('error', t('llmModal.fillRequiredBeforeTest'));
             return;
         }
 
         setTestingModel(true);
+        setActionFeedback(null);
         try {
             const res = await configAPI.testModel({
                 provider: formData.provider,
@@ -263,10 +276,10 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                 model: formData.model,
             });
             const message = res?.data?.message ? `\n${String(res.data.message)}` : '';
-            alert(t('llmModal.testSuccess') + message);
+            showFeedback('success', t('llmModal.testSuccess') + message);
         } catch (error) {
             logger.error("Failed to test model", error);
-            alert(t('llmModal.testFailed', { message: extractErrorDetail(error) }));
+            showFeedback('error', t('llmModal.testFailed', { message: extractErrorDetail(error) }));
         } finally {
             setTestingModel(false);
         }
@@ -311,7 +324,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
             }
             onClose();
         } catch (e) {
-            alert(t('llmModal.deleteFailed'));
+            showFeedback('error', t('llmModal.deleteFailed'));
         } finally {
             setDeleting(false);
         }
@@ -408,6 +421,20 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
 
                     {/* 动态字段 */}
                     <div className="space-y-4 pt-4 border-t border-[var(--vscode-sidebar-border)]">
+                        {actionFeedback ? (
+                            <div
+                                className={[
+                                    "rounded-[6px] border px-3 py-2 text-sm whitespace-pre-wrap",
+                                    actionFeedback.type === 'error'
+                                        ? "border-red-500/40 bg-red-500/10 text-red-300"
+                                        : actionFeedback.type === 'success'
+                                            ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                                            : "border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] text-[var(--vscode-fg)]",
+                                ].join(' ')}
+                            >
+                                {actionFeedback.message}
+                            </div>
+                        ) : null}
                         {/* 接口密钥 */}
                         <AnimatePresence>
                             <motion.div

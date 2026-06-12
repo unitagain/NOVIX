@@ -11,7 +11,6 @@ const { createProtocolBridge } = require("./protocol.cjs");
 const { buildDesktopWindowTitle, buildFailurePageHtml, buildStartupPageHtml, getShellMetadata } = require("./runtime.cjs");
 const { startSidecar, stopSidecar } = require("./sidecar.cjs");
 const { createTrayController } = require("./tray.cjs");
-const { createCloudController } = require("./cloud-controller.cjs");
 
 let shellMetadata;
 try {
@@ -47,7 +46,6 @@ let recoveryPromise = null;
 let startupScreenLoaded = false;
 let trayController = null;
 let protocolBridge = null;
-let cloudController = null;
 let shellStatus = {
   phase: "booting",
   severity: "info",
@@ -255,8 +253,6 @@ function createWindow() {
   mainWindow.webContents.on("dom-ready", () => {
     emitToRenderer("wenshape:shell-status", shellStatus);
     protocolBridge?.flush();
-    cloudController?.publishAuthState();
-    cloudController?.replayLastUpdate();
   });
 
   mainWindow.webContents.on("did-fail-load", async (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -547,8 +543,6 @@ async function shutdownRuntime() {
   trayController?.destroy();
   trayController = null;
 
-  cloudController?.stop();
-
   if (sidecarState) {
     await stopSidecar(sidecarState);
     sidecarState = null;
@@ -754,18 +748,6 @@ app.whenReady().then(async () => {
     requestQuit
   });
   trayController.setStatus(shellStatus);
-
-  cloudController = createCloudController({
-    desktopPaths,
-    manifest: shellMetadata.manifest,
-    emitToRenderer
-  });
-  cloudController.registerIpc();
-  // Rehydrate session and kick off background version check; never block boot.
-  cloudController.rehydrate().catch((error) => {
-    console.warn("[desktop-main] cloud rehydrate failed", error);
-  });
-  cloudController.startVersionCheckLoop();
 
   Menu.setApplicationMenu(createApplicationMenu({
     isDev: isRuntimeDev(),

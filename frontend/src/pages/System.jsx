@@ -14,6 +14,7 @@ import { motion } from 'framer-motion';
 import { Settings } from 'lucide-react';
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card';
 import { useLocale } from '../i18n';
+import UpdateChannelCard from '../components/cloud/UpdateChannelCard';
 
 /**
  * 系统设置页 / System Settings Page
@@ -59,6 +60,7 @@ function System() {
               {t('system.comingSoon')}
             </div>
           </motion.div>
+          <UpdateChannelCard />
         </CardContent>
       </Card>
     </motion.div>

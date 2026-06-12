@@ -12,8 +12,8 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 from typing import List, Dict, Any, Optional
-from anthropic import AsyncAnthropic
 from app.llm_gateway.providers.base import BaseLLMProvider
+from app.utils.anthropic_client import create_async_anthropic_client
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -44,7 +44,7 @@ class AnthropicProvider(BaseLLMProvider):
             temperature: 生成温度 / Generation temperature.
         """
         super().__init__(api_key, model, max_tokens, temperature)
-        self.client = AsyncAnthropic(api_key=api_key)
+        self.client = create_async_anthropic_client(api_key=api_key)
 
     async def chat(
         self,

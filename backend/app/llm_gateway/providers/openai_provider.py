@@ -3,8 +3,8 @@ OpenAI Provider / OpenAI 适配器
 """
 
 from typing import List, Dict, Any, Optional
-from openai import AsyncOpenAI
 from app.llm_gateway.providers.base import BaseLLMProvider
+from app.utils.openai_client import create_async_openai_client
 
 
 class OpenAIProvider(BaseLLMProvider):
@@ -18,7 +18,7 @@ class OpenAIProvider(BaseLLMProvider):
         temperature: float = 0.7
     ):
         super().__init__(api_key, model, max_tokens, temperature)
-        self.client = AsyncOpenAI(api_key=api_key)
+        self.client = create_async_openai_client(api_key=api_key)
     
     async def chat(
         self,
