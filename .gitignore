@@ -52,6 +52,7 @@ desktop/out/
 desktop/.vite/
 desktop/dist/
 desktop/release/
+desktop/.artifacts/
 .desktop-runtime/
 
 # IDE

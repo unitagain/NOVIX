@@ -37,10 +37,13 @@ def pick_ports() -> Tuple[int, int]:
 
 
 def check_python() -> bool:
-    """Ensure Python 3.10+ is available."""
+    """Ensure Python 3.10-3.12 is available."""
     version = sys.version_info
     if version.major < 3 or (version.major == 3 and version.minor < 10):
-        print("[ERROR] Python 3.10+ is required")
+        print("[ERROR] Python 3.10-3.12 is required")
+        return False
+    if version.major == 3 and version.minor > 12:
+        print("[ERROR] Python 3.13+ is not supported yet, please use Python 3.12")
         return False
     print(f"[OK] Python {version.major}.{version.minor}.{version.micro}")
     return True

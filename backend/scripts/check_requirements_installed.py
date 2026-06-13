@@ -15,6 +15,8 @@ import re
 import sys
 from pathlib import Path
 
+MAX_SUPPORTED_MINOR = 12
+
 
 def normalize_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
@@ -58,6 +60,14 @@ def collect_installed() -> dict[str, str]:
 
 
 def main() -> int:
+    if sys.version_info.major != 3 or sys.version_info.minor > MAX_SUPPORTED_MINOR:
+        print(
+            "[ERROR] Unsupported Python version. "
+            "WenShape backend currently supports Python 3.10-3.12. "
+            f"Detected: {sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+        )
+        return 3
+
     parser = argparse.ArgumentParser(description="Check whether pinned requirements are already installed.")
     parser.add_argument(
         "requirements",

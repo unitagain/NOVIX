@@ -104,13 +104,37 @@ function createApplicationMenu(options = {}) {
     ]
   };
 
-  const template = [
+  const template = [];
+
+  // macOS requires an app-name menu as the first item.
+  if (process.platform === "darwin") {
+    template.push({
+      label: "WenShape",
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        {
+          label: "Quit WenShape",
+          accelerator: "CmdOrCtrl+Q",
+          click: () => options.requestQuit?.({ source: "menu" })
+        }
+      ]
+    });
+  }
+
+  template.push(
     fileMenu,
     editMenu,
     viewMenu,
     windowMenu,
     helpMenu
-  ];
+  );
 
   if (options.isDev) {
     template.push({

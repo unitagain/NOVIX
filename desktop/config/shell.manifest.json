@@ -1,12 +1,13 @@
 {
   "schemaVersion": 1,
-  "phase": "phase3",
+  "phase": "phase4",
   "product": {
     "name": "WenShape",
     "displayName": "WenShape",
     "executableName": "WenShape",
     "bundleId": "com.wenshape.desktop",
-    "protocol": "wenshape"
+    "protocol": "wenshape",
+    "version": "0.4.0"
   },
   "toolchain": {
     "shell": "electron",
@@ -23,7 +24,7 @@
   ],
   "platformTargets": {
     "windows": [
-      "squirrel"
+      "wix-msi"
     ],
     "macos": [
       "zip",
@@ -44,5 +45,11 @@
     "transport": "http+websocket",
     "authMode": "loopback-session-token",
     "portSelection": "dynamic"
+  },
+  "cloud": {
+    "apiBaseUrl": "https://api.wenshape.cn",
+    "webBaseUrl": "https://wenshape.cn",
+    "defaultChannel": "stable",
+    "downloadHosts": ["dl.wenshape.cn", "wenshape.cn"]
   }
 }

@@ -82,11 +82,23 @@ function waitForHealth(url, timeoutMs) {
   });
 }
 
-function choosePythonCommand() {
+function choosePythonInvocation() {
   if (process.env.WENSHAPE_DESKTOP_PYTHON) {
-    return process.env.WENSHAPE_DESKTOP_PYTHON;
+    return {
+      command: process.env.WENSHAPE_DESKTOP_PYTHON,
+      argsPrefix: []
+    };
   }
-  return process.platform === "win32" ? "python" : "python3";
+  if (process.platform === "win32") {
+    return {
+      command: "py",
+      argsPrefix: ["-3.12"]
+    };
+  }
+  return {
+    command: "python3",
+    argsPrefix: []
+  };
 }
 
 function resolvePackagedSidecarExecutable(paths) {
@@ -98,7 +110,15 @@ function resolvePackagedSidecarExecutable(paths) {
     paths?.runtimeRoot ? path.join(paths.runtimeRoot, "sidecar", executableName) : null
   ].filter(Boolean);
 
-  return candidates.find((candidate) => fs.existsSync(candidate)) || null;
+  const found = candidates.find((candidate) => fs.existsSync(candidate)) || null;
+
+  // macOS / Linux: ensure the sidecar binary is executable.  Packaging
+  // tools sometimes strip the execute bit during copy.
+  if (found && process.platform !== "win32") {
+    try { fs.chmodSync(found, 0o755); } catch (_error) { /* ignore */ }
+  }
+
+  return found;
 }
 
 function createDesktopEnv({ port, token, paths }) {
@@ -112,10 +132,17 @@ function createDesktopEnv({ port, token, paths }) {
     WENSHAPE_DESKTOP_SESSION_TOKEN: token,
     WENSHAPE_DESKTOP_SHELL: "electron",
     WENSHAPE_DESKTOP_LOG_DIR: paths?.logsDir || "",
+    // Tell the sidecar where to look for a user-provided .env file
+    // so that API keys placed in the runtime config directory are found.
+    WENSHAPE_DESKTOP_ENV_DIR: paths?.configDir || "",
     PYTHONUTF8: "1",
     PYTHONIOENCODING: "utf-8"
   };
 }
+
+// Uvicorn access-log lines that are pure noise in the desktop log.
+// Match patterns like "INFO:     127.0.0.1:... - "GET /health ..." or similar.
+const SIDECAR_NOISE_RE = /^INFO:\s+127\.0\.0\.1:\d+\s+-\s+"(GET|HEAD|OPTIONS)\s+\/health/;
 
 function attachLogging(child, label) {
   const writer = (stream, method) => {
@@ -123,6 +150,10 @@ function attachLogging(child, label) {
     stream?.on("data", (chunk) => {
       const text = String(chunk || "").trim();
       if (!text) {
+        return;
+      }
+      // Suppress high-frequency health-check access logs to avoid log bloat
+      if (SIDECAR_NOISE_RE.test(text)) {
         return;
       }
       console[method](`[${label}] ${text}`);
@@ -152,10 +183,13 @@ async function startSidecar(options = {}) {
     }
     command = executable;
     args = [];
-    cwd = path.dirname(executable);
+    // Use the user-writable data directory as cwd instead of the
+    // (potentially read-only) installation directory.
+    cwd = options.paths?.dataDir || path.dirname(executable);
   } else {
-    command = choosePythonCommand();
-    args = ["-m", "app.main"];
+    const pythonInvocation = choosePythonInvocation();
+    command = pythonInvocation.command;
+    args = [...pythonInvocation.argsPrefix, "-m", "app.main"];
     cwd = path.join(metadata.repoRoot, "backend");
   }
 

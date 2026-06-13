@@ -32,17 +32,51 @@ _FALSE_VALUES = {"0", "false", "no", "off", "release", "prod", "production", "te
 
 
 def _load_environment() -> None:
-    """Load `.env` from the correct runtime location once per process."""
+    """Load `.env` from the correct runtime location once per process.
+
+    Search order (first existing file wins):
+    1. ``WENSHAPE_DESKTOP_ENV_DIR/.env`` (set by the Electron shell,
+       points at the user-writable config directory)
+    2. ``.env`` next to the frozen executable
+    3. ``.env`` inside ``_MEIPASS`` (bundled default)
+    4. Standard ``python-dotenv`` discovery (development)
+    """
     if getattr(sys, "frozen", False):
-        env_path = Path(sys.executable).resolve().parent / ".env"
-        load_dotenv(dotenv_path=env_path)
+        candidates = []
+
+        desktop_env_dir = os.getenv("WENSHAPE_DESKTOP_ENV_DIR", "").strip()
+        if desktop_env_dir:
+            candidates.append(Path(desktop_env_dir) / ".env")
+
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / ".env")
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / ".env")
+
+        for env_path in candidates:
+            if env_path.exists():
+                load_dotenv(dotenv_path=env_path)
+                return
+        # No .env found — proceed without one (env vars may still be set)
         return
 
     load_dotenv()
 
 
 def _resolve_data_dir() -> str:
-    """Resolve the shared data directory for both source and packaged modes."""
+    """Resolve the shared data directory for both source and packaged modes.
+
+    Priority:
+    1. ``DATA_DIR`` env var (set by the Electron desktop shell)
+    2. ``<exe-parent>/data`` when running as a frozen PyInstaller bundle
+    3. ``<project-root>/data`` during development
+    """
+    env_data_dir = os.getenv("DATA_DIR", "").strip()
+    if env_data_dir:
+        return str(Path(env_data_dir).expanduser().resolve())
+
     if getattr(sys, "frozen", False):
         return str((Path(sys.executable).resolve().parent / "data").resolve())
 
@@ -51,8 +85,15 @@ def _resolve_data_dir() -> str:
 
 
 def _config_root() -> Path:
-    """Return the directory that contains `config.yaml`."""
+    """Return the directory that contains `config.yaml`.
+
+    In frozen (PyInstaller) mode, bundled data files live inside the
+    temporary ``_MEIPASS`` directory, not next to the executable.
+    """
     if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
 

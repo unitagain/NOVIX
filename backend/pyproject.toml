@@ -1,6 +1,6 @@
 [project]
 name = "wenshape-backend"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 
 [tool.black]
 line-length = 120

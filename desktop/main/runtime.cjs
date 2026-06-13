@@ -28,12 +28,16 @@ function getShellMetadata() {
   const frontendDevUrl = String(
     process.env.WENSHAPE_DESKTOP_FRONTEND_URL || `http://127.0.0.1:${frontendPort}`
   );
+  const packagedByEnv = boolFromEnv(process.env.WENSHAPE_DESKTOP_PACKAGED);
+  const packagedByAsar = __dirname.includes("app.asar");
+  const isPackagedRuntime = packagedByEnv || packagedByAsar;
   const isDev = boolFromEnv(process.env.WENSHAPE_DESKTOP_DEV)
-    || (!process.env.APPIMAGE && process.env.NODE_ENV !== "production");
+    || (!isPackagedRuntime && !process.env.APPIMAGE && process.env.NODE_ENV !== "production");
 
   return {
     manifest,
     isDev,
+    isPackagedRuntime,
     frontendDevUrl,
     repoRoot: repoRoot(),
     desktopRoot: desktopRoot()

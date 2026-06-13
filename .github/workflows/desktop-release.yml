@@ -1,0 +1,105 @@
+name: Desktop Release
+
+# 阶段 9 发布流水线（仅 Windows）：打 tag v* → 构建 MSI + 产出 SHA256（写入 wenshape-release.json）。
+# 产物与校验值作为 artifact 上传；由人工下载、上传到 CDN，并在 admin 后台手动登记 release（CI 不自动发布）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v，如 0.1.1）；留空则用 package.json 版本"
+        required: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: win32
+            arch: x64
+            npm_script: make:windows
+          # macOS 暂缓（阶段 9 仅做 Windows 自动更新闭环）。需要时恢复以下两行：
+          # - { os: macos-13, platform: darwin, arch: x64, npm_script: make:macos:x64 }
+          # - { os: macos-latest, platform: darwin, arch: arm64, npm_script: make:macos:arm64 }
+
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            desktop/package-lock.json
+            frontend/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve version & channel
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"   # tag v0.1.1 -> 0.1.1
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.runtime.txt
+          pip install pyinstaller
+        working-directory: backend
+
+      - name: Desktop doctor
+        run: npm run doctor
+
+      - name: Build desktop release
+        run: npm run ${{ matrix.npm_script }}
+        env:
+          # 注入版本号：写进打包用的 manifest（运行时 getAppVersion 读它）+ forge appVersion
+          WENSHAPE_DESKTOP_BUILD_VERSION: ${{ steps.ver.outputs.version }}
+          WENSHAPE_DESKTOP_RELEASE_CHANNEL: ${{ steps.ver.outputs.channel }}
+          # build-sidecar 默认用 `py -3.12`；CI 统一用 setup-python 安装的 python（与上面 pip 装的环境一致）
+          WENSHAPE_DESKTOP_PYTHON: python
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wenshape-${{ matrix.platform }}-${{ matrix.arch }}
+          path: desktop/.artifacts/releases/**
+          if-no-files-found: error
+
+      # 把 SHA256 / file_size 打到 Job Summary，便于直接复制到 admin 后台「版本发布」表单
+      - name: SHA256 summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## ${{ matrix.platform }}-${{ matrix.arch }} 构建产物（用于 admin 后台登记 release）" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          find .artifacts/releases -name wenshape-release.json -exec cat {} \; >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "no metadata produced" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

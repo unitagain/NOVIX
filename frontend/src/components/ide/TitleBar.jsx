@@ -8,6 +8,7 @@ import { cn } from '../ui/core';
 import logger from '../../utils/logger';
 import { useLocale } from '../../i18n';
 import ExportDialog from './ExportDialog';
+import CloudAccountButton from '../cloud/CloudAccountButton';
 import { isDesktopRuntime, openDesktopDataDirectory, openDesktopLogsDirectory, openDesktopMainLog, openDesktopRuntimeDirectory } from '../../utils/desktop';
 
 const fetcher = (fn) => fn().then((res) => res.data);
@@ -470,6 +471,7 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
 
       <div className="flex items-center gap-2">
         {rightActions}
+        <CloudAccountButton />
         <button
           onClick={() => dispatch({ type: 'TOGGLE_RIGHT_PANEL' })}
           className={cn(

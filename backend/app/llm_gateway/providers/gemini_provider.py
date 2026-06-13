@@ -4,8 +4,8 @@ Compatible with OpenAI API / 兼容 OpenAI API
 """
 
 from typing import List, Dict, Any, Optional
-from openai import AsyncOpenAI
 from app.llm_gateway.providers.base import BaseLLMProvider
+from app.utils.openai_client import create_async_openai_client
 
 
 class GeminiProvider(BaseLLMProvider):
@@ -21,7 +21,7 @@ class GeminiProvider(BaseLLMProvider):
         temperature: float = 0.7
     ):
         super().__init__(api_key, model, max_tokens, temperature)
-        self.client = AsyncOpenAI(api_key=api_key, base_url=self.DEFAULT_BASE_URL)
+        self.client = create_async_openai_client(api_key=api_key, base_url=self.DEFAULT_BASE_URL)
 
     async def chat(
         self,

@@ -15,6 +15,7 @@ const requiredDirs = [
   "desktop/main",
   "desktop/preload",
   "desktop/resources",
+  "desktop/resources/icons",
   "desktop/scripts"
 ];
 
@@ -58,8 +59,8 @@ if (!existsSync(manifestPath)) {
 } else {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 
-  if (!["phase0", "phase1", "phase2", "phase3"].includes(String(manifest.phase || ""))) {
-    fail(`manifest phase must be phase0, phase1, phase2, or phase3, received ${manifest.phase}`);
+  if (!["phase0", "phase1", "phase2", "phase3", "phase4"].includes(String(manifest.phase || ""))) {
+    fail(`manifest phase must be phase0, phase1, phase2, phase3, or phase4, received ${manifest.phase}`);
   }
 
   if (manifest.toolchain?.shell !== "electron") {

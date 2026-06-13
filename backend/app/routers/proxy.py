@@ -8,9 +8,9 @@ Handles direct requests to LLM providers for configuration purposes (e.g., fetch
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
-from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
 from app.utils.logger import get_logger
+from app.utils.openai_client import create_async_openai_client
+from app.utils.anthropic_client import create_async_anthropic_client
 
 logger = get_logger(__name__)
 
@@ -62,6 +62,27 @@ ANTHROPIC_FALLBACK_MODELS: List[str] = [
     "claude-haiku-4-5",
 ]
 
+GENERIC_FALLBACK_MODELS = {
+    "openai": ["gpt-5.4-mini", "gpt-4o", "gpt-4.1"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+    "gemini": ["gemini-2.5-flash", "gemini-3.1-pro-preview"],
+    "qwen": ["qwen3.5-plus", "qwen3-max", "qwen-turbo"],
+    "kimi": ["kimi-k2.5", "kimi-k2-thinking"],
+    "glm": ["glm-5", "glm-4.7"],
+    "grok": ["grok-4", "grok-4.1-fast"],
+    "wenxin": ["ernie-4.5-turbo-32k", "ernie-5.0"],
+    "aistudio": ["ernie-5.0-thinking-preview", "ernie-5.0"],
+    "custom": [],
+}
+
+
+def _fallback_models_for_provider(provider: str) -> List[str]:
+    normalized = str(provider or "").strip().lower()
+    if normalized == "anthropic":
+        return ANTHROPIC_FALLBACK_MODELS
+    return GENERIC_FALLBACK_MODELS.get(normalized, [])
+
+
 @router.post("/fetch-models")
 async def fetch_models(request: FetchModelsRequest):
     """
@@ -76,10 +97,7 @@ async def fetch_models(request: FetchModelsRequest):
         if provider == "anthropic":
             try:
                 logger.debug("Fetch Models Debug: Provider=anthropic, BaseURL=%s", base_url or "(default)")
-                if base_url:
-                    client = AsyncAnthropic(api_key=request.api_key, base_url=base_url)
-                else:
-                    client = AsyncAnthropic(api_key=request.api_key)
+                client = create_async_anthropic_client(api_key=request.api_key, base_url=base_url)
 
                 paginator = client.models.list(limit=200)
                 model_ids: List[str] = []
@@ -114,9 +132,9 @@ async def fetch_models(request: FetchModelsRequest):
         # Note: Some providers might not implement /v1/models correctly.
         logger.debug("Fetch Models Debug: Provider=%s, BaseURL=%s", provider, base_url)
 
-        client = AsyncOpenAI(
+        client = create_async_openai_client(
             api_key=request.api_key,
-            base_url=base_url
+            base_url=base_url,
         )
 
         models_response = await client.models.list()
@@ -128,8 +146,13 @@ async def fetch_models(request: FetchModelsRequest):
 
     except Exception as e:
         logger.warning("Fetch Models Error: %s", str(e))
+        fallback_models = _fallback_models_for_provider(request.provider)
+        if fallback_models:
+            return {
+                "models": fallback_models,
+                "warning": f"Model list fetch failed, returning built-in fallback. Reason: {str(e)}",
+            }
         detail = str(e)
-        # Extract status code from provider SDK exceptions when available
         status_code = getattr(e, 'status_code', None) or 400
         raise HTTPException(status_code=status_code, detail=detail)
 
@@ -148,10 +171,7 @@ async def test_model(request: TestModelRequest):
         base_url = (request.base_url or "").strip() or _default_base_url_for_provider(provider)
 
         if provider == "anthropic":
-            if base_url:
-                client = AsyncAnthropic(api_key=request.api_key, base_url=base_url)
-            else:
-                client = AsyncAnthropic(api_key=request.api_key)
+            client = create_async_anthropic_client(api_key=request.api_key, base_url=base_url)
             response = await client.messages.create(
                 model=model,
                 max_tokens=16,
@@ -164,7 +184,7 @@ async def test_model(request: TestModelRequest):
                 content = getattr(first, "text", "") or ""
             return {"success": True, "provider": provider, "model": model, "message": content or "OK"}
 
-        client = AsyncOpenAI(api_key=request.api_key, base_url=base_url)
+        client = create_async_openai_client(api_key=request.api_key, base_url=base_url)
         try:
             response = await client.chat.completions.create(
                 model=model,
