@@ -25,6 +25,7 @@ from typing import List, Set, Dict, Optional
 _jieba_available = False
 try:
     import jieba
+
     jieba.setLogLevel(jieba.logging.INFO)  # 减少日志输出 / Reduce logging
     _jieba_available = True
 except ImportError:
@@ -32,40 +33,213 @@ except ImportError:
 
 
 # 中文字符范围 / CJK character ranges
-_CJK_PATTERN = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf]+')
+_CJK_PATTERN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]+")
 # 英文单词 / English words
-_WORD_PATTERN = re.compile(r'[a-zA-Z]+')
+_WORD_PATTERN = re.compile(r"[a-zA-Z]+")
 # 数字 / Numbers
-_NUMBER_PATTERN = re.compile(r'\d+')
+_NUMBER_PATTERN = re.compile(r"\d+")
 
 
 # 常见中文停用词 / Common Chinese stopwords
-_CHINESE_STOPWORDS = frozenset([
-    "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都", "一", "一个",
-    "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好",
-    "自己", "这", "那", "他", "她", "它", "们", "这个", "那个", "什么", "怎么",
-    "为什么", "哪", "哪里", "哪个", "谁", "多少", "几", "如何", "为", "与", "及",
-    "或", "但", "而", "因为", "所以", "如果", "虽然", "但是", "然后", "之后",
-    "之前", "可以", "能", "会", "应该", "必须", "需要", "想", "要", "让", "把",
-    "被", "给", "从", "向", "对", "于", "以", "等", "等等", "还", "又", "再",
-])
+_CHINESE_STOPWORDS = frozenset(
+    [
+        "的",
+        "了",
+        "是",
+        "在",
+        "我",
+        "有",
+        "和",
+        "就",
+        "不",
+        "人",
+        "都",
+        "一",
+        "一个",
+        "上",
+        "也",
+        "很",
+        "到",
+        "说",
+        "要",
+        "去",
+        "你",
+        "会",
+        "着",
+        "没有",
+        "看",
+        "好",
+        "自己",
+        "这",
+        "那",
+        "他",
+        "她",
+        "它",
+        "们",
+        "这个",
+        "那个",
+        "什么",
+        "怎么",
+        "为什么",
+        "哪",
+        "哪里",
+        "哪个",
+        "谁",
+        "多少",
+        "几",
+        "如何",
+        "为",
+        "与",
+        "及",
+        "或",
+        "但",
+        "而",
+        "因为",
+        "所以",
+        "如果",
+        "虽然",
+        "但是",
+        "然后",
+        "之后",
+        "之前",
+        "可以",
+        "能",
+        "会",
+        "应该",
+        "必须",
+        "需要",
+        "想",
+        "要",
+        "让",
+        "把",
+        "被",
+        "给",
+        "从",
+        "向",
+        "对",
+        "于",
+        "以",
+        "等",
+        "等等",
+        "还",
+        "又",
+        "再",
+    ]
+)
 
 # 英文停用词 / Common English stopwords
-_ENGLISH_STOPWORDS = frozenset([
-    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "must", "shall", "can", "need", "dare",
-    "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
-    "into", "through", "during", "before", "after", "above", "below",
-    "between", "under", "again", "further", "then", "once", "here",
-    "there", "when", "where", "why", "how", "all", "each", "few",
-    "more", "most", "other", "some", "such", "no", "nor", "not",
-    "only", "own", "same", "so", "than", "too", "very", "just",
-    "and", "but", "if", "or", "because", "until", "while", "this",
-    "that", "these", "those", "i", "me", "my", "myself", "we", "our",
-    "you", "your", "he", "him", "his", "she", "her", "it", "its",
-    "they", "them", "their", "what", "which", "who", "whom",
-])
+_ENGLISH_STOPWORDS = frozenset(
+    [
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "must",
+        "shall",
+        "can",
+        "need",
+        "dare",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "and",
+        "but",
+        "if",
+        "or",
+        "because",
+        "until",
+        "while",
+        "this",
+        "that",
+        "these",
+        "those",
+        "i",
+        "me",
+        "my",
+        "myself",
+        "we",
+        "our",
+        "you",
+        "your",
+        "he",
+        "him",
+        "his",
+        "she",
+        "her",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "what",
+        "which",
+        "who",
+        "whom",
+    ]
+)
 
 
 def tokenize(text: str, remove_stopwords: bool = True) -> List[str]:
@@ -156,12 +330,12 @@ def _simple_cjk_tokenize(text: str) -> List[str]:
 
     # 2-gram
     for i in range(len(text) - 1):
-        tokens.append(text[i:i+2])
+        tokens.append(text[i : i + 2])
 
     # 3-gram（如果文本足够长）
     if len(text) >= 3:
         for i in range(len(text) - 2):
-            tokens.append(text[i:i+3])
+            tokens.append(text[i : i + 3])
 
     # 也保留原始文本作为一个 token（如果不太长）
     if len(text) <= 6:

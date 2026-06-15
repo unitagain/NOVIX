@@ -82,7 +82,9 @@ async def test_edit_suggest_returns_user_facing_error_when_revision_unchanged(mo
         async def ensure_memory_pack(self, **kwargs):
             return {"summary": "cached"}
 
-    monkeypatch.setattr(session_router, "get_orchestrator", lambda project_id, request_language=None: FakeOrchestrator())
+    monkeypatch.setattr(
+        session_router, "get_orchestrator", lambda project_id, request_language=None: FakeOrchestrator()
+    )
 
     response = await client.post(
         "/projects/demo/session/edit-suggest",

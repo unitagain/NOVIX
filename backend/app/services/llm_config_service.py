@@ -88,7 +88,7 @@ class LLMConfigService:
         if not path.exists():
             return default
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             logger.error("Error loading %s: %s", path, e)
@@ -97,7 +97,7 @@ class LLMConfigService:
     def _save_json(self, path: Path, data: Any):
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             try:
                 os.replace(tmp_path, path)
@@ -113,6 +113,7 @@ class LLMConfigService:
                 for attempt in range(4):
                     try:
                         import time
+
                         time.sleep(0.05 * (attempt + 1))
                         os.replace(tmp_path, path)
                         break
@@ -120,7 +121,7 @@ class LLMConfigService:
                         last_exc = retry_exc
                 else:
                     logger.warning("Atomic replace failed, falling back to direct write: %s", last_exc)
-                    with open(path, 'w', encoding='utf-8') as f:
+                    with open(path, "w", encoding="utf-8") as f:
                         json.dump(data, f, indent=2, ensure_ascii=False)
         finally:
             try:
@@ -244,7 +245,7 @@ class LLMConfigService:
         profiles = self.get_profiles()
         profiles = [p for p in profiles if p["id"] != profile_id]
         self._save_json(self.profiles_path, profiles)
-        
+
         # Also clean up assignments
         assignments = self.get_assignments()
         changed = False
@@ -277,7 +278,7 @@ class LLMConfigService:
 
         logger.info("Migrating legacy configuration...")
         new_profiles = []
-        
+
         # Helper to check if a key is real
         def is_real_key(val):
             return val and not str(val).startswith("sk-your") and not str(val).startswith("your-")
@@ -285,77 +286,84 @@ class LLMConfigService:
         # OpenAI
         openai_key = app_config.settings.openai_api_key
         if is_real_key(openai_key):
-            new_profiles.append({
-                "id": str(uuid.uuid4()),
-                "name": "Legacy OpenAI",
-                "provider": "openai",
-                "api_key": openai_key,
-                "model": app_config.settings.openai_model or "gpt-4o",
-                "temperature": 0.7
-            })
+            new_profiles.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": "Legacy OpenAI",
+                    "provider": "openai",
+                    "api_key": openai_key,
+                    "model": app_config.settings.openai_model or "gpt-4o",
+                    "temperature": 0.7,
+                }
+            )
 
         # Anthropic
         ant_key = app_config.settings.anthropic_api_key
         if is_real_key(ant_key):
-            new_profiles.append({
-                "id": str(uuid.uuid4()),
-                "name": "Legacy Anthropic",
-                "provider": "anthropic",
-                "api_key": ant_key,
-                "model": app_config.settings.anthropic_model or "claude-3-5-sonnet-20241022",
-                "temperature": 0.7
-            })
+            new_profiles.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": "Legacy Anthropic",
+                    "provider": "anthropic",
+                    "api_key": ant_key,
+                    "model": app_config.settings.anthropic_model or "claude-3-5-sonnet-20241022",
+                    "temperature": 0.7,
+                }
+            )
 
         # Custom
         custom_url = app_config.settings.custom_base_url
         if custom_url:
-            new_profiles.append({
-                "id": str(uuid.uuid4()),
-                "name": "Legacy Custom/SiliconFlow",
-                "provider": "custom",
-                "api_key": app_config.settings.custom_api_key,
-                "base_url": custom_url,
-                "model": app_config.settings.custom_model_name or "default-model",
-                "temperature": 0.7
-            })
+            new_profiles.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": "Legacy Custom/SiliconFlow",
+                    "provider": "custom",
+                    "api_key": app_config.settings.custom_api_key,
+                    "base_url": custom_url,
+                    "model": app_config.settings.custom_model_name or "default-model",
+                    "temperature": 0.7,
+                }
+            )
 
         # DeepSeek
         deepseek_key = app_config.settings.deepseek_api_key
         if is_real_key(deepseek_key):
-            new_profiles.append({
-                "id": str(uuid.uuid4()),
-                "name": "Legacy DeepSeek",
-                "provider": "deepseek",
-                "api_key": deepseek_key,
-                "model": app_config.settings.deepseek_model or "deepseek-chat",
-                "temperature": 0.7
-            })
+            new_profiles.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": "Legacy DeepSeek",
+                    "provider": "deepseek",
+                    "api_key": deepseek_key,
+                    "model": app_config.settings.deepseek_model or "deepseek-chat",
+                    "temperature": 0.7,
+                }
+            )
 
         # Gemini
         gemini_key = app_config.settings.gemini_api_key
         if is_real_key(gemini_key):
-            new_profiles.append({
-                "id": str(uuid.uuid4()),
-                "name": "Legacy Gemini",
-                "provider": "gemini",
-                "api_key": gemini_key,
-                "model": app_config.settings.gemini_model or "gemini-2.5-flash",
-                "temperature": 0.7
-            })
+            new_profiles.append(
+                {
+                    "id": str(uuid.uuid4()),
+                    "name": "Legacy Gemini",
+                    "provider": "gemini",
+                    "api_key": gemini_key,
+                    "model": app_config.settings.gemini_model or "gemini-2.5-flash",
+                    "temperature": 0.7,
+                }
+            )
 
         if new_profiles:
             self._save_json(self.profiles_path, new_profiles)
-            
+
             # Setup default assignments
             # Assume the first valid profile is the default
             default_id = new_profiles[0]["id"]
-            assignments = {
-                "archivist": default_id,
-                "writer": default_id,
-                "editor": default_id
-            }
+            assignments = {"archivist": default_id, "writer": default_id, "editor": default_id}
             self._save_json(self.assignments_path, assignments)
             logger.info("Migrated %s profiles", len(new_profiles))
+
 
 # Global instance
 llm_config_service = LLMConfigService()

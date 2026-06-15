@@ -271,6 +271,7 @@ class AnalysisMixin:
                 bindings_result = {"bindings_built": False}
                 try:
                     from app.services.chapter_binding_service import chapter_binding_service
+
                     await emit_progress(f"同步绑定中 ({completed}/{total})：{chapter}")
                     focus_characters: List[str] = []
                     try:
@@ -375,7 +376,9 @@ class AnalysisMixin:
                 results.append({"chapter": "", "success": False, "error": "Missing chapter"})
                 continue
             try:
-                volume_ids_to_refresh.append(self._resolve_volume_id_from_analysis(str(chapter), analysis if isinstance(analysis, dict) else {}))
+                volume_ids_to_refresh.append(
+                    self._resolve_volume_id_from_analysis(str(chapter), analysis if isinstance(analysis, dict) else {})
+                )
                 result = await self.save_analysis(
                     project_id=project_id,
                     chapter=chapter,

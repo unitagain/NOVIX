@@ -577,14 +577,28 @@ class EvidenceIndexService:
 
         description = str(data.get("description") or "").strip()
         items.extend(_attach_stars(_build_card_lines(name, "character", "description", description, entities), stars))
-        items.extend(_attach_stars(_build_card_lines(name, "character", "identity", data.get("identity"), entities), stars))
-        items.extend(_attach_stars(_build_card_lines(name, "character", "appearance", data.get("appearance"), entities), stars))
-        items.extend(_attach_stars(_build_card_lines(name, "character", "motivation", data.get("motivation"), entities), stars))
+        items.extend(
+            _attach_stars(_build_card_lines(name, "character", "identity", data.get("identity"), entities), stars)
+        )
+        items.extend(
+            _attach_stars(_build_card_lines(name, "character", "appearance", data.get("appearance"), entities), stars)
+        )
+        items.extend(
+            _attach_stars(_build_card_lines(name, "character", "motivation", data.get("motivation"), entities), stars)
+        )
         items.extend(_attach_stars(_build_card_list(name, "character", "aliases", aliases, entities), stars))
-        items.extend(_attach_stars(_build_card_list(name, "character", "personality", data.get("personality"), entities), stars))
-        items.extend(_attach_stars(_build_card_lines(name, "character", "speech_pattern", data.get("speech_pattern"), entities), stars))
+        items.extend(
+            _attach_stars(_build_card_list(name, "character", "personality", data.get("personality"), entities), stars)
+        )
+        items.extend(
+            _attach_stars(
+                _build_card_lines(name, "character", "speech_pattern", data.get("speech_pattern"), entities), stars
+            )
+        )
         items.extend(_attach_stars(_build_card_relationships(name, data.get("relationships"), entities), stars))
-        items.extend(_attach_stars(_build_card_list(name, "character", "boundaries", data.get("boundaries"), entities), stars))
+        items.extend(
+            _attach_stars(_build_card_list(name, "character", "boundaries", data.get("boundaries"), entities), stars)
+        )
         items.extend(_attach_stars(_build_card_lines(name, "character", "arc", data.get("arc"), entities), stars))
         return items
 

@@ -39,14 +39,15 @@ class BudgetAllocation:
         output_reserve (int): 输出预留 / Reserved tokens for model output.
         remaining (int): 剩余可用token / Remaining available tokens (default 0).
     """
-    total_available: int          # 总可用 tokens
-    system_rules: int             # 系统规则预算
-    cards: int                    # 卡片预算
-    canon: int                    # 事实表预算
-    summaries: int                # 摘要预算
-    current_draft: int            # 当前草稿预算
-    output_reserve: int           # 输出预留
-    remaining: int = 0            # 剩余可用
+
+    total_available: int  # 总可用 tokens
+    system_rules: int  # 系统规则预算
+    cards: int  # 卡片预算
+    canon: int  # 事实表预算
+    summaries: int  # 摘要预算
+    current_draft: int  # 当前草稿预算
+    output_reserve: int  # 输出预留
+    remaining: int = 0  # 剩余可用
 
     def to_dict(self) -> Dict[str, int]:
         """转换为字典 / Convert to dictionary format."""
@@ -75,6 +76,7 @@ class BudgetUsage:
         used (int): 已使用的token数 / Tokens used so far.
         items_count (int): 项目数量 / Number of items in this category (default 0).
     """
+
     category: str
     allocated: int
     used: int
@@ -126,7 +128,13 @@ class ContextBudgetManager:
         ratios (Dict[str, float]): 各类别的预算比例 / Budget ratios for each category.
     """
 
-    def __init__(self, model_name: Optional[str] = None, max_output_tokens: int = 8000, max_context_tokens: int = 0, provider: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        max_output_tokens: int = 8000,
+        max_context_tokens: int = 0,
+        provider: Optional[str] = None,
+    ):
         """
         初始化预算管理器 / Initialize the budget manager.
 
@@ -200,8 +208,13 @@ class ContextBudgetManager:
         )
 
         # 计算剩余
-        used = (allocation.system_rules + allocation.cards + allocation.canon +
-                allocation.summaries + allocation.current_draft)
+        used = (
+            allocation.system_rules
+            + allocation.cards
+            + allocation.canon
+            + allocation.summaries
+            + allocation.current_draft
+        )
         allocation.remaining = total - used
 
         return allocation

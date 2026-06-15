@@ -139,7 +139,11 @@ class WorkingMemoryService:
             gaps.append(
                 {
                     "kind": "detail_gap",
-                    "text": "本章涉及的主要角色有哪些" if lang == "zh" else "Who are the main characters involved in this chapter?",
+                    "text": (
+                        "本章涉及的主要角色有哪些"
+                        if lang == "zh"
+                        else "Who are the main characters involved in this chapter?"
+                    ),
                     "queries": ["角色 人物 参与"] if lang == "zh" else ["main characters", "participants", "cast"],
                     "ask_user": True,
                 }
@@ -149,8 +153,16 @@ class WorkingMemoryService:
                 gaps.append(
                     {
                         "kind": "character_change",
-                        "text": f"{name} 在本章的动机/状态是否有变化" if lang == "zh" else f"Does {name}'s motivation/state change in this chapter?",
-                        "queries": [f"{name} 动机", f"{name} 状态"] if lang == "zh" else [f"{name} motivation", f"{name} current state"],
+                        "text": (
+                            f"{name} 在本章的动机/状态是否有变化"
+                            if lang == "zh"
+                            else f"Does {name}'s motivation/state change in this chapter?"
+                        ),
+                        "queries": (
+                            [f"{name} 动机", f"{name} 状态"]
+                            if lang == "zh"
+                            else [f"{name} motivation", f"{name} current state"]
+                        ),
                         "ask_user": True,
                         "entity_name": name,
                     }
@@ -161,7 +173,11 @@ class WorkingMemoryService:
             gaps.append(
                 {
                     "kind": "detail_gap",
-                    "text": "本章时间/地点的具体边界是什么" if lang == "zh" else "What are the concrete boundaries of time and place in this chapter?",
+                    "text": (
+                        "本章时间/地点的具体边界是什么"
+                        if lang == "zh"
+                        else "What are the concrete boundaries of time and place in this chapter?"
+                    ),
                     "queries": ["时间 地点 场景"] if lang == "zh" else ["time", "location", "setting"],
                     "ask_user": True,
                 }
@@ -172,7 +188,11 @@ class WorkingMemoryService:
             gaps.append(
                 {
                     "kind": "plot_point",
-                    "text": "本章需遵守的世界规则/禁忌/代价有哪些" if lang == "zh" else "Which world rules/taboos/costs must be respected in this chapter?",
+                    "text": (
+                        "本章需遵守的世界规则/禁忌/代价有哪些"
+                        if lang == "zh"
+                        else "Which world rules/taboos/costs must be respected in this chapter?"
+                    ),
                     "queries": ["规则 禁忌 代价 限制"] if lang == "zh" else ["rules", "taboos", "cost", "constraints"],
                     "ask_user": True,
                 }
@@ -183,7 +203,11 @@ class WorkingMemoryService:
             gaps.append(
                 {
                     "kind": "detail_gap",
-                    "text": "与本章目标直接相关的已确立事实有哪些" if lang == "zh" else "Which established facts directly matter for this chapter goal?",
+                    "text": (
+                        "与本章目标直接相关的已确立事实有哪些"
+                        if lang == "zh"
+                        else "Which established facts directly matter for this chapter goal?"
+                    ),
                     "queries": ["关键事实 已确立事实"] if lang == "zh" else ["key facts", "established facts"],
                     "ask_user": True,
                 }
@@ -286,7 +310,9 @@ class WorkingMemoryService:
         )
         extra_list = [str(q).strip() for q in (extra_queries or []) if str(q).strip()]
         if missing_mentions:
-            extra_list = list(dict.fromkeys(extra_list + [str(m).strip() for m in missing_mentions if str(m).strip()]))[:8]
+            extra_list = list(dict.fromkeys(extra_list + [str(m).strip() for m in missing_mentions if str(m).strip()]))[
+                :8
+            ]
         if extra_list:
             gaps.append(
                 {
@@ -557,7 +583,9 @@ class WorkingMemoryService:
                 continue
             if lang == "en":
                 q = str(text).strip()
-                starts_like_question = bool(re.match(r"^(what|who|which|where|when|why|how|does|do|is|are|can|should)\b", q, re.I))
+                starts_like_question = bool(
+                    re.match(r"^(what|who|which|where|when|why|how|does|do|is|are|can|should)\b", q, re.I)
+                )
                 if starts_like_question or "?" in q:
                     question = q
                     if not question.endswith("?"):
@@ -694,7 +722,9 @@ class WorkingMemoryService:
                     key=lambda x: (_focus_score_text(str(x.get("text") or ""), focus_terms), _safe_score(x)),
                     reverse=True,
                 )
-                focused = [item for item in candidates if _focus_score_text(str(item.get("text") or ""), focus_terms) > 0]
+                focused = [
+                    item for item in candidates if _focus_score_text(str(item.get("text") or ""), focus_terms) > 0
+                ]
                 candidates = focused or candidates
             else:
                 if t in {"world_entity", "character"}:
@@ -722,7 +752,6 @@ class WorkingMemoryService:
             lines.append("- 无")
 
         return "\n".join(lines)
-
 
 
 working_memory_service = WorkingMemoryService()

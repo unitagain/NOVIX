@@ -181,4 +181,3 @@ def _extract_json_segments(text: str) -> Iterable[str]:
                 if not stack:
                     yield text[start : idx + 1]
                     break
-

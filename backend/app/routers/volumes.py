@@ -106,6 +106,7 @@ async def get_volume_stats(project_id: str, volume_id: str):
 
 class RefreshSummaryRequest(BaseModel):
     """刷新卷摘要请求"""
+
     volume_ids: List[str]
 
 

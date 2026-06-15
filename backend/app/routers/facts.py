@@ -102,12 +102,12 @@ def _display_fact_id(fact_id: str, index: int) -> str:
         return f"F{index + 1:02d}"
     return cleaned
 
+
 def _normalize_text(text_value: str) -> str:
     if not text_value:
         return ""
     cleaned = re.sub(r"\s+", "", str(text_value)).lower()
     return cleaned
-
 
 
 def _normalize_summary_fact(
@@ -157,11 +157,7 @@ async def _load_legacy_summaries(
 
         chapter = data.get("chapter") or chapter_id
         chapter = _normalize_chapter_id(chapter)
-        volume_id = (
-            data.get("volume_id")
-            or ChapterIDValidator.extract_volume_id(chapter)
-            or "V1"
-        )
+        volume_id = data.get("volume_id") or ChapterIDValidator.extract_volume_id(chapter) or "V1"
         title = data.get("title") or data.get("chapter_title") or data.get("name") or ""
         brief_summary = data.get("brief_summary") or data.get("summary") or data.get("brief") or ""
         new_facts = data.get("new_facts") or data.get("facts") or []
@@ -288,14 +284,10 @@ async def get_facts_tree(project_id: str) -> Dict[str, Any]:
                 }
             )
 
-    sorted_volumes = [
-        volume_map[vid] for vid in sorted(volume_map.keys(), key=_volume_sort_key)
-    ]
+    sorted_volumes = [volume_map[vid] for vid in sorted(volume_map.keys(), key=_volume_sort_key)]
     for volume in sorted_volumes:
         chapters = volume.get("chapters", [])
         chapters.sort(key=lambda item: ChapterIDValidator.calculate_weight(item.get("id", "")))
         volume["chapters"] = chapters
 
     return {"volumes": sorted_volumes}
-
-

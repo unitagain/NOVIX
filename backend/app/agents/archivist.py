@@ -84,15 +84,75 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
     )
     # Keywords indicating high-value facts for ranking
     _FACT_DENSITY_HINTS = (
-        "规则", "禁忌", "代价", "必须", "不允许", "禁止", "承诺", "约定", "隐瞒", "秘密", "交易", "交换", "契约",
-        "决定", "发现", "暴露", "背叛", "威胁", "受伤", "病", "死亡", "失踪", "获得", "丢失", "准备", "购买",
-        "居住", "搬", "上学", "教育", "监护", "占有", "依赖", "恐惧", "愧疚", "同情", "惆怅",
+        "规则",
+        "禁忌",
+        "代价",
+        "必须",
+        "不允许",
+        "禁止",
+        "承诺",
+        "约定",
+        "隐瞒",
+        "秘密",
+        "交易",
+        "交换",
+        "契约",
+        "决定",
+        "发现",
+        "暴露",
+        "背叛",
+        "威胁",
+        "受伤",
+        "病",
+        "死亡",
+        "失踪",
+        "获得",
+        "丢失",
+        "准备",
+        "购买",
+        "居住",
+        "搬",
+        "上学",
+        "教育",
+        "监护",
+        "占有",
+        "依赖",
+        "恐惧",
+        "愧疚",
+        "同情",
+        "惆怅",
     )
     _FACT_DENSITY_HINTS_EN = (
-        "rule", "taboo", "cost", "must", "forbidden", "promise", "agreement", "secret", "deal",
-        "betrayal", "threat", "injured", "dead", "missing", "obtained", "lost", "fear", "guilt",
-        "decided", "discovered", "revealed", "contract", "obligation", "cannot", "prohibited",
-        "owns", "lives", "moved", "dependent", "responsible",
+        "rule",
+        "taboo",
+        "cost",
+        "must",
+        "forbidden",
+        "promise",
+        "agreement",
+        "secret",
+        "deal",
+        "betrayal",
+        "threat",
+        "injured",
+        "dead",
+        "missing",
+        "obtained",
+        "lost",
+        "fear",
+        "guilt",
+        "decided",
+        "discovered",
+        "revealed",
+        "contract",
+        "obligation",
+        "cannot",
+        "prohibited",
+        "owns",
+        "lives",
+        "moved",
+        "dependent",
+        "responsible",
     )
 
     def _normalize_fact_statement(self, statement: str) -> str:
@@ -278,6 +338,7 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
 
         try:
             from app.services.chapter_binding_service import chapter_binding_service
+
             seed_names = list(dict.fromkeys([*instruction_characters, *instruction_worlds]))
             bound_chapters = await chapter_binding_service.get_chapters_for_entities(
                 project_id,
@@ -632,9 +693,7 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
         remaining = []
 
         for fact in all_facts:
-            fact_chapter = normalize_chapter_id(
-                fact.get("introduced_in") or fact.get("source") or ""
-            )
+            fact_chapter = normalize_chapter_id(fact.get("introduced_in") or fact.get("source") or "")
             if previous_same_volume and fact_chapter == previous_same_volume:
                 selected.append(fact)
             else:
@@ -644,9 +703,7 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
             scored: List[Tuple[int, Dict[str, Any]]] = []
             for fact in remaining:
                 statement = str(fact.get("statement") or fact.get("content") or "")
-                fact_chapter = normalize_chapter_id(
-                    fact.get("introduced_in") or fact.get("source") or ""
-                )
+                fact_chapter = normalize_chapter_id(fact.get("introduced_in") or fact.get("source") or "")
                 dist = ChapterIDValidator.calculate_distance(chapter_id, fact_chapter) if fact_chapter else 999
                 recency = max(0, 10 - min(dist, 10))
                 match = self._score_text_match(statement, keywords) * 2
@@ -698,8 +755,6 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
             return ""
         style_text = getattr(style_card, "style", "") or ""
         return style_text.strip()
-
-
 
     async def detect_setting_changes(self, draft_content: str, existing_card_names: List[str]) -> List[CardProposal]:
         """Detect potential new setting cards with pure heuristics (no LLM)."""

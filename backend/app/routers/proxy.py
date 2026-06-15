@@ -16,11 +16,12 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/proxy", tags=["proxy"])
 
+
 class FetchModelsRequest(BaseModel):
     provider: str
     api_key: str
     base_url: Optional[str] = None
-    
+
 
 class TestModelRequest(BaseModel):
     provider: str
@@ -153,7 +154,7 @@ async def fetch_models(request: FetchModelsRequest):
                 "warning": f"Model list fetch failed, returning built-in fallback. Reason: {str(e)}",
             }
         detail = str(e)
-        status_code = getattr(e, 'status_code', None) or 400
+        status_code = getattr(e, "status_code", None) or 400
         raise HTTPException(status_code=status_code, detail=detail)
 
 

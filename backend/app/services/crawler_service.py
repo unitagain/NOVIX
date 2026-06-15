@@ -373,9 +373,7 @@ class CrawlerService:
                 # 内容/预览用于建卡：仍做清理，减少噪声并把高价值信息置顶。
                 soup = BeautifulSoup(html_content, "lxml")
                 content_root = soup.find("div", class_="mw-parser-output") or soup
-                for unwanted in content_root.find_all(
-                    ["nav", "aside", "footer", "script", "style", "noscript"]
-                ):
+                for unwanted in content_root.find_all(["nav", "aside", "footer", "script", "style", "noscript"]):
                     unwanted.decompose()
                 for cls in ["navbox", "toc", "mw-editsection", "reference", "reflist", "catlinks"]:
                     for elem in content_root.find_all(class_=re.compile(cls, re.I)):
@@ -575,20 +573,49 @@ class CrawlerService:
             parts.append("Summary:\n" + summary[:1600].strip())
 
         if infobox:
+
             def infobox_rank(key: str) -> int:
                 k = str(key or "").strip().lower()
                 if not k:
                     return 99
                 # Prefer stable identity signals; avoid credits/meta.
-                if any(x in k for x in ["created by", "designed by", "illustrated by", "voiced by", "voice actor", "portrayed by", "played by"]):
+                if any(
+                    x in k
+                    for x in [
+                        "created by",
+                        "designed by",
+                        "illustrated by",
+                        "voiced by",
+                        "voice actor",
+                        "portrayed by",
+                        "played by",
+                    ]
+                ):
                     return 80
                 if any(x in k for x in ["first appearance", "first game", "publisher", "developer", "composer"]):
                     return 70
-                if any(x in k for x in ["name", "identity", "real name", "full name", "alias", "aliases", "nickname", "codename"]):
+                if any(
+                    x in k
+                    for x in ["name", "identity", "real name", "full name", "alias", "aliases", "nickname", "codename"]
+                ):
                     return 1
                 if any(x in k for x in ["occupation", "role", "title", "profession"]):
                     return 2
-                if any(x in k for x in ["affiliation", "organization", "faction", "team", "species", "race", "gender", "age", "height", "weight"]):
+                if any(
+                    x in k
+                    for x in [
+                        "affiliation",
+                        "organization",
+                        "faction",
+                        "team",
+                        "species",
+                        "race",
+                        "gender",
+                        "age",
+                        "height",
+                        "weight",
+                    ]
+                ):
                     return 3
                 if any(x in k for x in ["status", "alignment", "origin", "nationality"]):
                     return 4
@@ -834,7 +861,11 @@ class CrawlerService:
         parsed_check = urlparse(str(url or ""))
         if self._is_moegirl_domain(parsed_check.netloc):
             content_root = soup.find("div", class_="mw-parser-output") or soup.find("body")
-            links = self._extract_moegirl_outgoing_links_from_html(content_root, url, cap=self.MOEGIRL_MAX_LINKS) if content_root else []
+            links = (
+                self._extract_moegirl_outgoing_links_from_html(content_root, url, cap=self.MOEGIRL_MAX_LINKS)
+                if content_root
+                else []
+            )
         else:
             links = self._extract_links(soup, url)
 
@@ -1032,7 +1063,9 @@ class CrawlerService:
         except Exception as exc:
             return {"success": False, "url": url, "error": str(exc)}
 
-    async def _scrape_single_async(self, session: aiohttp.ClientSession, url: str, semaphore: asyncio.Semaphore) -> Dict[str, Any]:
+    async def _scrape_single_async(
+        self, session: aiohttp.ClientSession, url: str, semaphore: asyncio.Semaphore
+    ) -> Dict[str, Any]:
         """Async scrape a single page and use WikiStructuredParser"""
         async with semaphore:
             try:

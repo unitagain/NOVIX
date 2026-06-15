@@ -15,7 +15,6 @@ from pathlib import Path
 
 from app.config import get_settings
 
-
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -64,4 +63,3 @@ def get_logger(name: str) -> logging.Logger:
         logger.addHandler(handler)
 
     return logger
-

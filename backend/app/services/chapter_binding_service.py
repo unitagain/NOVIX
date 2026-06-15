@@ -176,9 +176,7 @@ class ChapterBindingService:
             "world_entities": world_hits,
             "world_rules": rule_hits,
             "sources": char_sources + world_sources + rule_sources,
-            "draft_path": draft_path.relative_to(
-                self.draft_storage.get_project_path(project_id)
-            ).as_posix(),
+            "draft_path": draft_path.relative_to(self.draft_storage.get_project_path(project_id)).as_posix(),
             "built_at": time.time(),
         }
         await self.binding_storage.write_bindings(project_id, canonical, payload)
@@ -344,19 +342,86 @@ class ChapterBindingService:
             return []
 
         prefix_terms = (
-            "邻居", "同学", "校长", "老师", "学姐", "学长", "同事", "朋友", "闺蜜", "干妈", "干爹", "母亲", "父亲",
-            "哥哥", "姐姐", "弟弟", "妹妹", "妻子", "丈夫",
+            "邻居",
+            "同学",
+            "校长",
+            "老师",
+            "学姐",
+            "学长",
+            "同事",
+            "朋友",
+            "闺蜜",
+            "干妈",
+            "干爹",
+            "母亲",
+            "父亲",
+            "哥哥",
+            "姐姐",
+            "弟弟",
+            "妹妹",
+            "妻子",
+            "丈夫",
         )
         suffix_terms = (
-            "常常", "经常", "总是", "一直", "争抢", "抢走", "保护", "免受", "喜欢", "讨厌", "羡慕", "同情", "惆怅",
-            "儿子", "女儿", "孩子", "宝宝",
+            "常常",
+            "经常",
+            "总是",
+            "一直",
+            "争抢",
+            "抢走",
+            "保护",
+            "免受",
+            "喜欢",
+            "讨厌",
+            "羡慕",
+            "同情",
+            "惆怅",
+            "儿子",
+            "女儿",
+            "孩子",
+            "宝宝",
         )
         # 常见非名字词：避免把“外貌/身材/第一次出场”等误识别为实体。
         non_name_terms = {
-            "第一次", "出场", "外貌", "身材", "可爱", "动人", "美人", "太子", "重点", "色气", "描写", "刻画",
-            "新增", "引出", "众人", "尤其", "完美", "面庞", "吸引", "折服", "母女", "父子", "章节", "指令",
-            "设定", "事实", "摘要", "正文", "角色", "世界观", "文风", "编辑", "主笔", "修改", "扩写",
-            "常常", "经常", "总是", "一直",
+            "第一次",
+            "出场",
+            "外貌",
+            "身材",
+            "可爱",
+            "动人",
+            "美人",
+            "太子",
+            "重点",
+            "色气",
+            "描写",
+            "刻画",
+            "新增",
+            "引出",
+            "众人",
+            "尤其",
+            "完美",
+            "面庞",
+            "吸引",
+            "折服",
+            "母女",
+            "父子",
+            "章节",
+            "指令",
+            "设定",
+            "事实",
+            "摘要",
+            "正文",
+            "角色",
+            "世界观",
+            "文风",
+            "编辑",
+            "主笔",
+            "修改",
+            "扩写",
+            "常常",
+            "经常",
+            "总是",
+            "一直",
         }
 
         def normalize_token(token: str) -> str:
@@ -754,7 +819,7 @@ class ChapterBindingService:
     def _extract_world_entity_name(self, item: Any) -> str:
         text = str(getattr(item, "text", "") or "").strip()
         if text:
-            for sep in [":", "\uFF1A"]:
+            for sep in [":", "\uff1a"]:
                 if sep in text:
                     return text.split(sep)[0].strip()
         source = getattr(item, "source", {}) or {}

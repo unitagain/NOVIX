@@ -115,6 +115,7 @@ class BaseStorage:
             data_dir: 数据根目录，如为None则从配置读取 / Root data directory, None reads from config
         """
         from app.config import settings
+
         raw_data_dir = str(data_dir or settings.data_dir)
         resolved = Path(raw_data_dir)
         if not resolved.is_absolute():
@@ -180,7 +181,7 @@ class BaseStorage:
         tmp_written = False
         try:
             # 写入临时文件 / Write to temp file
-            async with aiofiles.open(tmp_path, 'w', encoding=self.encoding) as f:
+            async with aiofiles.open(tmp_path, "w", encoding=self.encoding) as f:
                 await f.write(content)
             tmp_written = True
             try:
@@ -210,10 +211,13 @@ class BaseStorage:
                         continue
 
                 if tmp_written:
-                    logger.warning("原子替换失败，回退到直接写入 / Atomic replace failed, falling back to direct write: %s", last_exc)
+                    logger.warning(
+                        "原子替换失败，回退到直接写入 / Atomic replace failed, falling back to direct write: %s",
+                        last_exc,
+                    )
                     for attempt in range(3):
                         try:
-                            async with aiofiles.open(file_path, 'w', encoding=self.encoding) as f:
+                            async with aiofiles.open(file_path, "w", encoding=self.encoding) as f:
                                 await f.write(content)
                             break
                         except (PermissionError, OSError) as write_exc:
@@ -255,7 +259,7 @@ class BaseStorage:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        async with aiofiles.open(file_path, 'r', encoding=self.encoding) as f:
+        async with aiofiles.open(file_path, "r", encoding=self.encoding) as f:
             content = await f.read()
             return yaml.load(content, Loader=_SafeCompatLoader)
 
@@ -291,7 +295,7 @@ class BaseStorage:
 
         items = []
         bad_lines = 0
-        async with aiofiles.open(file_path, 'r', encoding=self.encoding) as f:
+        async with aiofiles.open(file_path, "r", encoding=self.encoding) as f:
             async for line in f:
                 line = line.strip()
                 if line:
@@ -321,8 +325,8 @@ class BaseStorage:
 
         file_lock = get_file_lock()
         async with file_lock.lock(file_path):
-            async with aiofiles.open(file_path, 'a', encoding=self.encoding) as f:
-                await f.write(json.dumps(item, ensure_ascii=False) + '\n')
+            async with aiofiles.open(file_path, "a", encoding=self.encoding) as f:
+                await f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     async def write_jsonl(self, file_path: Path, items: list) -> None:
         """
@@ -361,7 +365,7 @@ class BaseStorage:
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
-        async with aiofiles.open(file_path, 'r', encoding=self.encoding) as f:
+        async with aiofiles.open(file_path, "r", encoding=self.encoding) as f:
             return await f.read()
 
     async def write_text(self, file_path: Path, content: str) -> None:

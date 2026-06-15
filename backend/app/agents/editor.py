@@ -28,6 +28,7 @@ from app.utils.version import increment_version
 
 logger = get_logger(__name__)
 
+
 class EditorAgent(BaseAgent):
     """
     编辑智能体。
@@ -44,28 +45,17 @@ class EditorAgent(BaseAgent):
         """返回编辑智能体的系统提示词。"""
         return get_editor_system_prompt(language=self.language)
 
-    async def execute(
-        self,
-        project_id: str,
-        chapter: str,
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def execute(self, project_id: str, chapter: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         执行修订流程并保存新版本草稿。
         """
         draft_version = context.get("draft_version", "v1")
         draft = await self.draft_storage.get_draft(project_id, chapter, draft_version)
         if not draft:
-            return {
-                "success": False,
-                "error": f"Draft {draft_version} not found"
-            }
+            return {"success": False, "error": f"Draft {draft_version} not found"}
         user_feedback = context.get("user_feedback", "")
         if not user_feedback:
-            return {
-                "success": False,
-                "error": "User feedback is required"
-            }
+            return {"success": False, "error": "User feedback is required"}
         style_card = await self.card_storage.get_style_card(project_id)
         rejected_entities = context.get("rejected_entities", [])
         memory_pack = context.get("memory_pack")
@@ -84,14 +74,9 @@ class EditorAgent(BaseAgent):
             version=new_version,
             content=revised_content,
             word_count=word_count,
-            pending_confirmations=[]
+            pending_confirmations=[],
         )
-        return {
-            "success": True,
-            "draft": revised_draft,
-            "version": new_version,
-            "word_count": word_count
-        }
+        return {"success": True, "draft": revised_draft, "version": new_version, "word_count": word_count}
 
     async def _generate_revision_from_feedback(
         self,
@@ -327,14 +312,14 @@ class EditorAgent(BaseAgent):
             return {
                 "start": span["start"],
                 "end": span["end"],
-                "selection_text": text[span["start"]:span["end"]],
+                "selection_text": text[span["start"] : span["end"]],
             }
         if any(key in fb for key in ("开头", "开篇", "第一段")):
             span = spans[0]
             return {
                 "start": span["start"],
                 "end": span["end"],
-                "selection_text": text[span["start"]:span["end"]],
+                "selection_text": text[span["start"] : span["end"]],
             }
 
         match = re.search(r"第\s*(\d{1,3})\s*段", fb)
@@ -345,7 +330,7 @@ class EditorAgent(BaseAgent):
                 return {
                     "start": span["start"],
                     "end": span["end"],
-                    "selection_text": text[span["start"]:span["end"]],
+                    "selection_text": text[span["start"] : span["end"]],
                 }
 
         terms = self._extract_terms(feedback)
@@ -382,7 +367,7 @@ class EditorAgent(BaseAgent):
         blocks: List[Dict[str, Any]] = []
         normalized = normalize_newlines(text or "")
         for idx, span in enumerate(self._iter_paragraph_spans(normalized), start=1):
-            block_text = normalized[span["start"]:span["end"]]
+            block_text = normalized[span["start"] : span["end"]]
             if not block_text.strip():
                 continue
             blocks.append(
@@ -440,9 +425,7 @@ class EditorAgent(BaseAgent):
         start_block = selected[0]
         end_block = selected[-1]
         merged = [
-            block
-            for block in blocks
-            if int(start_block["index"]) <= int(block["index"]) <= int(end_block["index"])
+            block for block in blocks if int(start_block["index"]) <= int(block["index"]) <= int(end_block["index"])
         ]
         start = int(merged[0]["start"])
         end = int(merged[-1]["end"])
@@ -526,8 +509,8 @@ class EditorAgent(BaseAgent):
         if provided and normalize_for_compare(provided) != normalize_for_compare(selected):
             raise ValueError("selection_replace_mismatch")
 
-        prefix_hint = original_norm[max(0, start - 220):start]
-        suffix_hint = original_norm[end:min(len(original_norm), end + 220)]
+        prefix_hint = original_norm[max(0, start - 220) : start]
+        suffix_hint = original_norm[end : min(len(original_norm), end + 220)]
         prompt = editor_selection_replace_prompt(
             selection_text=selected,
             user_feedback=feedback,
@@ -899,6 +882,7 @@ class EditorAgent(BaseAgent):
                     return -1
                 start = pos + len(needle)
             return pos
+
         resolved: List[Dict[str, Any]] = []
         for idx, item in enumerate(raw_ops[:12]):
             if not isinstance(item, dict):
@@ -1058,8 +1042,8 @@ class EditorAgent(BaseAgent):
             )
         if memory_pack:
             context_items.extend(self._format_memory_pack_context(memory_pack))
-        prefix_hint = original[max(0, start - 220):start]
-        suffix_hint = original[end:min(len(original), end + 220)]
+        prefix_hint = original[max(0, start - 220) : start]
+        suffix_hint = original[end : min(len(original), end + 220)]
         prompt = editor_selection_replace_prompt(
             selection_text=sel,
             user_feedback=user_feedback,
@@ -1108,7 +1092,9 @@ class EditorAgent(BaseAgent):
         payload: Any = {}
         if isinstance(memory_pack, dict):
             payload = memory_pack.get("payload") or memory_pack.get("working_memory_payload") or {}
-            if not payload and any(key in memory_pack for key in ("working_memory", "evidence_pack", "unresolved_gaps")):
+            if not payload and any(
+                key in memory_pack for key in ("working_memory", "evidence_pack", "unresolved_gaps")
+            ):
                 payload = memory_pack
         if not isinstance(payload, dict):
             payload = {}
@@ -1140,6 +1126,7 @@ class EditorAgent(BaseAgent):
         evidence_pack = payload.get("evidence_pack") or {}
         evidence_items = evidence_pack.get("items") or []
         if evidence_items:
+
             def _score(item: Dict[str, Any]) -> float:
                 try:
                     return float(item.get("score") or 0)
@@ -1252,4 +1239,3 @@ class EditorAgent(BaseAgent):
             if style_text:
                 context_items.append("文风卡（快照）：\n" + style_text[:800])
         return context_items
-

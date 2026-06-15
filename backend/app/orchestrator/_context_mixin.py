@@ -206,7 +206,9 @@ class ContextMixin:
 
     # ---------- internal helpers ----------
 
-    def _resolve_chapter_goal(self, chapter_goal: str, scene_brief: Optional[SceneBrief], fallback_text: str = "") -> str:
+    def _resolve_chapter_goal(
+        self, chapter_goal: str, scene_brief: Optional[SceneBrief], fallback_text: str = ""
+    ) -> str:
         goal_text = str(chapter_goal or "").strip()
         if not goal_text and scene_brief is not None:
             goal_text = str(getattr(scene_brief, "goal", "") or "").strip()
@@ -251,6 +253,7 @@ class ContextMixin:
         if not working_memory_payload:
             try:
                 from app.services.working_memory_service import working_memory_service
+
                 working_memory_payload = await working_memory_service.prepare(
                     project_id=project_id,
                     chapter=chapter,
@@ -309,10 +312,14 @@ class ContextMixin:
             "built_at": datetime.now(timezone.utc).isoformat(),
             "source": source,
             "chapter_goal": chapter_goal,
-            "scene_brief": {
-                "title": str(getattr(scene_brief, "title", "") or ""),
-                "goal": str(getattr(scene_brief, "goal", "") or ""),
-            } if scene_brief is not None else {},
+            "scene_brief": (
+                {
+                    "title": str(getattr(scene_brief, "title", "") or ""),
+                    "goal": str(getattr(scene_brief, "goal", "") or ""),
+                }
+                if scene_brief is not None
+                else {}
+            ),
             "card_snapshot": card_snapshot,
             "chapter_digest": chapter_digest or {},
             "payload": working_memory_payload,
@@ -373,7 +380,7 @@ class ContextMixin:
 
     async def _build_card_snapshot(self, project_id: str, working_memory_payload: Dict[str, Any]) -> Dict[str, Any]:
         """Build compact snapshots of relevant cards to reduce editor hallucinations."""
-        evidence_items = ((working_memory_payload.get("evidence_pack") or {}).get("items") or [])
+        evidence_items = (working_memory_payload.get("evidence_pack") or {}).get("items") or []
         seed_entities = working_memory_payload.get("seed_entities") or []
 
         card_names: List[str] = []
@@ -537,13 +544,12 @@ class ContextMixin:
         memory_pack_source: str = "writer",
     ) -> Dict[str, Any]:
         """Prepare context for writer and return trace info."""
-        critical_items = await self.select_engine.deterministic_select(
-            project_id, "writer", self.storage_adapter
-        )
+        critical_items = await self.select_engine.deterministic_select(project_id, "writer", self.storage_adapter)
 
         query = f"{scene_brief.title} {scene_brief.goal}" if scene_brief else chapter_goal
         try:
             from app.services.chapter_binding_service import chapter_binding_service
+
             seeds = await chapter_binding_service.get_seed_entities(
                 project_id,
                 chapter,
@@ -561,15 +567,18 @@ class ContextMixin:
             total_chapters = len(all_chapters) if all_chapters else 0
         except Exception:
             total_chapters = 0
-        dynamic_items = await self.select_engine.retrieval_select(
-            project_id=project_id,
-            query=query,
-            item_types=["character", "world", "fact", "text_chunk"],
-            storage=self.storage_adapter,
-            top_k=10,
-            current_chapter=chapter,
-            total_chapters=total_chapters,
-        ) or []
+        dynamic_items = (
+            await self.select_engine.retrieval_select(
+                project_id=project_id,
+                query=query,
+                item_types=["character", "world", "fact", "text_chunk"],
+                storage=self.storage_adapter,
+                top_k=10,
+                current_chapter=chapter,
+                total_chapters=total_chapters,
+            )
+            or []
+        )
 
         style_card = next((item.content for item in critical_items if item.type.value == "style_card"), None)
 

@@ -17,6 +17,7 @@ from .shared import (
 
 from .archivist_core import get_archivist_system_prompt
 
+
 def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str = "zh") -> PromptPair:
     """
     生成事实更新提取提示词。
@@ -59,7 +60,7 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
                 "",
                 "[P0-MUST] Anti-hallucination: extract only directly supported information.",
                 "[P0-MUST] Language: all output text must be in English (no Chinese).",
-                "[P0-MUST] Keep uncertain fields empty ([] or \"\").",
+                '[P0-MUST] Keep uncertain fields empty ([] or "").',
                 "[P1-SHOULD] facts: prefer reusable, high-constraint facts over trivia.",
                 "[P1-SHOULD] Contradiction handling (Last-Write-Wins):",
                 "  - If this chapter's events invalidate a prior fact (relationship change, status change,",
@@ -186,7 +187,10 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
     )
     return PromptPair(system=get_archivist_system_prompt(language=language), user=user)
 
-def archivist_chapter_summary_prompt(chapter: str, chapter_title: str, final_draft: str, language: str = "zh") -> PromptPair:
+
+def archivist_chapter_summary_prompt(
+    chapter: str, chapter_title: str, final_draft: str, language: str = "zh"
+) -> PromptPair:
     """
     生成章节摘要提示词。
 
@@ -336,11 +340,10 @@ def archivist_chapter_summary_prompt(chapter: str, chapter_title: str, final_dra
     )
     return PromptPair(system=get_archivist_system_prompt(language=language), user=user)
 
+
 def archivist_focus_characters_binding_prompt(
-    chapter: str,
-    candidates: List[Dict[str, Any]],
-    final_draft: str,
-    limit: int = 5, language: str = "zh") -> PromptPair:
+    chapter: str, candidates: List[Dict[str, Any]], final_draft: str, limit: int = 5, language: str = "zh"
+) -> PromptPair:
     """
     生成重点角色绑定提示词。
 
@@ -505,7 +508,10 @@ def archivist_focus_characters_binding_prompt(
     )
     return PromptPair(system=get_archivist_system_prompt(language=language), user=user)
 
-def archivist_volume_summary_prompt(volume_id: str, chapter_items: List[Dict[str, Any]], language: str = "zh") -> PromptPair:
+
+def archivist_volume_summary_prompt(
+    volume_id: str, chapter_items: List[Dict[str, Any]], language: str = "zh"
+) -> PromptPair:
     """
     生成卷摘要提示词。
 
@@ -635,4 +641,3 @@ def archivist_volume_summary_prompt(volume_id: str, chapter_items: List[Dict[str
         ]
     )
     return PromptPair(system=get_archivist_system_prompt(language=language), user=user)
-

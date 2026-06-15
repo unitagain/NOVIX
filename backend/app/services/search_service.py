@@ -31,7 +31,7 @@ class SearchService:
     Attributes:
         moegirl_opensearch_api: 萌娘百科搜索 API URL / Moegirlpedia OpenSearch API endpoint
     """
-    
+
     def __init__(self):
         self.moegirl_opensearch_api = "https://mzh.moegirl.org.cn/api.php"
         self.wikipedia_opensearch_api = "https://en.wikipedia.org/w/api.php"
@@ -118,11 +118,11 @@ class SearchService:
     def _search_moegirl(self, query: str, limit: int) -> List[Dict[str, str]]:
         """
         Search Moegirlpedia pages.
-        
+
         Args:
             query: Search query
             limit: Maximum number of results to return
-            
+
         Returns:
             List of search results with title, url, snippet, and source
         """

@@ -121,13 +121,10 @@ class AsyncFileLock:
                 return 0
 
             # 找出未锁定的锁 / Find unlocked locks
-            unlocked = [
-                path for path, lock in self._locks.items()
-                if not lock.locked()
-            ]
+            unlocked = [path for path, lock in self._locks.items() if not lock.locked()]
 
             # 删除一半未锁定的锁 / Remove half of unlocked locks
-            to_remove = unlocked[:len(unlocked) // 2]
+            to_remove = unlocked[: len(unlocked) // 2]
             for path in to_remove:
                 del self._locks[path]
 

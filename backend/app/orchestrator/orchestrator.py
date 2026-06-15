@@ -72,7 +72,9 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         max_research_rounds (int): 最大研究轮次 / Maximum research loop rounds.
     """
 
-    def __init__(self, data_dir: Optional[str] = None, progress_callback: Optional[Callable] = None, language: str = "zh"):
+    def __init__(
+        self, data_dir: Optional[str] = None, progress_callback: Optional[Callable] = None, language: str = "zh"
+    ):
         """
         初始化编排器 / Initialize the Orchestrator.
 
@@ -136,6 +138,7 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         # Load session config from config.yaml with sensible defaults
         # 从 config.yaml 加载会话配置
         from app.config import config as app_cfg
+
         session_cfg = app_cfg.get("session", {})
         self.max_iterations = int(session_cfg.get("max_iterations", 5))
         self.max_question_rounds = int(session_cfg.get("max_question_rounds", 2))
@@ -938,7 +941,9 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             merged_extra_queries = extra_queries
             retrieval_seeds = [q for q in (card_hits + missing_cards) if str(q or "").strip()]
             if retrieval_seeds:
-                merged_extra_queries = list(dict.fromkeys([q for q in (extra_queries + retrieval_seeds) if str(q or "").strip()]))[:8]
+                merged_extra_queries = list(
+                    dict.fromkeys([q for q in (extra_queries + retrieval_seeds) if str(q or "").strip()])
+                )[:8]
 
             payload = await working_memory_service.prepare(
                 project_id=project_id,
@@ -1049,7 +1054,9 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                     stage="self_check",
                     round=round_index,
                     stop_reason=stop_reason,
-                    note=self._p("达到最大轮次，进入反问或待确认", "Max rounds reached; entering questions/confirmation"),
+                    note=self._p(
+                        "达到最大轮次，进入反问或待确认", "Max rounds reached; entering questions/confirmation"
+                    ),
                 )
                 break
 
@@ -1109,9 +1116,13 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             if stop_reason == "sufficient":
                 stop_note = self._p("证据充分，提前结束研究", "Sufficient evidence; ending research early")
             elif stop_reason == "max_rounds":
-                stop_note = self._p("达到最大轮次，进入反问或待确认", "Max rounds reached; entering questions/confirmation")
+                stop_note = self._p(
+                    "达到最大轮次，进入反问或待确认", "Max rounds reached; entering questions/confirmation"
+                )
             elif stop_reason == "no_queries":
-                stop_note = self._p("无法生成有效检索，停止研究", "Cannot generate effective retrieval queries; stopping research")
+                stop_note = self._p(
+                    "无法生成有效检索，停止研究", "Cannot generate effective retrieval queries; stopping research"
+                )
             else:
                 stop_note = self._p("研究流程提前停止", "Research flow stopped early")
             research_trace[-1]["stop_reason"] = stop_reason
@@ -1155,11 +1166,13 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         """
         await self._emit_progress(self._p("正在撰写...", "Writing..."), stage="writing", status="writing")
         if self.progress_callback:
-            await self.progress_callback({
-                "type": "stream_start",
-                "project_id": project_id,
-                "chapter": chapter,
-            })
+            await self.progress_callback(
+                {
+                    "type": "stream_start",
+                    "project_id": project_id,
+                    "chapter": chapter,
+                }
+            )
 
         chunks: List[str] = []
         async for chunk in self.writer.execute_stream_draft(
@@ -1173,12 +1186,14 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                 break
             chunks.append(chunk)
             if self.progress_callback:
-                await self.progress_callback({
-                    "type": "token",
-                    "project_id": project_id,
-                    "chapter": chapter,
-                    "content": chunk,
-                })
+                await self.progress_callback(
+                    {
+                        "type": "token",
+                        "project_id": project_id,
+                        "chapter": chapter,
+                        "content": chunk,
+                    }
+                )
 
         # 用户取消时静默退出，不保存草稿
         # Exit silently on user cancel without saving draft
@@ -1222,13 +1237,15 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                 "proposals": proposals,
                 "timestamp": int(time.time() * 1000),
             }
-            await self.progress_callback({
-                "type": "stream_end",
-                "project_id": project_id,
-                "chapter": chapter,
-                "draft": draft_payload,
-                "proposals": proposals,
-            })
+            await self.progress_callback(
+                {
+                    "type": "stream_end",
+                    "project_id": project_id,
+                    "chapter": chapter,
+                    "draft": draft_payload,
+                    "proposals": proposals,
+                }
+            )
 
     async def _update_status(self, status: SessionStatus, message: str) -> None:
         """Update session status and notify callback."""

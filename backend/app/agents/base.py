@@ -68,12 +68,7 @@ class BaseAgent(ABC):
         self.language = language
 
     @abstractmethod
-    async def execute(
-        self,
-        project_id: str,
-        chapter: str,
-        context: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    async def execute(self, project_id: str, chapter: str, context: Dict[str, Any]) -> Dict[str, Any]:
         """
         执行智能体的核心任务 - 由子类实现
 
@@ -111,7 +106,7 @@ class BaseAgent(ABC):
             System prompt string customized for the agent type.
         """
         return base_agent_system_prompt(self.get_agent_name(), language=self.language)
-    
+
     async def call_llm(
         self,
         messages: List[Dict[str, str]],
@@ -144,10 +139,7 @@ class BaseAgent(ABC):
             temperature = self.gateway.get_temperature_for_agent(agent_name)
 
         response = await self.gateway.chat(
-            messages=messages,
-            provider=provider,
-            temperature=temperature,
-            max_tokens=max_tokens
+            messages=messages, provider=provider, temperature=temperature, max_tokens=max_tokens
         )
 
         # ============================================================================
@@ -174,11 +166,7 @@ class BaseAgent(ABC):
             # 1. Update global stats (for Gauge)
             await trace_collector.update_token_stats(
                 total_delta=total_tokens,
-                breakdown_delta={
-                    "guiding": guiding,
-                    "informational": informational,
-                    "actionable": actionable
-                }
+                breakdown_delta={"guiding": guiding, "informational": informational, "actionable": actionable},
             )
 
             # 2. Record detailed event (for Timeline)
@@ -189,13 +177,9 @@ class BaseAgent(ABC):
                     "model": response.get("model", "unknown"),
                     "provider": response.get("provider", "unknown"),
                     "config_agent": agent_name,
-                    "tokens": {
-                        "total": total_tokens,
-                        "prompt": prompt_tokens,
-                        "completion": completion_tokens
-                    },
-                    "latency_ms": int(response.get("elapsed_time", 0) * 1000)
-                }
+                    "tokens": {"total": total_tokens, "prompt": prompt_tokens, "completion": completion_tokens},
+                    "latency_ms": int(response.get("elapsed_time", 0) * 1000),
+                },
             )
 
         except Exception as e:
@@ -204,12 +188,8 @@ class BaseAgent(ABC):
         if return_meta:
             return response
         return response["content"]
-    
-    async def call_llm_stream(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: Optional[float] = None
-    ):
+
+    async def call_llm_stream(self, messages: List[Dict[str, str]], temperature: Optional[float] = None):
         """
         流式输出大模型响应 - 逐token返回，适合前端实时显示
 
@@ -231,11 +211,7 @@ class BaseAgent(ABC):
 
         has_chunk = False
         try:
-            async for chunk in self.gateway.stream_chat(
-                messages=messages,
-                provider=provider,
-                temperature=temperature
-            ):
+            async for chunk in self.gateway.stream_chat(messages=messages, provider=provider, temperature=temperature):
                 if chunk:
                     has_chunk = True
                 yield chunk
@@ -243,18 +219,11 @@ class BaseAgent(ABC):
             if has_chunk:
                 raise
             # Fallback to non-streaming to avoid hard failures on upstream chunked reads.
-            response = await self.gateway.chat(
-                messages=messages,
-                provider=provider,
-                temperature=temperature
-            )
+            response = await self.gateway.chat(messages=messages, provider=provider, temperature=temperature)
             yield response.get("content", "")
-    
+
     def build_messages(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        context_items: Optional[List[str]] = None
+        self, system_prompt: str, user_prompt: str, context_items: Optional[List[str]] = None
     ) -> List[Dict[str, str]]:
         """
         构建发送给大模型的消息列表 - 带 token 安全网
@@ -275,11 +244,7 @@ class BaseAgent(ABC):
             3. User message
         """
         # 计算不可裁剪部分的 token 数（系统提示词 + 用户指令 + 格式开销）
-        fixed_tokens = (
-            count_tokens(system_prompt)
-            + count_tokens(user_prompt)
-            + _MESSAGE_OVERHEAD_TOKENS
-        )
+        fixed_tokens = count_tokens(system_prompt) + count_tokens(user_prompt) + _MESSAGE_OVERHEAD_TOKENS
 
         # 获取模型输入 token 上限
         input_limit = self._get_input_token_limit()
@@ -290,20 +255,12 @@ class BaseAgent(ABC):
             max_context_tokens=input_limit - fixed_tokens,
         )
 
-        messages = [
-            {"role": "system", "content": system_prompt}
-        ]
+        messages = [{"role": "system", "content": system_prompt}]
 
         if trimmed_items:
-            messages.append({
-                "role": "user",
-                "content": format_context_message(trimmed_items, language=self.language)
-            })
+            messages.append({"role": "user", "content": format_context_message(trimmed_items, language=self.language)})
 
-        messages.append({
-            "role": "user",
-            "content": user_prompt
-        })
+        messages.append({"role": "user", "content": user_prompt})
 
         return messages
 
@@ -358,7 +315,8 @@ class BaseAgent(ABC):
             if context_items:
                 logger.warning(
                     "Context budget exhausted (%d tokens), dropping all %d context items",
-                    max_context_tokens, len(context_items),
+                    max_context_tokens,
+                    len(context_items),
                 )
             return []
 
@@ -374,7 +332,8 @@ class BaseAgent(ABC):
         # 超限：从末尾开始逐项移除
         logger.warning(
             "Context tokens (%d) exceed limit (%d), trimming from end",
-            total, max_context_tokens,
+            total,
+            max_context_tokens,
         )
 
         kept: List[str] = []
@@ -389,7 +348,10 @@ class BaseAgent(ABC):
         if dropped > 0:
             logger.warning(
                 "Dropped %d/%d context items to fit budget (%d/%d tokens)",
-                dropped, len(context_items), running, max_context_tokens,
+                dropped,
+                len(context_items),
+                running,
+                max_context_tokens,
             )
 
         return kept

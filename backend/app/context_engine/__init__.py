@@ -15,7 +15,7 @@ from .models import (
     HealthCheckResult,
     AssembledContext,
     estimate_tokens,
-    count_tokens_accurate
+    count_tokens_accurate,
 )
 from .select_engine import ContextSelectEngine
 from .trace_collector import trace_collector, TraceEvent, TraceEventType
@@ -36,5 +36,5 @@ __all__ = [
     # Trace
     "trace_collector",
     "TraceEvent",
-    "TraceEventType"
+    "TraceEventType",
 ]

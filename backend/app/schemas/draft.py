@@ -113,7 +113,6 @@ class CardProposal(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-
     name: str = Field(..., description="Entity name")
     type: str = Field(..., description="Type: Character or World")
     description: str = Field(..., description="Proposed content")

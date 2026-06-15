@@ -14,8 +14,10 @@ from app.dependencies import get_canon_storage
 router = APIRouter(prefix="/projects/{project_id}/canon", tags=["canon"])
 canon_storage = get_canon_storage()
 
+
 class FactUpdate(BaseModel):
     """Payload for partial fact updates."""
+
     title: Optional[str] = None
     content: Optional[str] = None
     statement: Optional[str] = None
@@ -92,10 +94,10 @@ async def add_manual_fact(project_id: str, payload: ManualFactCreate):
     await canon_storage.append_jsonl(file_path, fact_data)
 
     from app.storage.indexed_cache import get_index_cache
+
     await get_index_cache().invalidate(project_id)
 
     return {"success": True, "message": "Fact added", "id": fact_id}
-
 
 
 @router.get("/facts/by-id/{fact_id}")
@@ -105,6 +107,7 @@ async def get_fact_by_id(project_id: str, fact_id: str):
     if not fact:
         raise HTTPException(status_code=404, detail="Fact not found")
     return fact
+
 
 @router.put("/facts/by-id/{fact_id}")
 async def update_fact(project_id: str, fact_id: str, payload: FactUpdate):
@@ -180,10 +183,7 @@ async def add_timeline_event(project_id: str, event: TimelineEvent):
 
 
 @router.get("/timeline/{chapter}")
-async def get_timeline_events_by_chapter(
-    project_id: str,
-    chapter: str
-) -> List[TimelineEvent]:
+async def get_timeline_events_by_chapter(project_id: str, chapter: str) -> List[TimelineEvent]:
     """Get timeline events from a specific chapter / 获取特定章节的时间线事件"""
     return await canon_storage.get_timeline_events_by_chapter(project_id, chapter)
 

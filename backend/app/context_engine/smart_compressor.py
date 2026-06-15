@@ -19,30 +19,26 @@ logger = get_logger(__name__)
 
 
 # 句子分隔符
-_SENTENCE_PATTERN = re.compile(
-    r'([。！？.!?；;]+["\'"」』）)]*'
-    r'|(?:——|……)'
-    r'|[\n]{2,})'
-)
+_SENTENCE_PATTERN = re.compile(r'([。！？.!?；;]+["\'"」』）)]*' r"|(?:——|……)" r"|[\n]{2,})")
 
 # 关键词模式（用于识别重要句子）
 _KEY_PATTERNS = [
     # 角色相关
-    re.compile(r'(性格|外貌|特征|能力|技能|身份|职业|关系)', re.IGNORECASE),
+    re.compile(r"(性格|外貌|特征|能力|技能|身份|职业|关系)", re.IGNORECASE),
     # 情节相关
-    re.compile(r'(转折|关键|重要|核心|秘密|真相|原因|目的)', re.IGNORECASE),
+    re.compile(r"(转折|关键|重要|核心|秘密|真相|原因|目的)", re.IGNORECASE),
     # 世界观相关
-    re.compile(r'(规则|法则|禁忌|限制|条件|前提)', re.IGNORECASE),
+    re.compile(r"(规则|法则|禁忌|限制|条件|前提)", re.IGNORECASE),
     # 时间相关
-    re.compile(r'(之前|之后|同时|期间|最终|开始|结束)', re.IGNORECASE),
+    re.compile(r"(之前|之后|同时|期间|最终|开始|结束)", re.IGNORECASE),
     # 因果相关
-    re.compile(r'(因为|所以|导致|造成|引发|结果)', re.IGNORECASE),
+    re.compile(r"(因为|所以|导致|造成|引发|结果)", re.IGNORECASE),
     # 英文关键词
-    re.compile(r'(important|key|critical|secret|truth|reason|purpose)', re.IGNORECASE),
+    re.compile(r"(important|key|critical|secret|truth|reason|purpose)", re.IGNORECASE),
 ]
 
 # 段落标记
-_PARAGRAPH_MARKERS = re.compile(r'^(#{1,3}\s|[-*]\s|\d+\.\s|【|「|『)')
+_PARAGRAPH_MARKERS = re.compile(r"^(#{1,3}\s|[-*]\s|\d+\.\s|【|「|『)")
 
 
 def split_sentences(text: str) -> List[str]:
@@ -116,7 +112,7 @@ def score_sentence(sentence: str, query: Optional[str] = None) -> float:
         score += 0.05
 
     # 4. 包含数字（可能是重要数据）
-    if re.search(r'\d+', sentence):
+    if re.search(r"\d+", sentence):
         score += 0.05
 
     # 5. 包含引号（可能是对话或引用）
@@ -176,10 +172,7 @@ def smart_compress(
         return _simple_compress(content, target_length)
 
     # 为每个句子打分
-    scored_sentences = [
-        (i, sentence, score_sentence(sentence, query))
-        for i, sentence in enumerate(sentences)
-    ]
+    scored_sentences = [(i, sentence, score_sentence(sentence, query)) for i, sentence in enumerate(sentences)]
 
     # 计算预算分配
     head_budget = int(target_length * 0.30)  # 30% 给开头
@@ -212,11 +205,7 @@ def smart_compress(
     head_end = head_sentences[-1][0] if head_sentences else -1
     tail_start = tail_sentences[0][0] if tail_sentences else len(sentences)
 
-    middle_candidates = [
-        (i, sentence, score)
-        for i, sentence, score in scored_sentences
-        if head_end < i < tail_start
-    ]
+    middle_candidates = [(i, sentence, score) for i, sentence, score in scored_sentences if head_end < i < tail_start]
 
     # 按分数排序
     middle_candidates.sort(key=lambda x: x[2], reverse=True)

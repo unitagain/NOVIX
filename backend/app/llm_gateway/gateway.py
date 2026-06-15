@@ -4,7 +4,6 @@
 Unified LLM gateway with retry, provider routing, and usage tracking.
 """
 
-
 import asyncio
 import time
 from typing import List, Dict, Any, Optional
@@ -66,7 +65,7 @@ class LLMGateway:
                 if provider_instance:
                     self.providers[profile["id"]] = provider_instance
             except Exception as e:
-                logger.error("Failed to init profile %s: %s", profile.get('name'), e)
+                logger.error("Failed to init profile %s: %s", profile.get("name"), e)
 
     def _try_load_profile_by_id(self, profile_id: str) -> bool:
         """
@@ -98,10 +97,10 @@ class LLMGateway:
     def _create_provider_from_profile(self, profile: Dict[str, Any]) -> Optional[BaseLLMProvider]:
         provider_type = profile.get("provider")
         api_key = profile.get("api_key")
-        
+
         if not api_key:
-             # Some custom local LLMS might not need key, but generally we expect one or at least safe instantiation
-             pass
+            # Some custom local LLMS might not need key, but generally we expect one or at least safe instantiation
+            pass
 
         try:
             if provider_type == "openai":
@@ -109,21 +108,21 @@ class LLMGateway:
                     api_key=api_key,
                     model=profile.get("model", "gpt-5.4-mini"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "anthropic":
                 return AnthropicProvider(
                     api_key=api_key,
                     model=profile.get("model", "claude-sonnet-4-6"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "deepseek":
                 return DeepSeekProvider(
                     api_key=api_key,
                     model=profile.get("model", "deepseek-chat"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "qwen":
                 return QwenProvider(
@@ -131,7 +130,7 @@ class LLMGateway:
                     base_url=profile.get("base_url"),
                     model=profile.get("model", "qwen3.5-plus"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "kimi":
                 return KimiProvider(
@@ -139,7 +138,7 @@ class LLMGateway:
                     base_url=profile.get("base_url"),
                     model=profile.get("model", "kimi-k2.5"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "glm":
                 return GLMProvider(
@@ -147,14 +146,14 @@ class LLMGateway:
                     base_url=profile.get("base_url"),
                     model=profile.get("model", "glm-5"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "gemini":
                 return GeminiProvider(
                     api_key=api_key,
                     model=profile.get("model", "gemini-3.1-pro-preview"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "grok":
                 return GrokProvider(
@@ -162,7 +161,7 @@ class LLMGateway:
                     base_url=profile.get("base_url"),
                     model=profile.get("model", "grok-4"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "wenxin":
                 return WenxinProvider(
@@ -170,7 +169,7 @@ class LLMGateway:
                     base_url=profile.get("base_url"),
                     model=profile.get("model", "ernie-4.5-turbo-32k"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "aistudio":
                 return AIStudioProvider(
@@ -178,7 +177,7 @@ class LLMGateway:
                     base_url=profile.get("base_url"),
                     model=profile.get("model", "ernie-5.0-thinking-preview"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
             elif provider_type == "custom":
                 return CustomProvider(
@@ -186,20 +185,26 @@ class LLMGateway:
                     base_url=profile.get("base_url", ""),
                     model=profile.get("model", "custom-model"),
                     max_tokens=profile.get("max_tokens", 8000),
-                    temperature=profile.get("temperature", 0.7)
+                    temperature=profile.get("temperature", 0.7),
                 )
         except Exception as e:
-            logger.error("Error creating provider instance for %s: %s", profile.get('name'), e)
+            logger.error("Error creating provider instance for %s: %s", profile.get("name"), e)
             return None
         return None
-    
+
     async def chat(
         self,
         messages: List[Dict[str, str]],
-        provider: Optional[str] = None, # This is now the profile_id!
+        provider: Optional[str] = None,  # This is now the profile_id!
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        retry: bool = True
+        retry: bool = True,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        thinking: Optional[Any] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Send chat request
@@ -208,11 +213,11 @@ class LLMGateway:
         """
         # If provider is None, fallback to default? Or raise error?
         # In new system, provider ID should be explicit or looked up via agent assignment
-        
-        # NOTE: existing code might pass 'openai' string. 
+
+        # NOTE: existing code might pass 'openai' string.
         # We should handle backward compatibility or ensure caller passes profile ID.
         # Actually, caller usually passes result of get_provider_for_agent()
-        
+
         target_provider = None
 
         if provider and provider not in self.providers:
@@ -225,29 +230,39 @@ class LLMGateway:
             # Fallback: maybe it's a legacy string like 'openai'?
             # Try to find first profile of that type?
             for pid, p in self.providers.items():
-                if hasattr(p, 'get_provider_name') and p.get_provider_name() == provider:
+                if hasattr(p, "get_provider_name") and p.get_provider_name() == provider:
                     target_provider = p
                     break
-             
+
         if not target_provider:
-             raise ValueError(f"Profile/Provider '{provider}' not found.")
-        
+            raise ValueError(f"Profile/Provider '{provider}' not found.")
+
+        # 收集可选生成参数（仅传非 None 的），透传给 provider / collect optional gen params
+        options = {
+            key: value
+            for key, value in (
+                ("tools", tools),
+                ("tool_choice", tool_choice),
+                ("response_format", response_format),
+                ("thinking", thinking),
+                ("extra_body", extra_body),
+            )
+            if value is not None
+        }
+
         # Execute with retry
         if retry:
-            return await self._chat_with_retry(
-                target_provider, messages, temperature, max_tokens
-            )
+            return await self._chat_with_retry(target_provider, messages, temperature, max_tokens, options)
         else:
-            return await self._execute_chat(
-                target_provider, messages, temperature, max_tokens
-            )
-    
+            return await self._execute_chat(target_provider, messages, temperature, max_tokens, options)
+
     async def _chat_with_retry(
         self,
         provider: BaseLLMProvider,
         messages: List[Dict[str, str]],
         temperature: Optional[float],
-        max_tokens: Optional[int]
+        max_tokens: Optional[int],
+        options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Execute chat with intelligent retry based on error classification.
@@ -260,9 +275,7 @@ class LLMGateway:
 
         for attempt in range(self.max_retries):
             try:
-                return await self._execute_chat(
-                    provider, messages, temperature, max_tokens
-                )
+                return await self._execute_chat(provider, messages, temperature, max_tokens, options)
             except Exception as e:
                 last_exception = e
 
@@ -271,61 +284,53 @@ class LLMGateway:
 
                 if not is_retryable:
                     # Non-retryable error - fail immediately
-                    logger.error(
-                        "LLM non-retryable error (reason=%s): %s",
-                        reason, e, exc_info=True
+                    logger.error("LLM non-retryable error (reason=%s): %s", reason, e, exc_info=True)
+                    provider_name = (
+                        provider.get_provider_name() if hasattr(provider, "get_provider_name") else "unknown"
                     )
-                    provider_name = provider.get_provider_name() if hasattr(provider, 'get_provider_name') else "unknown"
                     raise LLMError(
                         str(e),
                         provider=provider_name,
                         reason=reason,
-                        status_code=getattr(e, 'status_code', None),
+                        status_code=getattr(e, "status_code", None),
                         is_retryable=False,
                         original=e,
                     ) from e
 
                 # Retryable error - log and retry with backoff
                 logger.warning(
-                    "LLM retryable error (attempt=%d/%d, reason=%s): %s",
-                    attempt + 1, self.max_retries, reason, e
+                    "LLM retryable error (attempt=%d/%d, reason=%s): %s", attempt + 1, self.max_retries, reason, e
                 )
 
                 if attempt < self.max_retries - 1:
-                    delay = get_retry_delay(
-                        attempt,
-                        self.retry_delays,
-                        self.max_retry_delay
-                    )
+                    delay = get_retry_delay(attempt, self.retry_delays, self.max_retry_delay)
                     logger.info("Retrying in %.1f seconds...", delay)
                     await asyncio.sleep(delay)
 
         # All retries exhausted
-        logger.error(
-            "LLM request failed after %d retries: %s",
-            self.max_retries, last_exception
-        )
-        provider_name = provider.get_provider_name() if hasattr(provider, 'get_provider_name') else "unknown"
+        logger.error("LLM request failed after %d retries: %s", self.max_retries, last_exception)
+        provider_name = provider.get_provider_name() if hasattr(provider, "get_provider_name") else "unknown"
         is_retryable, reason = classify_error(last_exception)
         raise LLMError(
             str(last_exception),
             provider=provider_name,
             reason=reason,
-            status_code=getattr(last_exception, 'status_code', None),
+            status_code=getattr(last_exception, "status_code", None),
             is_retryable=True,
             original=last_exception,
         ) from last_exception
-    
+
     async def _execute_chat(
         self,
         provider: BaseLLMProvider,
         messages: List[Dict[str, str]],
         temperature: Optional[float],
-        max_tokens: Optional[int]
+        max_tokens: Optional[int],
+        options: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute single chat request"""
         start_time = time.time()
-        response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens)
+        response = await provider.chat(messages, temperature=temperature, max_tokens=max_tokens, **(options or {}))
         elapsed_time = time.time() - start_time
 
         self.total_requests += 1
@@ -346,21 +351,21 @@ class LLMGateway:
         except Exception:
             pass
         return response
-    
+
     def get_stats(self) -> Dict[str, Any]:
         """Get gateway statistics"""
         return {
             "total_requests": self.total_requests,
             "total_tokens": self.total_tokens,
-            "profiles_loaded": list(self.providers.keys())
+            "profiles_loaded": list(self.providers.keys()),
         }
-    
+
     async def stream_chat(
         self,
         messages: List[Dict[str, str]],
         provider: Optional[str] = None,
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
     ):
         """
         Stream chat response token by token, with retry before first chunk.
@@ -383,7 +388,7 @@ class LLMGateway:
             target_provider = self.providers[provider]
         else:
             for pid, p in self.providers.items():
-                if hasattr(p, 'get_provider_name') and p.get_provider_name() == provider:
+                if hasattr(p, "get_provider_name") and p.get_provider_name() == provider:
                     target_provider = p
                     break
 
@@ -408,35 +413,44 @@ class LLMGateway:
                 last_exception = e
                 is_retryable, reason = classify_error(e)
                 if not is_retryable:
-                    provider_name = target_provider.get_provider_name() if hasattr(target_provider, 'get_provider_name') else "unknown"
+                    provider_name = (
+                        target_provider.get_provider_name()
+                        if hasattr(target_provider, "get_provider_name")
+                        else "unknown"
+                    )
                     raise LLMError(
                         str(e),
                         provider=provider_name,
                         reason=reason,
-                        status_code=getattr(e, 'status_code', None),
+                        status_code=getattr(e, "status_code", None),
                         is_retryable=False,
                         original=e,
                     ) from e
                 logger.warning(
                     "Stream retryable error before first chunk (attempt=%d/%d, reason=%s): %s",
-                    attempt + 1, self.max_retries, reason, e,
+                    attempt + 1,
+                    self.max_retries,
+                    reason,
+                    e,
                 )
                 if attempt < self.max_retries - 1:
                     delay = get_retry_delay(attempt, self.retry_delays, self.max_retry_delay)
                     await asyncio.sleep(delay)
 
         # All retries exhausted
-        provider_name = target_provider.get_provider_name() if hasattr(target_provider, 'get_provider_name') else "unknown"
+        provider_name = (
+            target_provider.get_provider_name() if hasattr(target_provider, "get_provider_name") else "unknown"
+        )
         is_retryable, reason = classify_error(last_exception)
         raise LLMError(
             str(last_exception),
             provider=provider_name,
             reason=reason,
-            status_code=getattr(last_exception, 'status_code', None),
+            status_code=getattr(last_exception, "status_code", None),
             is_retryable=True,
             original=last_exception,
         ) from last_exception
-    
+
     def get_provider_for_agent(self, agent_name: str) -> str:
         """
         Get configured PROFILE ID for specific agent
@@ -456,7 +470,7 @@ class LLMGateway:
             raise ValueError(f"Assigned LLM profile '{profile_id}' not loaded for agent '{agent_name}'.")
 
         return profile_id
-    
+
     def get_temperature_for_agent(self, agent_name: str) -> float:
         """
         Get configured temperature (from assigned profile)

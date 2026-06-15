@@ -81,7 +81,9 @@ def extractor_cards_prompt(title: str, content: str, max_cards: int) -> PromptPa
 
     从页面内容中提取结构化的设定卡，用于写作参考。
     """
-    schema = '[{"name":"实体名","type":"Character|World","description":"设定描述","rationale":"抽取依据","confidence":0.9}]'
+    schema = (
+        '[{"name":"实体名","type":"Character|World","description":"设定描述","rationale":"抽取依据","confidence":0.9}]'
+    )
 
     critical = "\n".join(
         [
@@ -109,7 +111,7 @@ def extractor_cards_prompt(title: str, content: str, max_cards: int) -> PromptPa
         [
             critical,
             "",
-            f"### 页面标题",
+            "### 页面标题",
             f"{str(title or '').strip()}",
             "",
             "### 页面内容",
@@ -120,7 +122,7 @@ def extractor_cards_prompt(title: str, content: str, max_cards: int) -> PromptPa
             "",
             "### 输出 Schema",
             "",
-            f"```json",
+            "```json",
             schema,
             "```",
             "",

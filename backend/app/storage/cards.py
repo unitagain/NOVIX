@@ -19,12 +19,7 @@ class CardStorage(BaseStorage):
         project_id: str,
         character_name: str,
     ) -> Optional[CharacterCard]:
-        file_path = (
-            self.get_project_path(project_id)
-            / "cards"
-            / "characters"
-            / f"{character_name}.yaml"
-        )
+        file_path = self.get_project_path(project_id) / "cards" / "characters" / f"{character_name}.yaml"
 
         if not file_path.exists():
             return None
@@ -34,12 +29,7 @@ class CardStorage(BaseStorage):
         return CharacterCard(**coerced)
 
     async def save_character_card(self, project_id: str, card: CharacterCard) -> None:
-        file_path = (
-            self.get_project_path(project_id)
-            / "cards"
-            / "characters"
-            / f"{card.name}.yaml"
-        )
+        file_path = self.get_project_path(project_id) / "cards" / "characters" / f"{card.name}.yaml"
 
         payload = card.model_dump(exclude_none=True)
         if file_path.exists():
@@ -65,12 +55,7 @@ class CardStorage(BaseStorage):
         return [f.stem for f in cards_dir.glob("*.yaml")]
 
     async def delete_character_card(self, project_id: str, character_name: str) -> bool:
-        file_path = (
-            self.get_project_path(project_id)
-            / "cards"
-            / "characters"
-            / f"{character_name}.yaml"
-        )
+        file_path = self.get_project_path(project_id) / "cards" / "characters" / f"{character_name}.yaml"
 
         if file_path.exists():
             file_path.unlink()
@@ -255,4 +240,3 @@ class CardStorage(BaseStorage):
             parts.append("参考片段:\n" + "\n---\n".join([str(item) for item in examples if item]))
 
         return {"style": "\n".join([item for item in parts if item]).strip()}
-

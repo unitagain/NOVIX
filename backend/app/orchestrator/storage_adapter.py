@@ -90,12 +90,7 @@ class UnifiedStorageAdapter:
     # 文本检索接口 / Text Search Interface
     # ========================================================================
 
-    async def search_text_chunks(
-        self,
-        project_id: str,
-        query: str,
-        limit: int = 5
-    ) -> List[Dict]:
+    async def search_text_chunks(self, project_id: str, query: str, limit: int = 5) -> List[Dict]:
         """
         搜索文本片段 / Search for text chunks matching the query.
 

@@ -92,31 +92,39 @@ async def trace_websocket_endpoint(websocket: WebSocket):
     from app.context_engine.trace_collector import trace_collector, TraceEvent
 
     async def on_trace_event(event: TraceEvent):
-        await trace_manager.broadcast({
-            "type": "trace_event",
-            "payload": event.to_dict(),
-        })
+        await trace_manager.broadcast(
+            {
+                "type": "trace_event",
+                "payload": event.to_dict(),
+            }
+        )
 
         if event.type in ["llm_request", "context_select", "context_compress", "context_health_check"]:
             stats = trace_collector.get_current_stats()
-            await trace_manager.broadcast({
-                "type": "context_stats_update",
-                "payload": stats,
-            })
+            await trace_manager.broadcast(
+                {
+                    "type": "context_stats_update",
+                    "payload": stats,
+                }
+            )
 
     trace_collector.subscribe(on_trace_event)
 
     try:
-        await websocket.send_json({
-            "type": "connected",
-            "message": "Connected to WenShape Trace System",
-        })
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "message": "Connected to WenShape Trace System",
+            }
+        )
 
         for trace in trace_collector.get_all_traces():
-            await websocket.send_json({
-                "type": "agent_trace_update",
-                "payload": trace,
-            })
+            await websocket.send_json(
+                {
+                    "type": "agent_trace_update",
+                    "payload": trace,
+                }
+            )
 
         while True:
             data = await websocket.receive_text()
@@ -138,18 +146,22 @@ async def websocket_endpoint(websocket: WebSocket, project_id: str):
     await manager.connect(websocket, project_id)
 
     try:
-        await websocket.send_json({
-            "type": "connected",
-            "message": "Connected to WenShape session updates",
-            "project_id": project_id,
-        })
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "message": "Connected to WenShape session updates",
+                "project_id": project_id,
+            }
+        )
 
         while True:
             data = await websocket.receive_text()
-            await websocket.send_json({
-                "type": "pong",
-                "timestamp": data,
-            })
+            await websocket.send_json(
+                {
+                    "type": "pong",
+                    "timestamp": data,
+                }
+            )
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, project_id)

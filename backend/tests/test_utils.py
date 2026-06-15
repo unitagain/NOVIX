@@ -1,12 +1,13 @@
 """Test utilities in app.utils.*"""
+
 import pytest
 from bs4 import BeautifulSoup
 from app.utils.text import normalize_for_compare, normalize_newlines, normalize_prose_paragraphs
 from app.utils.path_safety import sanitize_id, validate_path_within
 from app.services.wiki_parser import WikiStructuredParser
 
-
 # --- normalize_newlines ---
+
 
 class TestNormalizeNewlines:
     def test_none_returns_empty(self):
@@ -26,6 +27,7 @@ class TestNormalizeNewlines:
 
 
 # --- normalize_for_compare ---
+
 
 class TestNormalizeForCompare:
     def test_strips_trailing(self):
@@ -56,6 +58,7 @@ class TestNormalizeProseParagraphs:
 
 
 # --- sanitize_id ---
+
 
 class TestSanitizeId:
     def test_simple(self):
@@ -93,6 +96,7 @@ class TestSanitizeId:
 
 
 # --- validate_path_within ---
+
 
 class TestValidatePathWithin:
     def test_valid_child(self, tmp_path):

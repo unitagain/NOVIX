@@ -16,6 +16,26 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 
+def normalize_tool_calls(message: Any) -> Optional[List[Dict[str, Any]]]:
+    """从 OpenAI 风格 message 提取 tool_calls，统一为可序列化 dict 列表；无则返回 None。
+    Extract tool_calls from an OpenAI-style message into plain dicts; returns None if absent."""
+    raw = getattr(message, "tool_calls", None)
+    if not raw:
+        return None
+    calls: List[Dict[str, Any]] = []
+    for tc in raw:
+        fn = getattr(tc, "function", None)
+        calls.append(
+            {
+                "id": getattr(tc, "id", None),
+                "type": getattr(tc, "type", "function"),
+                "name": getattr(fn, "name", None) if fn else None,
+                "arguments": getattr(fn, "arguments", None) if fn else None,
+            }
+        )
+    return calls
+
+
 class BaseLLMProvider(ABC):
     """
     大模型提供商抽象基类 / Abstract base class for LLM providers
@@ -30,13 +50,7 @@ class BaseLLMProvider(ABC):
         temperature (float): 生成温度 / Sampling temperature (0.0-1.0).
     """
 
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        max_tokens: int = 8000,
-        temperature: float = 0.7
-    ):
+    def __init__(self, api_key: str, model: str, max_tokens: int = 8000, temperature: float = 0.7):
         """
         初始化提供商 / Initialize provider
 
@@ -56,7 +70,13 @@ class BaseLLMProvider(ABC):
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        thinking: Optional[Any] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         发送聊天请求到LLM提供商 / Send chat request to LLM provider
@@ -80,10 +100,7 @@ class BaseLLMProvider(ABC):
         pass
 
     async def stream_chat(
-        self,
-        messages: List[Dict[str, str]],
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        self, messages: List[Dict[str, str]], temperature: Optional[float] = None, max_tokens: Optional[int] = None
     ) -> AsyncGenerator[str, None]:
         """
         流式输出聊天响应，逐 token 返回 / Stream chat response token by token

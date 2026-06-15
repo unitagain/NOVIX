@@ -40,11 +40,13 @@ logger = get_logger(__name__)
 # Initialize rate limiter
 limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Application lifespan hooks."""
     await run_startup_tasks()
     yield
+
 
 # Create FastAPI application / 创建 FastAPI 应用
 app = FastAPI(
@@ -92,10 +94,12 @@ async def global_exception_handler(request: Request, exc: Exception):
         content={"detail": str(exc)},
     )
 
+
 # Configure CORS / 配置跨域
 # Production-ready CORS configuration
 # For Frozen (EXE) mode: Allow all localhost addresses with any port
 # This is safe because the app only binds to 127.0.0.1 (loopback)
+
 
 def is_localhost(origin: str) -> bool:
     """Check if origin is a localhost address (safe for desktop apps)"""
@@ -104,17 +108,19 @@ def is_localhost(origin: str) -> bool:
     except Exception:
         return False
 
+
 class LoopbackOriginsMatcher:
     """CORS middleware that accepts any localhost origin for desktop apps"""
+
     def __init__(self):
         self.allow_origins = [
-            "http://localhost:3000",   # Dev: Vite dev server
-            "http://localhost:8000",   # Prod: Standard port
+            "http://localhost:3000",  # Dev: Vite dev server
+            "http://localhost:8000",  # Prod: Standard port
             "http://127.0.0.1:3000",
             "http://127.0.0.1:8000",
         ]
         # For dynamic ports in Frozen mode, we'll handle in __call__
-        self.is_frozen = getattr(sys, 'frozen', False)
+        self.is_frozen = getattr(sys, "frozen", False)
 
     def __call__(self, origin: str) -> bool:
         # Hardcoded origins (for non-dynamic setup)
@@ -125,11 +131,12 @@ class LoopbackOriginsMatcher:
             return True
         return False
 
+
 loopback_matcher = LoopbackOriginsMatcher()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)" if getattr(sys, 'frozen', False) else None,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)" if getattr(sys, "frozen", False) else None,
     allow_origins=[
         "http://localhost:3000",  # Dev: Vite dev server
         "http://localhost:8000",  # Prod: Packaged app (default port)
@@ -166,17 +173,15 @@ routers = [
 ]
 
 for router in routers:
-    app.include_router(router)                  # Dev: http://localhost:8000/projects
-    app.include_router(router, prefix="/api")   # Prod: http://localhost:8000/api/projects
-
-
-
+    app.include_router(router)  # Dev: http://localhost:8000/projects
+    app.include_router(router, prefix="/api")  # Prod: http://localhost:8000/api/projects
 
 
 @app.get("/health")
 async def health_check():
     """Health check endpoint / 健康检查"""
     from pathlib import Path
+
     data_dir = Path(settings.data_dir) if hasattr(settings, "data_dir") else Path("data")
     storage_ok = data_dir.exists() if data_dir else False
 
@@ -185,6 +190,7 @@ async def health_check():
         "version": app.version,
         "storage_accessible": storage_ok,
     }
+
 
 async def run_startup_tasks():
     """Startup event handler / 启动事件处理"""
@@ -195,7 +201,7 @@ async def run_startup_tasks():
 
     # Auto-open browser in a separate task (non-blocking)
     # Crucial: Any exception here must not crash the server
-    if getattr(sys, 'frozen', False) and not os.getenv("WENSHAPE_DESKTOP_SHELL"):
+    if getattr(sys, "frozen", False) and not os.getenv("WENSHAPE_DESKTOP_SHELL"):
         # Packaged mode: open a loopback URL (0.0.0.0 is only a bind address)
         url = f"http://127.0.0.1:{settings.port}"
         logger.info(f"Auto-opening browser at {url}")
@@ -215,21 +221,22 @@ async def run_startup_tasks():
             # Strategy 2: Platform-specific fallback for frozen mode
             try:
                 import platform
+
                 system = platform.system()
 
                 if system == "Windows":
                     # Windows: Use cmd /c start
-                    subprocess.Popen(f'start {url}', shell=True)
+                    subprocess.Popen(f"start {url}", shell=True)
                     logger.debug("Browser opened via Windows start command")
                     return
                 elif system == "Darwin":
                     # macOS: Use open command
-                    subprocess.Popen(['open', url])
+                    subprocess.Popen(["open", url])
                     logger.debug("Browser opened via macOS open command")
                     return
                 else:
                     # Linux/Others: Try xdg-open
-                    subprocess.Popen(['xdg-open', url])
+                    subprocess.Popen(["xdg-open", url])
                     logger.debug("Browser opened via xdg-open")
                     return
             except Exception as e:
@@ -239,8 +246,7 @@ async def run_startup_tasks():
             # If all browser opening attempts fail, just log it and continue
             # User can manually open the browser and navigate to the URL
             logger.warning(
-                f"Could not auto-open browser. Please manually visit: {url}\n"
-                f"浏览器无法自动打开，请手动访问：{url}"
+                f"Could not auto-open browser. Please manually visit: {url}\n" f"浏览器无法自动打开，请手动访问：{url}"
             )
 
         # Create task but don't await - let it run in background
@@ -251,15 +257,16 @@ async def run_startup_tasks():
             logger.error(f"Failed to create browser-opening task: {e}", exc_info=True)
             # Still don't crash - just continue running the server
 
+
 # --- Static Files / SPA Support (Added for Packaging) ---
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 
 # Check where static files are located
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     # Running as PyInstaller Bundle
-    base_path = getattr(sys, '_MEIPASS', Path(sys.executable).parent)
+    base_path = getattr(sys, "_MEIPASS", Path(sys.executable).parent)
     static_dir = Path(base_path) / "static"
 else:
     # Dev: Look for backend/static if it exists (for testing build script without freezing)
@@ -267,10 +274,10 @@ else:
 
 if static_dir.exists():
     logger.info(f"Serving static files from: {static_dir}")
-    
+
     # 1. Mount assets (css, js, images)
     app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="assets")
-    
+
     # 2. Serve Index at Root
     @app.get("/")
     async def serve_root():
@@ -283,15 +290,17 @@ if static_dir.exists():
         # Don't return HTML, otherwise frontend crashes (SyntaxError).
         if full_path.startswith("api/") or full_path.startswith("api"):
             from fastapi import HTTPException
+
             raise HTTPException(status_code=404, detail="API Endpoint Not Found")
 
         # Check if file exists in static (e.g. favicon.ico)
         file_path = static_dir / full_path
         if file_path.exists() and file_path.is_file():
             return FileResponse(file_path)
-            
+
         # Otherwise serve index.html for SPA routing
         return FileResponse(static_dir / "index.html")
+
 else:
     logger.warning("Static directory not found. Running in API-only mode (Dev)")
 
@@ -301,12 +310,12 @@ if __name__ == "__main__":
     import multiprocessing
     import os
     import socket
-    
+
     # Critical for Windows EXE to prevent infinite spawn loop
     multiprocessing.freeze_support()
-    
+
     # Determine execution mode
-    is_frozen = getattr(sys, 'frozen', False)
+    is_frozen = getattr(sys, "frozen", False)
 
     # Packaged desktop app should bind to loopback by default to avoid confusing URLs (0.0.0.0)
     # and reduce unnecessary firewall prompts.
@@ -339,7 +348,7 @@ if __name__ == "__main__":
             logger.warning(f"Port {chosen_port} is in use. Switching to available port {new_port}.")
             chosen_port = new_port
             settings.port = chosen_port
-    
+
     if is_frozen:
         # Prod/EXE: Run directly with app instance, NO RELOAD
         # Reloading in frozen mode causes infinite subprocess spawning
@@ -400,9 +409,4 @@ if __name__ == "__main__":
     else:
         # Dev: Run with reload
         logger.info("Running in Dev Mode")
-        uvicorn.run(
-            "app.main:app",
-            host=settings.host,
-            port=chosen_port,
-            reload=settings.debug
-        )
+        uvicorn.run("app.main:app", host=settings.host, port=chosen_port, reload=settings.debug)

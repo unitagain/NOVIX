@@ -29,6 +29,7 @@ _encoding = None
 
 try:
     import tiktoken
+
     _tiktoken_available = True
     _encoding = tiktoken.get_encoding("cl100k_base")
 except ImportError:
@@ -36,7 +37,7 @@ except ImportError:
 
 
 # 中文字符正则 / CJK character pattern
-_CJK_PATTERN = re.compile(r'[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f]')
+_CJK_PATTERN = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\u20000-\u2a6df\u2a700-\u2b73f]")
 
 
 def count_tokens(text: str, use_cache: bool = True) -> int:
@@ -140,7 +141,6 @@ MODEL_CONTEXT_WINDOWS = {
     "gpt-4o": 128000,
     "gpt-4o-mini": 128000,
     "gpt-4-turbo": 128000,
-
     # Anthropic
     "claude-opus-4-6": 1000000,
     "claude-sonnet-4-6": 1000000,
@@ -150,18 +150,15 @@ MODEL_CONTEXT_WINDOWS = {
     "claude-3-5-sonnet-20241022": 200000,
     "claude-3-5-sonnet": 200000,
     "claude-3-opus": 200000,
-
     # DeepSeek
     "deepseek-chat": 64000,
     "deepseek-reasoner": 64000,
-
     # Qwen
     "qwen3.5-plus": 131072,
     "qwen3-max": 32768,
     "qwen-turbo": 131072,
     "qwen-plus": 131072,
     "qwen-max": 32768,
-
     # Kimi (Moonshot)
     "kimi-k2.5": 256000,
     "kimi-k2-turbo-preview": 256000,
@@ -170,20 +167,17 @@ MODEL_CONTEXT_WINDOWS = {
     "moonshot-v1-8k": 8000,
     "moonshot-v1-32k": 32000,
     "moonshot-v1-128k": 128000,
-
     # GLM (智谱)
     "glm-5": 202000,
     "glm-4.7": 200000,
     "glm-4-plus": 128000,
     "glm-4": 128000,
-
     # Gemini
     "gemini-3.1-pro-preview": 1000000,
     "gemini-3.1-flash-lite-preview": 1000000,
     "gemini-3-flash-preview": 1000000,
     "gemini-2.5-flash": 1000000,
     "gemini-pro": 32000,
-
     # Grok (xAI)
     "grok-4": 2000000,
     "grok-4.1-fast": 2000000,
@@ -191,7 +185,6 @@ MODEL_CONTEXT_WINDOWS = {
     "grok-3-mini": 131072,
     # Grok — 旧模型
     "grok-2": 131072,
-
     # Wenxin (Baidu Qianfan)
     "ernie-4.5-turbo-32k": 32000,
     "ernie-x1-turbo-32k": 32000,

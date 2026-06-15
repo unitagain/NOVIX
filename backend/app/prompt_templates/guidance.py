@@ -26,9 +26,7 @@ GUIDING_AGENT_IDENTITIES = {
     ),
 }
 
-GUIDING_DEFAULT_AGENT_IDENTITY_TEMPLATE = (
-    "你是 WenShape 系统的 {agent_name} 智能体，专注于中文长篇小说创作支持。"
-)
+GUIDING_DEFAULT_AGENT_IDENTITY_TEMPLATE = "你是 WenShape 系统的 {agent_name} 智能体，专注于中文长篇小说创作支持。"
 
 
 def guiding_agent_identity(agent_name: str) -> str:

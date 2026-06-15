@@ -79,6 +79,7 @@ class EvidenceIndexStorage(BaseStorage):
             raise FileNotFoundError(f"File not found: {file_path}")
         import json
         import aiofiles
+
         async with aiofiles.open(file_path, "r", encoding=self.encoding) as f:
             raw = await f.read()
             return json.loads(raw)
@@ -86,5 +87,6 @@ class EvidenceIndexStorage(BaseStorage):
     async def write_json(self, file_path, data: Dict[str, Any]) -> None:
         """Write a JSON file."""
         import json
+
         payload = json.dumps(data, ensure_ascii=False, indent=2)
         await self._atomic_write(file_path, payload)

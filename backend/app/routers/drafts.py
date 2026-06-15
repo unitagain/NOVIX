@@ -10,8 +10,10 @@ from pydantic import BaseModel
 
 from app.schemas.draft import ChapterSummary
 from app.dependencies import (
-    get_draft_storage, get_canon_storage,
-    get_memory_pack_storage, get_binding_storage,
+    get_draft_storage,
+    get_canon_storage,
+    get_memory_pack_storage,
+    get_binding_storage,
 )
 from app.utils.chapter_id import normalize_chapter_id
 from app.utils.logger import get_logger
@@ -158,6 +160,7 @@ async def update_draft_content(project_id: str, chapter: str, body: UpdateConten
 
     try:
         from app.services.chapter_binding_service import chapter_binding_service
+
         await chapter_binding_service.build_bindings(project_id, chapter, force=True)
     except Exception as exc:
         logger.warning("Failed to rebuild bindings for %s:%s: %s", project_id, chapter, exc)

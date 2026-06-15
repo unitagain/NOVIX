@@ -50,6 +50,7 @@ from typing import List
 @dataclass(frozen=True)
 class PromptPair:
     """Encapsulates system and user prompts as a pair."""
+
     system: str
     user: str
 
@@ -75,13 +76,13 @@ def _find_boundary(text: str, pos: int, direction: str) -> int:
     """
     search_range = 200
     if direction == "end":
-        segment = text[max(0, pos - search_range):pos]
+        segment = text[max(0, pos - search_range) : pos]
         matches = list(_BOUNDARY_PATTERN.finditer(segment))
         if matches:
             return max(0, pos - search_range) + matches[-1].end()
         return pos
     else:
-        segment = text[pos:pos + search_range]
+        segment = text[pos : pos + search_range]
         match = _BOUNDARY_PATTERN.search(segment)
         if match:
             return pos + match.end()
@@ -154,7 +155,7 @@ def base_agent_system_prompt(agent_name: str, language: str = "zh") -> str:
         )
     return "\n".join(
         [
-            f"### 角色定位",
+            "### 角色定位",
             f"你是 WenShape 小说创作系统中的 {name} 智能体，专注于中文长篇小说创作领域。",
             "",
             "### 核心工作原则",
@@ -237,11 +238,7 @@ def format_context_message(context_items: List[str], language: str = "zh") -> st
     - 防御提示词注入攻击
     - 使用清晰的边界标记便于模型区分
     """
-    context_text = "\n\n".join([
-        str(item or "").strip()
-        for item in (context_items or [])
-        if str(item or "").strip()
-    ])
+    context_text = "\n\n".join([str(item or "").strip() for item in (context_items or []) if str(item or "").strip()])
     if language == "en":
         return "\n".join(
             [
@@ -312,16 +309,7 @@ def _u_shape(critical: str, body: str = "") -> str:
         return body
     if not body:
         return _repeat_critical(critical)
-    return "\n".join([
-        critical,
-        "",
-        "─" * 40,
-        body,
-        "─" * 40,
-        "",
-        "【关键约束重复 - 请务必遵守】",
-        critical
-    ])
+    return "\n".join([critical, "", "─" * 40, body, "─" * 40, "", "【关键约束重复 - 请务必遵守】", critical])
 
 
 def _json_only_rules(extra: str = "", language: str = "zh") -> str:
@@ -344,7 +332,7 @@ def _json_only_rules(extra: str = "", language: str = "zh") -> str:
             "  - No comments (// or /* */).",
             "[P0-MUST] Schema compliance:",
             "  - Keys and value types must strictly match the schema.",
-            "  - For uncertain values, use \"\", [], or null.",
+            '  - For uncertain values, use "", [], or null.',
             "  - Do not add extra fields.",
         ]
         if extra:
@@ -360,7 +348,7 @@ def _json_only_rules(extra: str = "", language: str = "zh") -> str:
         "  - 禁止注释（// 或 /* */）",
         f"{P0_MARKER} Schema 遵循：",
         "  - 键名和类型必须与给定 schema 完全匹配",
-        "  - 不确定的字段使用空字符串「\"\"」、空数组「[]」或「null」",
+        '  - 不确定的字段使用空字符串「""」、空数组「[]」或「null」',
         "  - 禁止添加 schema 未定义的额外字段",
     ]
     if extra:

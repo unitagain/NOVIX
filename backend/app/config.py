@@ -24,7 +24,6 @@ from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 logger = logging.getLogger(__name__)
 
 _TRUE_VALUES = {"1", "true", "yes", "on", "debug", "dev", "development"}
@@ -255,4 +254,3 @@ def reload_runtime_config() -> None:
     """Clear cached settings/config so the next access reloads them."""
     get_settings.cache_clear()
     get_config.cache_clear()
-

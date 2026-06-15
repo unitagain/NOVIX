@@ -179,7 +179,9 @@ class SummaryMixin:
 
         # Fallback: explicit mentions sorted by (stars desc, mention_count desc)
         mentioned = [item for item in catalog if item.get("mention_count", 0) > 0]
-        mentioned.sort(key=lambda x: (-int(x.get("stars") or 1), -int(x.get("mention_count") or 0), x.get("name") or ""))
+        mentioned.sort(
+            key=lambda x: (-int(x.get("stars") or 1), -int(x.get("mention_count") or 0), x.get("name") or "")
+        )
         for item in mentioned:
             name = item.get("name") or ""
             if not name or name in selected:
@@ -622,4 +624,5 @@ class SummaryMixin:
             open_loops=[],
             brief_summary=brief,
         )
+
     CHAPTER_SUMMARY_MAX_ATTEMPTS = 3

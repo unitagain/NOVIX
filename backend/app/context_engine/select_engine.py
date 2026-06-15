@@ -49,9 +49,7 @@ class ContextSelectEngine:
             embeddings_service: 可选的嵌入服务 / Optional embeddings service for semantic similarity.
         """
         self.embeddings = embeddings_service
-        self._distance_alpha: float = float(
-            config.get("context_budget", {}).get("fact_distance_alpha", 0.3)
-        )
+        self._distance_alpha: float = float(config.get("context_budget", {}).get("fact_distance_alpha", 0.3))
 
     # ========================================================================
     # 确定性选择：必须加载的关键项 / Deterministic Selection: Critical items

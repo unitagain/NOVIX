@@ -32,7 +32,7 @@ class MemoryPackStorage(BaseStorage):
         normalized = normalize_chapter_id(chapter_id)
         if normalized and ChapterIDValidator.validate(normalized):
             return normalized
-        return (str(chapter_id).strip() if chapter_id else "")
+        return str(chapter_id).strip() if chapter_id else ""
 
     def get_pack_path(self, project_id: str, chapter: str) -> Path:
         """Return the JSON path for a chapter memory pack."""
@@ -138,8 +138,12 @@ class MemoryPackStorage(BaseStorage):
             "built_at": pack.get("built_at"),
             "source": pack.get("source"),
             "evidence_stats": evidence_stats,
-            "card_snapshot": {
-                "characters": len(snapshot.get("characters") or []),
-                "world": len(snapshot.get("world") or []),
-            } if isinstance(snapshot, dict) else {"characters": 0, "world": 0},
+            "card_snapshot": (
+                {
+                    "characters": len(snapshot.get("characters") or []),
+                    "world": len(snapshot.get("world") or []),
+                }
+                if isinstance(snapshot, dict)
+                else {"characters": 0, "world": 0}
+            ),
         }

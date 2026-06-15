@@ -11,6 +11,7 @@ from typing import Dict, List
 
 from .shared import PromptPair, P0_MARKER, _json_only_rules, _u_shape
 
+
 def text_chunk_rerank_prompt(query: str, payload: List[Dict[str, str]]) -> PromptPair:
     """
     生成检索重排序提示词。
@@ -32,7 +33,7 @@ def text_chunk_rerank_prompt(query: str, payload: List[Dict[str, str]]) -> Promp
             "",
             "### 输出 Schema（严格 JSON 数组）",
             "",
-            f"```json",
+            "```json",
             schema,
             "```",
             "",
@@ -85,9 +86,9 @@ def text_chunk_rerank_prompt(query: str, payload: List[Dict[str, str]]) -> Promp
             "",
             "### 输出示例（学习格式，不要照抄）",
             "",
-            '```json',
+            "```json",
             '[{"id": "c1", "score": 4}, {"id": "c2", "score": 1}]',
-            '```',
+            "```",
             "",
             "### 开始输出",
             "请直接输出 JSON 数组：",

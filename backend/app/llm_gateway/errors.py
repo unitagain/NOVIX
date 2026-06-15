@@ -13,7 +13,6 @@ License: PolyForm Noncommercial License 1.0.0
 
 from typing import Tuple
 
-
 # Error message patterns for classification
 # 用于分类的错误消息模式
 
@@ -202,6 +201,7 @@ def get_retry_delay(attempt: int, base_delays: list = None, max_delay: float = 6
 
     # Add small jitter (0-10% of delay) to prevent thundering herd
     import random
+
     jitter = delay * random.uniform(0, 0.1)
 
     return delay + jitter

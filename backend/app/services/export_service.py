@@ -9,14 +9,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
-from pathlib import Path
 import re
-from typing import Dict, List, Optional, Sequence
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence
 
 import yaml
-from docx import Document
 
 from app.dependencies import get_draft_storage
+
+if TYPE_CHECKING:  # 仅类型检查期可见，运行期不导入 python-docx（保持 docx 为可选依赖）
+    from docx import Document
 
 
 @dataclass
@@ -138,6 +139,8 @@ class ExportService:
 
     def _render_docx(self, chapters: Sequence[ExportChapter], include_chapter_titles: bool = True) -> bytes:
         """渲染 DOCX / Render DOCX."""
+        from docx import Document  # 惰性导入：未安装 python-docx 时不阻断其它导出格式与路由加载
+
         document = Document()
         for index, chapter in enumerate(chapters):
             if index > 0:

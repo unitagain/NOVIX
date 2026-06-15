@@ -50,7 +50,9 @@ def normalize_prose_paragraphs(text: str | None, language: str = "zh") -> str:
     is_english = str(language or "").lower().startswith("en")
     short_threshold = 110 if is_english else 55
     target_threshold = 280 if is_english else 140
-    sentence_endings = (".", "!", "?", ".”", "!”", "?”") if is_english else ("。", "！", "？", "”", "。」", "！」", "？」")
+    sentence_endings = (
+        (".", "!", "?", ".”", "!”", "?”") if is_english else ("。", "！", "？", "”", "。」", "！」", "？」")
+    )
 
     def should_preserve(paragraph: str) -> bool:
         stripped = paragraph.strip()

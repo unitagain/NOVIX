@@ -36,7 +36,7 @@ class DraftStorage(BaseStorage):
         normalized = normalize_chapter_id(chapter_id)
         if normalized and ChapterIDValidator.validate(normalized):
             return normalized
-        return (str(chapter_id).strip() if chapter_id else "")
+        return str(chapter_id).strip() if chapter_id else ""
 
     def _resolve_chapter_dir_name(self, project_id: str, chapter: str) -> str:
         drafts_dir = self.get_project_path(project_id) / "drafts"
@@ -469,7 +469,9 @@ class DraftStorage(BaseStorage):
             try:
                 data = await self.read_yaml(file_path)
                 summary = ChapterSummary(**data)
-                summary.chapter = self._canonicalize_chapter_id(summary.chapter or file_path.stem.replace("_summary", ""))
+                summary.chapter = self._canonicalize_chapter_id(
+                    summary.chapter or file_path.stem.replace("_summary", "")
+                )
                 summary = self._ensure_volume_id(summary)
                 if volume_id and summary.volume_id != volume_id:
                     continue
@@ -520,7 +522,9 @@ class DraftStorage(BaseStorage):
 
         def chapter_sort_key(chapter_id: str):
             summary = summary_map.get(chapter_id)
-            vol_id = (summary.volume_id if summary else None) or (ChapterIDValidator.extract_volume_id(chapter_id) or "V1")
+            vol_id = (summary.volume_id if summary else None) or (
+                ChapterIDValidator.extract_volume_id(chapter_id) or "V1"
+            )
             vol_weight = self._volume_sort_weight(vol_id)
             order_weight = summary.order_index if summary and isinstance(summary.order_index, int) else 10**9
             chapter_weight = ChapterIDValidator.calculate_weight(chapter_id)
@@ -640,6 +644,7 @@ class DraftStorage(BaseStorage):
             Ranked text chunk hits.
         """
         from app.services.text_chunk_service import text_chunk_service
+
         return await text_chunk_service.search(
             project_id=project_id,
             query=query,
@@ -663,6 +668,7 @@ class DraftStorage(BaseStorage):
             Index metadata.
         """
         from app.services.text_chunk_service import text_chunk_service
+
         meta = await text_chunk_service.build_index(project_id, force=True)
         return meta.model_dump(mode="json")
 
@@ -701,7 +707,7 @@ class DraftStorage(BaseStorage):
         Returns:
             Updated summaries for chapters in the provided order.
         """
-        canonical_volume = (str(volume_id or "").strip().upper() or "V1")
+        canonical_volume = str(volume_id or "").strip().upper() or "V1"
         chapter_order = [self._canonicalize_chapter_id(ch) for ch in (chapter_order or []) if str(ch or "").strip()]
         if not chapter_order:
             return []

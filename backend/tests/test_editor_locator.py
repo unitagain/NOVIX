@@ -21,7 +21,7 @@ def test_extract_quoted_candidates_handles_symbols() -> None:
 def test_auto_locate_selection_by_quoted_text() -> None:
     editor = _make_editor()
     text = "第一段文本。\n\n第二段文本。\n\n第三段文本。"
-    feedback = '把“第二段文本。”改得更紧凑'
+    feedback = "把“第二段文本。”改得更紧凑"
     located = editor._auto_locate_selection(text, feedback)
 
     assert located is not None

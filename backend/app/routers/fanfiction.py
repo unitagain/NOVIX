@@ -136,10 +136,10 @@ async def search_wikis(request: SearchRequest):
 async def preview_page(request: PreviewRequest):
     """
     Scrape a Wiki page and return preview
-    
+
     Args:
         url: URL of the wiki page
-        
+
     Returns:
         Page content and metadata
     """
@@ -147,25 +147,19 @@ async def preview_page(request: PreviewRequest):
         if not _is_http_url(request.url):
             return PreviewResponse(success=False, error="仅支持 http/https 链接。")
         result = crawler_service.scrape_page(request.url)
-        
-        if not result['success']:
-            return PreviewResponse(
-                success=False,
-                error=result.get('error', 'Unknown error')
-            )
-        
+
+        if not result["success"]:
+            return PreviewResponse(success=False, error=result.get("error", "Unknown error"))
+
         return PreviewResponse(
             success=True,
-            title=result['title'],
-            content=result['content'],
-            links=result['links'],
-            is_list_page=result['is_list_page']
+            title=result["title"],
+            content=result["content"],
+            links=result["links"],
+            is_list_page=result["is_list_page"],
         )
     except Exception as e:
-        return PreviewResponse(
-            success=False,
-            error=str(e)
-        )
+        return PreviewResponse(success=False, error=str(e))
 
 
 @router.post("/extract", response_model=ExtractResponse)
@@ -206,11 +200,8 @@ async def extract_cards(request: ExtractRequest):
         }
     except Exception as e:
         logger.error("Extraction failed: %s", e, exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "proposals": []
-        }
+        return {"success": False, "error": str(e), "proposals": []}
+
 
 @router.post("/extract/batch", response_model=ExtractResponse)
 async def batch_extract_cards(request: BatchExtractRequest):
@@ -258,11 +249,7 @@ async def batch_extract_cards(request: BatchExtractRequest):
             return {"success": False, "error": "No extractable pages", "proposals": []}
 
         return {"success": True, "proposals": proposals}
-        
+
     except Exception as e:
         logger.error("Batch extraction failed: %s", e, exc_info=True)
-        return {
-            "success": False,
-            "error": str(e),
-            "proposals": []
-        }
+        return {"success": False, "error": str(e), "proposals": []}

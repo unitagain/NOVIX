@@ -21,4 +21,3 @@ def create_async_openai_client(api_key: str, base_url: Optional[str] = None) -> 
     """
     http_client = httpx.AsyncClient()
     return AsyncOpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
-

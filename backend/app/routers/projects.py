@@ -43,10 +43,10 @@ async def list_projects():
         项目列表 / List of projects with id, name, description, timestamps.
     """
     data_dir = Path(card_storage.data_dir)
-    
+
     if not data_dir.exists():
         return []
-    
+
     projects = []
     for project_dir in data_dir.iterdir():
         if project_dir.is_dir():
@@ -54,15 +54,17 @@ async def list_projects():
             if project_file.exists():
                 data = await card_storage.read_yaml(project_file)
                 language = normalize_language(data.get("language"), default="zh")
-                projects.append({
-                    "id": project_dir.name,
-                    "name": data.get("name", project_dir.name),
-                    "description": data.get("description", ""),
-                    "language": language,
-                    "created_at": data.get("created_at", ""),
-                    "updated_at": data.get("updated_at", "")
-                })
-    
+                projects.append(
+                    {
+                        "id": project_dir.name,
+                        "name": data.get("name", project_dir.name),
+                        "description": data.get("description", ""),
+                        "language": language,
+                        "created_at": data.get("created_at", ""),
+                        "updated_at": data.get("updated_at", ""),
+                    }
+                )
+
     return projects
 
 
@@ -91,7 +93,7 @@ async def create_project(project: ProjectCreate):
 
     if project_dir.exists():
         raise HTTPException(status_code=400, detail="Project already exists")
-    
+
     # Create project structure / 创建项目结构
     card_storage.ensure_dir(project_dir / "cards" / "characters")
     card_storage.ensure_dir(project_dir / "cards" / "world")
@@ -100,7 +102,7 @@ async def create_project(project: ProjectCreate):
     card_storage.ensure_dir(project_dir / "drafts")
     card_storage.ensure_dir(project_dir / "summaries")
     card_storage.ensure_dir(project_dir / "traces")
-    
+
     # Save project metadata / 保存项目元数据
     now = datetime.now().isoformat()
     lang_value = project.language if isinstance(project.language, str) else project.language.value
@@ -109,7 +111,7 @@ async def create_project(project: ProjectCreate):
         "description": project.description,
         "language": lang_value,
         "created_at": now,
-        "updated_at": now
+        "updated_at": now,
     }
 
     await card_storage.write_yaml(project_dir / "project.yaml", project_data)
@@ -120,7 +122,7 @@ async def create_project(project: ProjectCreate):
         "description": project.description,
         "language": lang_value,
         "created_at": now,
-        "updated_at": now
+        "updated_at": now,
     }
 
 
@@ -129,10 +131,10 @@ async def get_project(project_id: str):
     """
     Get project details
     获取项目详情
-    
+
     Args:
         project_id: Project ID / 项目ID
-        
+
     Returns:
         Project details / 项目详情
     """
@@ -146,17 +148,17 @@ async def get_project(project_id: str):
 
     if not project_file.exists():
         raise HTTPException(status_code=404, detail="Project not found")
-    
+
     data = await card_storage.read_yaml(project_file)
     language = normalize_language(data.get("language"), default="zh")
-    
+
     return {
         "id": project_id,
         "name": data.get("name", project_id),
         "description": data.get("description", ""),
         "language": language,
         "created_at": data.get("created_at", ""),
-        "updated_at": data.get("updated_at", "")
+        "updated_at": data.get("updated_at", ""),
     }
 
 
@@ -165,41 +167,41 @@ async def get_project_stats(project_id: str):
     """
     Get project statistics
     获取项目统计信息
-    
+
     Args:
         project_id: Project ID / 项目ID
-        
+
     Returns:
         Project statistics / 项目统计信息
     """
     # Count characters / 统计角色数
     character_names = await card_storage.list_character_cards(project_id)
     character_count = len(character_names)
-    
+
     # Count facts / 统计事实数
     facts = await canon_storage.get_all_facts(project_id)
     fact_count = len(facts)
-    
+
     # Count chapters / 统计章节数
     chapters = await draft_storage.list_chapters(project_id)
     chapter_count = len(chapters)
-    
+
     # Calculate total word count / 计算总字数
     total_word_count = 0
     completed_chapters = 0
-    
+
     for chapter in chapters:
         final_draft = await draft_storage.get_final_draft(project_id, chapter)
         if final_draft:
             total_word_count += len(final_draft)
             completed_chapters += 1
-    
+
     return {
         "total_word_count": total_word_count,
         "completed_chapters": completed_chapters,
         "in_progress_chapters": chapter_count - completed_chapters,
         "character_count": character_count,
-        "fact_count": fact_count
+        "fact_count": fact_count,
     }
 
 
@@ -208,10 +210,10 @@ async def delete_project(project_id: str):
     """
     Delete a project
     删除项目
-    
+
     Args:
         project_id: Project ID / 项目ID
-        
+
     Returns:
         Deletion result / 删除结果
     """
@@ -228,7 +230,7 @@ async def delete_project(project_id: str):
         raise HTTPException(status_code=404, detail="Project not found")
 
     shutil.rmtree(project_dir)
-    
+
     return {"success": True, "message": "Project deleted"}
 
 

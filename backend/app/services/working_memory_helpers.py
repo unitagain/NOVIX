@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from app.schemas.draft import SceneBrief
 from app.services.evidence_service import evidence_service
 
+
 def _build_focus_terms(scene_brief: Optional[SceneBrief], goal_text: str) -> List[str]:
     terms: List[str] = []
     terms.extend(_extract_terms(goal_text))
@@ -462,7 +463,10 @@ def _should_include_material(item: Dict[str, Any]) -> bool:
         return False
     if text.startswith("理由:"):
         return False
-    if any(text.startswith(prefix) for prefix in ["description: 理由", "identity: 理由", "appearance: 理由", "motivation: 理由"]):
+    if any(
+        text.startswith(prefix)
+        for prefix in ["description: 理由", "identity: 理由", "appearance: 理由", "motivation: 理由"]
+    ):
         return False
 
     if item_type == "world_entity" and stars <= 1 and score < 2.5:
@@ -540,6 +544,7 @@ def _sanitize_answer_items(answers: List[Dict[str, Any]]) -> List[Dict[str, Any]
 
 def _answer_to_evidence_items(answers: List[Dict[str, Any]], chapter: Optional[str] = None) -> List[Dict[str, Any]]:
     import time
+
     items = []
     timestamp = int(time.time())
     for idx, answer in enumerate(_sanitize_answer_items(answers)):
@@ -578,5 +583,3 @@ def _answer_to_evidence_items(answers: List[Dict[str, Any]], chapter: Optional[s
 def _make_question_key(chapter: Optional[str], q_type: Optional[str], text: Optional[str]) -> str:
     base = f"{chapter or ''}|{q_type or ''}|{text or ''}".strip()
     return _normalize_for_dedup(base)
-
-

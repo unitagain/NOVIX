@@ -109,7 +109,9 @@ class FanfictionMixin:
                 continue
 
             name = str(parsed.get("name") or clean_title or "Unknown").strip()
-            card_type = self._normalize_fanfiction_card_type(parsed.get("type")) or self._infer_card_type_from_title(name)
+            card_type = self._normalize_fanfiction_card_type(parsed.get("type")) or self._infer_card_type_from_title(
+                name
+            )
             description = self._sanitize_fanfiction_description(str(parsed.get("description") or "").strip())
             last_length = len(description)
 
@@ -329,7 +331,9 @@ class FanfictionMixin:
             if split_at >= int(limit * 0.6):
                 truncated = truncated[:split_at].rstrip()
         else:
-            sentence_cut = max(truncated.rfind(". "), truncated.rfind("! "), truncated.rfind("? "), truncated.rfind("。"))
+            sentence_cut = max(
+                truncated.rfind(". "), truncated.rfind("! "), truncated.rfind("? "), truncated.rfind("。")
+            )
             if sentence_cut >= int(limit * 0.6):
                 truncated = truncated[: sentence_cut + 1].rstrip()
         return truncated
@@ -499,8 +503,14 @@ class FanfictionMixin:
                     "Personality",
                 ),
                 ({"ability", "abilities", "powers", "power", "skills", "equipment", "weapons"}, "Ability"),
-                ({"relations", "relationships", "relationship", "family", "allies", "enemies", "associates"}, "Relations"),
-                ({"writing notes", "writing note", "notes", "writing cautions", "cautions", "writing caution"}, "Writing Notes"),
+                (
+                    {"relations", "relationships", "relationship", "family", "allies", "enemies", "associates"},
+                    "Relations",
+                ),
+                (
+                    {"writing notes", "writing note", "notes", "writing cautions", "cautions", "writing caution"},
+                    "Writing Notes",
+                ),
             ]
 
             canonical = ""
@@ -530,10 +540,7 @@ class FanfictionMixin:
         pattern = r"^(%s):\s*" % "|".join([re.escape(label) for label in labels])
         paragraphs = [p.strip() for p in re.split(r"\n{2,}", body) if p.strip()]
         labeled_paragraphs = sum(1 for p in paragraphs if re.match(pattern, p, flags=re.IGNORECASE))
-        found = set(
-            m.group(1).strip().lower()
-            for m in re.finditer(pattern, body, flags=re.IGNORECASE | re.MULTILINE)
-        )
+        found = set(m.group(1).strip().lower() for m in re.finditer(pattern, body, flags=re.IGNORECASE | re.MULTILINE))
         return {"unique": found, "labeled_paragraphs": labeled_paragraphs}
 
     def _is_low_quality_fanfiction_description(self, text: str) -> bool:
@@ -571,7 +578,11 @@ class FanfictionMixin:
                 and len(body) >= 200
             ):
                 return True
-            if re.search(r"\b(created by|designed by|portrayed by|voice(?:d)? by|first appearance|first game)\b", body, re.IGNORECASE):
+            if re.search(
+                r"\b(created by|designed by|portrayed by|voice(?:d)? by|first appearance|first game)\b",
+                body,
+                re.IGNORECASE,
+            ):
                 if label_hits < 2:
                     return True
             if len(re.findall(r"\)[A-Za-z]", body)) >= 3:
@@ -684,9 +695,7 @@ class FanfictionMixin:
         ]
         stop_heads = [h for h in headings if h.lower() != str(label).strip().lower()]
         stop_re = "|".join([re.escape(h) for h in stop_heads]) or r"$a"  # never matches
-        pattern = re.compile(
-            rf"(?ims)^(?:{re.escape(label)}):\s*(.+?)(?=\n\n(?:{stop_re}):|\Z)"
-        )
+        pattern = re.compile(rf"(?ims)^(?:{re.escape(label)}):\s*(.+?)(?=\n\n(?:{stop_re}):|\Z)")
         match = pattern.search(str(content or ""))
         return match.group(1).strip() if match else ""
 
@@ -707,7 +716,10 @@ class FanfictionMixin:
                 if not line:
                     continue
                 key_lower = line.split(":")[0].lower() if ":" in line else line.lower()
-                if any(k in key_lower for k in ["姓名", "本名", "别名", "身份", "职业", "性别", "所属", "阵营", "种族", "配音"]):
+                if any(
+                    k in key_lower
+                    for k in ["姓名", "本名", "别名", "身份", "职业", "性别", "所属", "阵营", "种族", "配音"]
+                ):
                     info_lines.append(line)
         if info_lines:
             combined = f"{title}，" + "，".join(info_lines)
@@ -861,7 +873,9 @@ class FanfictionMixin:
                 for k in ["relations", "relationship", "relationships", "allies", "enemies", "family", "associates"]
             ):
                 buckets.setdefault("relations", text)
-            elif any(k in label for k in ["identity", "role", "background", "biography", "history", "overview", "profile"]):
+            elif any(
+                k in label for k in ["identity", "role", "background", "biography", "history", "overview", "profile"]
+            ):
                 buckets.setdefault("identity", text)
         return buckets
 
@@ -890,16 +904,75 @@ class FanfictionMixin:
             "首次登场",
         }
         key_aliases = {
-            "identity": {"identity", "name", "full name", "real name", "title", "origin", "nationality", "姓名", "本名", "名称", "身份", "头衔"},
+            "identity": {
+                "identity",
+                "name",
+                "full name",
+                "real name",
+                "title",
+                "origin",
+                "nationality",
+                "姓名",
+                "本名",
+                "名称",
+                "身份",
+                "头衔",
+            },
             "occupation": {"occupation", "role", "profession", "position", "职业", "职务", "定位"},
             "affiliation": {"affiliation", "organization", "faction", "team", "group", "所属", "阵营", "组织"},
             "species": {"species", "race", "种族"},
             "status": {"status", "alignment", "状态", "立场"},
             "alias": {"alias", "aliases", "nickname", "codename", "also known as", "aka", "别名", "称号", "称呼"},
-            "appearance": {"appearance", "hair color", "eye color", "height", "build", "outfit", "gender", "age", "外貌", "发色", "瞳色", "身高", "体重", "性别", "年龄"},
+            "appearance": {
+                "appearance",
+                "hair color",
+                "eye color",
+                "height",
+                "build",
+                "outfit",
+                "gender",
+                "age",
+                "外貌",
+                "发色",
+                "瞳色",
+                "身高",
+                "体重",
+                "性别",
+                "年龄",
+            },
             "personality": {"personality", "traits", "temperament", "性格", "特征", "特点"},
-            "ability": {"ability", "abilities", "skills", "powers", "power", "weapon", "equipment", "magic", "能力", "技能", "武器", "装备", "魔法"},
-            "relations": {"family", "partner", "allies", "enemies", "relationship", "relatives", "friends", "rivals", "mentor", "student", "关系", "家属", "同伴", "敌对", "师徒"},
+            "ability": {
+                "ability",
+                "abilities",
+                "skills",
+                "powers",
+                "power",
+                "weapon",
+                "equipment",
+                "magic",
+                "能力",
+                "技能",
+                "武器",
+                "装备",
+                "魔法",
+            },
+            "relations": {
+                "family",
+                "partner",
+                "allies",
+                "enemies",
+                "relationship",
+                "relatives",
+                "friends",
+                "rivals",
+                "mentor",
+                "student",
+                "关系",
+                "家属",
+                "同伴",
+                "敌对",
+                "师徒",
+            },
         }
 
         result: Dict[str, str] = {}
@@ -1103,7 +1176,9 @@ class FanfictionMixin:
             return ""
         return description_en
 
-    async def _bridge_payload_to_english(self, payload: Dict[str, Any], fallback_title: str, source: str) -> Dict[str, Any]:
+    async def _bridge_payload_to_english(
+        self, payload: Dict[str, Any], fallback_title: str, source: str
+    ) -> Dict[str, Any]:
         if self.language != "en":
             return {}
         if not isinstance(payload, dict):

@@ -20,7 +20,12 @@ from app.utils.llm_output import parse_json_payload
 from app.utils.text import normalize_prose_paragraphs
 
 from app.agents.base import BaseAgent
-from app.prompts import get_writer_system_prompt, writer_draft_prompt, writer_questions_prompt, writer_research_plan_prompt
+from app.prompts import (
+    get_writer_system_prompt,
+    writer_draft_prompt,
+    writer_questions_prompt,
+    writer_research_plan_prompt,
+)
 from app.schemas.draft import SceneBrief
 from app.schemas.card import StyleCard
 
@@ -58,9 +63,18 @@ class WriterAgent(BaseAgent):
             {"type": "detail_gap", "text": "还有哪些具体细节（地点/时间/物件）需要确定后再写？"},
         ],
         "en": [
-            {"type": "plot_point", "text": "What plot or world-building information is still needed to achieve this chapter's goal?"},
-            {"type": "character_change", "text": "Which characters' motivations or emotions need clarification to avoid contradicting established facts?"},
-            {"type": "detail_gap", "text": "What specific details (setting, timeline, objects) should be settled before writing?"},
+            {
+                "type": "plot_point",
+                "text": "What plot or world-building information is still needed to achieve this chapter's goal?",
+            },
+            {
+                "type": "character_change",
+                "text": "Which characters' motivations or emotions need clarification to avoid contradicting established facts?",
+            },
+            {
+                "type": "detail_gap",
+                "text": "What specific details (setting, timeline, objects) should be settled before writing?",
+            },
         ],
     }
 
@@ -156,6 +170,7 @@ class WriterAgent(BaseAgent):
         # Build chapter bindings to enable context linking
         try:
             from app.services.chapter_binding_service import chapter_binding_service
+
             await chapter_binding_service.build_bindings(project_id, chapter, force=True)
         except Exception as exc:
             logger.warning("Failed to build chapter bindings for %s:%s: %s", project_id, chapter, exc)
@@ -168,10 +183,7 @@ class WriterAgent(BaseAgent):
         }
 
     async def generate_questions(
-        self,
-        context_package: Dict[str, Any],
-        scene_brief: Optional[SceneBrief],
-        chapter_goal: str
+        self, context_package: Dict[str, Any], scene_brief: Optional[SceneBrief], chapter_goal: str
     ) -> List[Dict[str, str]]:
         """
         生成写前问卷 - 引导用户确认重要细节
@@ -213,7 +225,7 @@ class WriterAgent(BaseAgent):
             context_items.append("事实摘要（节选，供反问参考）：")
             for key in ["summary_with_events", "summary_only", "full_facts"]:
                 items = context_package.get(key, []) or []
-                for item in items[:int(_wlimits.get("fact_summary_items", 2))]:
+                for item in items[: int(_wlimits.get("fact_summary_items", 2))]:
                     summary = str(item.get("summary") or "").strip()
                     events = item.get("key_events") or []
                     chapter_id = item.get("chapter") or ""
@@ -223,7 +235,9 @@ class WriterAgent(BaseAgent):
                         if summary:
                             block.append(f"摘要：{summary}")
                         if events:
-                            block.append("事件：" + "；".join([str(e) for e in events[:int(_wlimits.get("event_items", 4))]]))
+                            block.append(
+                                "事件：" + "；".join([str(e) for e in events[: int(_wlimits.get("event_items", 4))]])
+                            )
                         context_items.append("\n".join(block))
         prompt = writer_questions_prompt(context_items, language=self.language)
 
@@ -306,7 +320,10 @@ class WriterAgent(BaseAgent):
                 cleaned = [str(q).strip() for q in queries if str(q).strip()]
                 if cleaned:
                     _wl = app_cfg.get("writer", {}).get("context_limits", {})
-                    return {"queries": cleaned[:int(_wl.get("query_items", 4))], "note": str(data.get("note") or "").strip()}
+                    return {
+                        "queries": cleaned[: int(_wl.get("query_items", 4))],
+                        "note": str(data.get("note") or "").strip(),
+                    }
 
         # Fallback: use gap texts as queries
         fallback = [t for t in gap_texts if t][:3]
@@ -522,9 +539,7 @@ class WriterAgent(BaseAgent):
             target_word_count=target_word_count,
             language=self.language,
         )
-        fixed_tokens = (
-            count_tokens(prompt.system) + count_tokens(prompt.user) + 200
-        )
+        fixed_tokens = count_tokens(prompt.system) + count_tokens(prompt.user) + 200
 
         # context 可用预算
         context_budget = max(0, input_limit - fixed_tokens)
@@ -536,8 +551,7 @@ class WriterAgent(BaseAgent):
         # P1: 必选 — 章节目标 + 场景简要
         if chapter_goal:
             packer.add(
-                "GOAL PRIORITY:\n- " + str(chapter_goal).strip() + "\n"
-                "Only write content that serves the goal.",
+                "GOAL PRIORITY:\n- " + str(chapter_goal).strip() + "\n" "Only write content that serves the goal.",
                 section="goal",
             )
 
@@ -586,21 +600,25 @@ class WriterAgent(BaseAgent):
         _cl = app_cfg.get("writer", {}).get("context_limits", {})
         if not use_compact_context:
             if character_cards:
-                cards_text = self._format_model_list("Character Cards:", character_cards[:int(_cl.get("character_cards", 10))])
+                cards_text = self._format_model_list(
+                    "Character Cards:", character_cards[: int(_cl.get("character_cards", 10))]
+                )
                 packer.add(cards_text, section="character_cards")
 
             if world_cards:
-                cards_text = self._format_model_list("World Cards:", world_cards[:int(_cl.get("world_cards", 10))])
+                cards_text = self._format_model_list("World Cards:", world_cards[: int(_cl.get("world_cards", 10))])
                 packer.add(cards_text, section="world_cards")
 
         # P9: 事实和状态（仅在无 working_memory 时）
         if not use_compact_context:
             if facts and not (evidence_pack and evidence_pack.get("items")):
-                facts_text = self._format_model_list("Canon Facts:", facts[:int(_cl.get("facts", 20))])
+                facts_text = self._format_model_list("Canon Facts:", facts[: int(_cl.get("facts", 20))])
                 packer.add(facts_text, section="facts")
 
             if character_states:
-                states_text = self._format_model_list("Character States:", character_states[:int(_cl.get("character_states", 20))])
+                states_text = self._format_model_list(
+                    "Character States:", character_states[: int(_cl.get("character_states", 20))]
+                )
                 packer.add(states_text, section="character_states")
 
         # P10: 前章摘要（最低优先级，最先被裁剪）
@@ -612,9 +630,10 @@ class WriterAgent(BaseAgent):
 
         if packer.dropped_sections:
             logger.warning(
-                "Writer context budget exceeded: dropped sections %s "
-                "(used %d / budget %d tokens)",
-                packer.dropped_sections, packer.used_tokens, context_budget,
+                "Writer context budget exceeded: dropped sections %s " "(used %d / budget %d tokens)",
+                packer.dropped_sections,
+                packer.used_tokens,
+                context_budget,
             )
 
         return self.build_messages(
@@ -790,4 +809,3 @@ class _ContextBudgetPacker:
         self.items.append(text)
         self.used_tokens += tokens
         return True
-

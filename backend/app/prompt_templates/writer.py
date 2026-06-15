@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from .shared import PromptPair, P0_MARKER, P1_MARKER, _json_only_rules, _u_shape
 
+
 def get_writer_system_prompt(language: str = "zh") -> str:
     """Return Writer system prompt in the specified language."""
     if language == "en":
@@ -320,18 +321,18 @@ def writer_questions_prompt(context_items: List[str], language: str = "zh") -> P
             "",
             "```json",
             "[",
-            '  {',
+            "  {",
             '    "type": "plot_point",',
             '    "text": "本章结尾的情绪落点更偏向：A.告别的伤感 / B.冲突的紧张 / C.和解的释然？"',
-            '  },',
-            '  {',
+            "  },",
+            "  {",
             '    "type": "character_change",',
             '    "text": "主角此刻对配角的态度变化程度：A.轻微软化 / B.明显转变 / C.保持原状？"',
-            '  },',
-            '  {',
+            "  },",
+            "  {",
             '    "type": "detail_gap",',
             '    "text": "关键对话发生的场景：A.室内私密空间 / B.户外开放环境 / C.沿用上一章场景？"',
-            '  }',
+            "  }",
             "]",
             "```",
             "",
@@ -499,7 +500,7 @@ def writer_research_plan_prompt(
             "",
             f"**章节目标**：{str(chapter_goal or '').strip() or '未指定'}",
             "",
-            f"**未解决缺口**（节选前6条）：",
+            "**未解决缺口**（节选前6条）：",
             "\n".join([f"  - {g}" for g in (gap_texts or [])[:6]]) or "  - 无",
             "",
             f"**当前轮次**：第 {int(round_index)} 轮",

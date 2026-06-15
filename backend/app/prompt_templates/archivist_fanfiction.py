@@ -15,6 +15,7 @@ from .shared import (
 )
 from .archivist_core import get_archivist_system_prompt
 
+
 def archivist_fanfiction_card_prompt(title: str, content: str, language: str = "zh") -> PromptPair:
     """
     生成同人/百科页面转设定卡的提示词。
@@ -47,17 +48,17 @@ def archivist_fanfiction_card_prompt(title: str, content: str, language: str = "
                 "### Description Rules (writing-ready, not plot recap)",
                 "",
                 "[P0-MUST] `description` must be written in English only.",
-                  "[P0-MUST] Use multi-paragraph formatting, with one blank line between paragraphs.",
-                  "[P0-MUST] Each paragraph must start with one allowed label:",
-                  "  Identity: / Alias: / Appearance: / Personality: / Ability: / Relations: / Writing Notes:",
-                  "[P0-MUST] Minimum labeled paragraphs:",
-                  "  - Character: Identity + Appearance + Personality + Ability + Relations + Writing Notes (Alias optional)",
-                  "  - World: Identity + Ability + Relations + Writing Notes",
-                  "[P0-MUST] Remove citation marks such as [1], [2], [3].",
-                  "[P0-MUST] Do not output raw infobox credits/cast lists.",
-                  "[P0-MUST] Rewrite copied spans; do not reproduce long verbatim fragments from source.",
-                  "[P0-MUST] Do not output labels like Title:/Summary:/Table/RawText.",
-                  "[P0-MUST] Do not output prompt/meta text and do not use markdown code fences.",
+                "[P0-MUST] Use multi-paragraph formatting, with one blank line between paragraphs.",
+                "[P0-MUST] Each paragraph must start with one allowed label:",
+                "  Identity: / Alias: / Appearance: / Personality: / Ability: / Relations: / Writing Notes:",
+                "[P0-MUST] Minimum labeled paragraphs:",
+                "  - Character: Identity + Appearance + Personality + Ability + Relations + Writing Notes (Alias optional)",
+                "  - World: Identity + Ability + Relations + Writing Notes",
+                "[P0-MUST] Remove citation marks such as [1], [2], [3].",
+                "[P0-MUST] Do not output raw infobox credits/cast lists.",
+                "[P0-MUST] Rewrite copied spans; do not reproduce long verbatim fragments from source.",
+                "[P0-MUST] Do not output labels like Title:/Summary:/Table/RawText.",
+                "[P0-MUST] Do not output prompt/meta text and do not use markdown code fences.",
                 "",
                 "[P1-SHOULD] Character cards follow this order:",
                 "  1) Identity (role/faction/duty in canon)",
@@ -86,11 +87,11 @@ def archivist_fanfiction_card_prompt(title: str, content: str, language: str = "
                 "",
                 "### Originality Requirements",
                 "",
-                  "[P0-MUST] Avoid plot retelling; output reusable setting constraints for writing.",
-                  "[P0-MUST] If evidence is missing, explicitly mark uncertainty; do not invent facts.",
-                  "[P1-SHOULD] Prefer high-density, reusable constraints. If evidence exists, target 120-220 words total.",
-              ]
-          )
+                "[P0-MUST] Avoid plot retelling; output reusable setting constraints for writing.",
+                "[P0-MUST] If evidence is missing, explicitly mark uncertainty; do not invent facts.",
+                "[P1-SHOULD] Prefer high-density, reusable constraints. If evidence exists, target 120-220 words total.",
+            ]
+        )
         user = "\n".join(
             [
                 critical,
@@ -196,7 +197,10 @@ def archivist_fanfiction_card_prompt(title: str, content: str, language: str = "
     )
     return PromptPair(system=get_archivist_system_prompt(language=language), user=user)
 
-def archivist_fanfiction_card_repair_prompt(title: str, content: str, hint: str = "", language: str = "zh") -> PromptPair:
+
+def archivist_fanfiction_card_repair_prompt(
+    title: str, content: str, hint: str = "", language: str = "zh"
+) -> PromptPair:
     """
     生成设定卡修复提示词。
 
@@ -218,24 +222,24 @@ def archivist_fanfiction_card_repair_prompt(title: str, content: str, hint: str 
                 "",
                 "[P0-MUST] JSON only, no extra text.",
                 "[P0-MUST] type must be Character or World.",
-                  "[P0-MUST] description must be written in English only.",
-                  "[P0-MUST] description must use multi-paragraph formatting with one blank line between paragraphs.",
-                  "[P0-MUST] Each paragraph must start with one allowed label:",
-                  "  Identity: / Alias: / Appearance: / Personality: / Ability: / Relations: / Writing Notes:",
-                  "[P0-MUST] Minimum labeled paragraphs:",
-                  "  - Character: Identity + Appearance + Personality + Ability + Relations + Writing Notes (Alias optional)",
-                  "  - World: Identity + Ability + Relations + Writing Notes",
-                  "[P0-MUST] description must not contain citation marks like [1], [2], [3].",
-                  "[P0-MUST] description must not be raw credits/cast list text.",
-                  "[P0-MUST] Do not output Title:/Summary:/Table/RawText tags.",
-                  "[P0-MUST] Rewrite copied long fragments from source; no long verbatim spans.",
+                "[P0-MUST] description must be written in English only.",
+                "[P0-MUST] description must use multi-paragraph formatting with one blank line between paragraphs.",
+                "[P0-MUST] Each paragraph must start with one allowed label:",
+                "  Identity: / Alias: / Appearance: / Personality: / Ability: / Relations: / Writing Notes:",
+                "[P0-MUST] Minimum labeled paragraphs:",
+                "  - Character: Identity + Appearance + Personality + Ability + Relations + Writing Notes (Alias optional)",
+                "  - World: Identity + Ability + Relations + Writing Notes",
+                "[P0-MUST] description must not contain citation marks like [1], [2], [3].",
+                "[P0-MUST] description must not be raw credits/cast list text.",
+                "[P0-MUST] Do not output Title:/Summary:/Table/RawText tags.",
+                "[P0-MUST] Rewrite copied long fragments from source; no long verbatim spans.",
                 "",
                 "[P1-SHOULD] Character cards prioritize: identity -> alias -> appearance -> personality -> ability -> relations -> writing notes.",
-                  "[P1-SHOULD] World cards prioritize: identity -> ability (rules/limits) -> relations (impact scope) -> writing notes.",
-                  "[P1-SHOULD] Keep statements concrete and reusable for drafting, instead of plot recap.",
-                  "[P1-SHOULD] If evidence exists, target 120-220 words total; prefer constraints over trivia.",
-                  "",
-                  "### Formatting Example (layout only)",
+                "[P1-SHOULD] World cards prioritize: identity -> ability (rules/limits) -> relations (impact scope) -> writing notes.",
+                "[P1-SHOULD] Keep statements concrete and reusable for drafting, instead of plot recap.",
+                "[P1-SHOULD] If evidence exists, target 120-220 words total; prefer constraints over trivia.",
+                "",
+                "### Formatting Example (layout only)",
                 "",
                 "Identity: ...",
                 "",
@@ -318,4 +322,3 @@ def archivist_fanfiction_card_repair_prompt(title: str, content: str, hint: str 
         ]
     )
     return PromptPair(system=get_archivist_system_prompt(language=language), user=user)
-

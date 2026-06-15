@@ -20,4 +20,3 @@ def normalize_language(value: Optional[str], default: str = "zh") -> str:
     if raw.startswith("zh"):
         return "zh"
     return str(default or "zh").strip().lower() or "zh"
-

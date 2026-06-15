@@ -78,6 +78,8 @@ backend/data/agent_assignments.json
 
 # Logs
 *.log
+logs/
+backend/logs/
 traces/
 
 # Temporary Debug Scripts (root level only, not tests/)
@@ -101,5 +103,14 @@ STARTUP_TROUBLESHOOTING.md
 gamma_script.md
 market.md
 docs/TODO.md
+
+# Internal handoff & commercial strategy docs (keep OUT of open-source repo)
+# 内部交接/商业策略文档：本地保留、不进开源仓库
+PHASE*.md
+DESKTOP_PHASE*.md
+business_plan.md
+plan_now.md
+DEPLOY*.md
+报告*.md
 
 build_release.py

@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 @dataclass
 class IndexEntry:
     """索引条目"""
+
     line_number: int
     data: Dict[str, Any]
 
@@ -30,6 +31,7 @@ class IndexEntry:
 @dataclass
 class ProjectIndex:
     """项目索引"""
+
     project_id: str
     # 事实索引
     facts_by_id: Dict[str, IndexEntry] = field(default_factory=dict)
@@ -121,10 +123,10 @@ class IndexedStorageCache:
 
         # 索引时间线
         try:
-            if hasattr(storage, 'get_all_timeline_events'):
+            if hasattr(storage, "get_all_timeline_events"):
                 events = await storage.get_all_timeline_events(project_id)
                 for line_num, event in enumerate(events):
-                    event_dict = event.model_dump() if hasattr(event, 'model_dump') else dict(event)
+                    event_dict = event.model_dump() if hasattr(event, "model_dump") else dict(event)
                     event_id = event_dict.get("id", f"T{line_num:04d}")
                     chapter = event_dict.get("chapter", "")
 
@@ -142,10 +144,10 @@ class IndexedStorageCache:
 
         # 索引角色状态
         try:
-            if hasattr(storage, 'get_all_character_states'):
+            if hasattr(storage, "get_all_character_states"):
                 states = await storage.get_all_character_states(project_id)
                 for line_num, state in enumerate(states):
-                    state_dict = state.model_dump() if hasattr(state, 'model_dump') else dict(state)
+                    state_dict = state.model_dump() if hasattr(state, "model_dump") else dict(state)
                     character = state_dict.get("character_name", "")
 
                     entry = IndexEntry(line_number=line_num, data=state_dict)
@@ -161,8 +163,7 @@ class IndexedStorageCache:
 
         index.last_updated = datetime.now()
         logger.debug(
-            f"Built index for {project_id}: "
-            f"{index.facts_count} facts, {index.timeline_count} timeline events"
+            f"Built index for {project_id}: " f"{index.facts_count} facts, {index.timeline_count} timeline events"
         )
 
         return index
@@ -243,11 +244,7 @@ class IndexedStorageCache:
             return []
 
         fact_ids = index.facts_by_chapter.get(chapter, [])
-        return [
-            index.facts_by_id[fid].data
-            for fid in fact_ids
-            if fid in index.facts_by_id
-        ]
+        return [index.facts_by_id[fid].data for fid in fact_ids if fid in index.facts_by_id]
 
     def get_timeline_by_chapter(self, project_id: str, chapter: str) -> List[Dict[str, Any]]:
         """通过章节获取时间线事件"""
@@ -256,11 +253,7 @@ class IndexedStorageCache:
             return []
 
         event_ids = index.timeline_by_chapter.get(chapter, [])
-        return [
-            index.timeline_by_id[eid].data
-            for eid in event_ids
-            if eid in index.timeline_by_id
-        ]
+        return [index.timeline_by_id[eid].data for eid in event_ids if eid in index.timeline_by_id]
 
     def get_character_states(self, project_id: str, character_name: str) -> List[Dict[str, Any]]:
         """获取角色状态"""

@@ -11,6 +11,8 @@ License: PolyForm Noncommercial License 1.0.0
   Anthropic (Claude) Provider - Implements BaseLLMProvider for Claude API
 """
 
+import json
+
 from typing import List, Dict, Any, Optional
 from app.llm_gateway.providers.base import BaseLLMProvider
 from app.utils.anthropic_client import create_async_anthropic_client
@@ -28,11 +30,7 @@ class AnthropicProvider(BaseLLMProvider):
     """
 
     def __init__(
-        self,
-        api_key: str,
-        model: str = "claude-3-5-sonnet-20241022",
-        max_tokens: int = 8000,
-        temperature: float = 0.7
+        self, api_key: str, model: str = "claude-3-5-sonnet-20241022", max_tokens: int = 8000, temperature: float = 0.7
     ):
         """
         初始化 Anthropic提供商 / Initialize Anthropic provider
@@ -50,60 +48,75 @@ class AnthropicProvider(BaseLLMProvider):
         self,
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None
+        max_tokens: Optional[int] = None,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        response_format: Optional[Dict[str, Any]] = None,
+        thinking: Optional[Any] = None,
+        extra_body: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        发送聊天请求到 Anthropic / Send chat request to Anthropic
+        发送聊天请求到 Anthropic / Send chat request to Anthropic.
 
-        Extracts system message if present and formats messages for Claude API.
-        Handles the difference between OpenAI-style system messages and Claude's
-        system parameter.
-
-        Args:
-            messages: 消息列表 / List of messages.
-            temperature: 覆盖温度 / Override temperature.
-            max_tokens: 覆盖token数 / Override max tokens.
-
-        Returns:
-            响应字典包含内容、使用统计等 / Response dict with content, usage, etc.
+        抽取 system 为独立参数；支持 Claude 工具调用（tools/tool_choice）与 thinking（均可选、默认关）。
+        response_format 对 Claude 无直接对应，忽略。多内容块（text/tool_use/thinking）已健壮解析。
         """
-        # ========================================================================
-        # 提取系统消息（如存在） / Extract system message if present
-        # ========================================================================
+        # 提取 system 消息（Claude 用独立 system 参数）/ Extract system message
         system_message = None
         filtered_messages = []
-
         for msg in messages:
             if msg["role"] == "system":
                 system_message = msg["content"]
             else:
                 filtered_messages.append(msg)
 
-        # ========================================================================
-        # Anthropic API调用 / Anthropic API call
-        # ========================================================================
-        kwargs = {
+        kwargs: Dict[str, Any] = {
             "model": self.model,
             "messages": filtered_messages,
             "temperature": temperature or self.temperature,
-            "max_tokens": max_tokens or self.max_tokens
+            "max_tokens": max_tokens or self.max_tokens,
         }
-
-        # Claude expects system prompt as separate parameter, not in messages list
         if system_message:
             kwargs["system"] = system_message
+        if tools:
+            kwargs["tools"] = tools
+            if tool_choice is not None:
+                kwargs["tool_choice"] = tool_choice
+        if isinstance(thinking, dict):
+            kwargs["thinking"] = thinking
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         response = await self.client.messages.create(**kwargs)
 
+        # 健壮解析多内容块：text 拼为正文，tool_use 转 tool_calls，thinking 块忽略
+        text_parts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        for block in getattr(response, "content", []) or []:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                text_parts.append(getattr(block, "text", "") or "")
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": getattr(block, "id", None),
+                        "type": "function",
+                        "name": getattr(block, "name", None),
+                        "arguments": json.dumps(getattr(block, "input", {}) or {}, ensure_ascii=False),
+                    }
+                )
+
         return {
-            "content": response.content[0].text,
+            "content": "".join(text_parts),
+            "tool_calls": tool_calls or None,
             "usage": {
                 "prompt_tokens": response.usage.input_tokens,
                 "completion_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.input_tokens + response.usage.output_tokens
+                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
             },
             "model": response.model,
-            "finish_reason": response.stop_reason
+            "finish_reason": response.stop_reason,
         }
 
     def get_provider_name(self) -> str:

@@ -88,6 +88,7 @@ def get_orchestrator(project_id: str, request_language: Optional[str] = None) ->
             from pathlib import Path
             import yaml
             from app.config import settings
+
             project_yaml = Path(settings.data_dir) / project_id / "project.yaml"
             if project_yaml.exists():
                 data = yaml.safe_load(project_yaml.read_text(encoding="utf-8")) or {}
@@ -177,6 +178,7 @@ class EditSuggestRequest(BaseModel):
 
 class QuestionAnswer(BaseModel):
     """Answer to a pre-writing question."""
+
     type: str = Field(..., description="Question type")
     question: Optional[str] = Field(None, description="Question text")
     key: Optional[str] = Field(None, description="Stable question key")
@@ -185,6 +187,7 @@ class QuestionAnswer(BaseModel):
 
 class AnswerQuestionsRequest(BaseModel):
     """Request to answer pre-writing questions."""
+
     dialog_max_chars: Literal[2000, 6000] = Field(2000, description="Dialog max chars tier: 2000 | 6000")
     language: Optional[str] = Field(None, description="Writing language override: zh/en or locale-like values")
     chapter: str = Field(..., description="Chapter ID")
@@ -452,10 +455,7 @@ async def analyze_batch(project_id: str, request: AnalyzeBatchRequest):
 async def save_analysis_batch(project_id: str, request: SaveAnalysisBatchRequest):
     """Persist analysis payload batch."""
     orchestrator = get_orchestrator(project_id, request.language)
-    items = [
-        {"chapter": item.chapter, "analysis": item.analysis.model_dump()}
-        for item in request.items
-    ]
+    items = [{"chapter": item.chapter, "analysis": item.analysis.model_dump()} for item in request.items]
     return await orchestrator.save_analysis_batch(
         project_id=project_id,
         items=items,

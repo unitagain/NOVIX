@@ -29,7 +29,6 @@ class CanonStorage(BaseStorage):
             return normalized
         return normalized
 
-
     def _derive_fact_title(self, text: str, max_len: int = 24) -> str:
         """Derive a short title from statement text."""
         if not text:
@@ -39,7 +38,6 @@ class CanonStorage(BaseStorage):
             return cleaned
         return cleaned[:max_len].rstrip() + "..."
 
-    
     def _extract_chapter_id(self, value: str) -> str:
         if not value:
             return ""
@@ -99,7 +97,6 @@ class CanonStorage(BaseStorage):
         normalized = [self._normalize_fact_item(item, idx) for idx, item in enumerate(items)]
         return [Fact(**item) for item in normalized]
 
-
     async def get_all_facts_raw(self, project_id: str) -> List[Dict[str, Any]]:
         """Get all facts as raw dicts with compatibility normalization."""
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
@@ -145,7 +142,6 @@ class CanonStorage(BaseStorage):
         except Exception:
             await get_index_cache().invalidate(project_id)
 
-
     async def update_fact(self, project_id: str, fact_data: Dict[str, Any]) -> bool:
         """Update an existing fact by ID."""
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
@@ -174,7 +170,6 @@ class CanonStorage(BaseStorage):
         # 使索引失效
         await get_index_cache().invalidate(project_id)
         return True
-
 
     async def delete_facts_by_chapter(self, project_id: str, chapter: str) -> int:
         """Delete all facts introduced in a chapter. Returns deleted count."""
@@ -284,65 +279,53 @@ class CanonStorage(BaseStorage):
             await self.write_jsonl(file_path, normalized_items)
         return updated
 
-    async def get_facts_by_chapter(
-        self,
-        project_id: str,
-        chapter: str
-    ) -> List[Fact]:
+    async def get_facts_by_chapter(self, project_id: str, chapter: str) -> List[Fact]:
         """
         Get facts introduced in a specific chapter / 获取特定章节引入的事实
-        
+
         Args:
             project_id: Project ID / 项目ID
             chapter: Chapter ID / 章节ID
-            
+
         Returns:
             List of facts / 事实列表
         """
         all_facts = await self.get_all_facts(project_id)
         return [f for f in all_facts if f.introduced_in == chapter]
-    
+
     async def get_all_timeline_events(self, project_id: str) -> List[TimelineEvent]:
         """
         Get all timeline events / 获取所有时间线事件
-        
+
         Args:
             project_id: Project ID / 项目ID
-            
+
         Returns:
             List of timeline events / 时间线事件列表
         """
         file_path = self.get_project_path(project_id) / "canon" / "timeline.jsonl"
         items = await self.read_jsonl(file_path)
         return [TimelineEvent(**item) for item in items]
-    
-    async def add_timeline_event(
-        self,
-        project_id: str,
-        event: TimelineEvent
-    ) -> None:
+
+    async def add_timeline_event(self, project_id: str, event: TimelineEvent) -> None:
         """
         Add a timeline event / 添加时间线事件
-        
+
         Args:
             project_id: Project ID / 项目ID
             event: Timeline event to add / 要添加的事件
         """
         file_path = self.get_project_path(project_id) / "canon" / "timeline.jsonl"
         await self.append_jsonl(file_path, event.model_dump())
-    
-    async def get_timeline_events_by_chapter(
-        self,
-        project_id: str,
-        chapter: str
-    ) -> List[TimelineEvent]:
+
+    async def get_timeline_events_by_chapter(self, project_id: str, chapter: str) -> List[TimelineEvent]:
         """
         Get timeline events from a specific chapter / 获取特定章节的时间线事件
-        
+
         Args:
             project_id: Project ID / 项目ID
             chapter: Chapter ID / 章节ID
-            
+
         Returns:
             List of timeline events / 时间线事件列表
         """
@@ -386,39 +369,29 @@ class CanonStorage(BaseStorage):
         # Keep chronological order by source chapter number / 按来源章节号保持时间顺序
         selected.sort(key=lambda x: parse_chapter_number(x.source) or 0)
         return selected[-max_events:]
-    
-    async def get_all_character_states(
-        self,
-        project_id: str
-    ) -> List[CharacterState]:
+
+    async def get_all_character_states(self, project_id: str) -> List[CharacterState]:
         """
         Get all character states / 获取所有角色状态
-        
+
         Args:
             project_id: Project ID / 项目ID
-            
+
         Returns:
             List of character states / 角色状态列表
         """
-        file_path = (
-            self.get_project_path(project_id) /
-            "canon" / "character_state.jsonl"
-        )
+        file_path = self.get_project_path(project_id) / "canon" / "character_state.jsonl"
         items = await self.read_jsonl(file_path)
         return [CharacterState(**item) for item in items]
-    
-    async def get_character_state(
-        self,
-        project_id: str,
-        character_name: str
-    ) -> Optional[CharacterState]:
+
+    async def get_character_state(self, project_id: str, character_name: str) -> Optional[CharacterState]:
         """
         Get state of a specific character / 获取特定角色的状态
-        
+
         Args:
             project_id: Project ID / 项目ID
             character_name: Character name / 角色名称
-            
+
         Returns:
             Character state or None / 角色状态或None
         """
@@ -427,23 +400,16 @@ class CanonStorage(BaseStorage):
             if state.character == character_name:
                 return state
         return None
-    
-    async def update_character_state(
-        self,
-        project_id: str,
-        state: CharacterState
-    ) -> None:
+
+    async def update_character_state(self, project_id: str, state: CharacterState) -> None:
         """
         Update character state / 更新角色状态
-        
+
         Args:
             project_id: Project ID / 项目ID
             state: Character state / 角色状态
         """
-        file_path = (
-            self.get_project_path(project_id) /
-            "canon" / "character_state.jsonl"
-        )
+        file_path = self.get_project_path(project_id) / "canon" / "character_state.jsonl"
         await self.append_jsonl(file_path, state.model_dump())
 
     def _normalize_text(self, text: str) -> str:
@@ -518,9 +484,7 @@ class CanonStorage(BaseStorage):
         for nf in new_facts:
             for ef in existing_facts:
                 if self._maybe_contradict(nf.statement, ef.statement):
-                    conflicts.append(
-                        f"[Fact Conflict] {nf.statement}  <->  {ef.statement} (from {ef.introduced_in})"
-                    )
+                    conflicts.append(f"[Fact Conflict] {nf.statement}  <->  {ef.statement} (from {ef.introduced_in})")
                     break
 
         # Compare timeline / 对比时间线
@@ -530,7 +494,9 @@ class CanonStorage(BaseStorage):
                 if self._normalize_text(ne.time) and self._normalize_text(ne.time) == self._normalize_text(ee.time):
                     # Participant overlap / 参与者重叠
                     if set(ne.participants or []).intersection(set(ee.participants or [])):
-                        if self._normalize_text(ne.location) != self._normalize_text(ee.location) or self._normalize_text(ne.event) != self._normalize_text(ee.event):
+                        if self._normalize_text(ne.location) != self._normalize_text(
+                            ee.location
+                        ) or self._normalize_text(ne.event) != self._normalize_text(ee.event):
                             conflicts.append(
                                 f"[Timeline Conflict] time={ne.time}, participants={ne.participants}: ({ne.event}@{ne.location}) <-> ({ee.event}@{ee.location}) (from {ee.source})"
                             )
