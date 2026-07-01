@@ -36,7 +36,7 @@ export const SidePanel = () => {
 
   return (
     <div
-      className="h-full border-r border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)] flex flex-col relative group"
+      className="h-full rounded-[8px] overflow-hidden shadow-[0_1px_3px_rgba(2,6,23,0.07)] bg-[var(--vscode-sidebar-bg)] flex flex-col relative group"
       style={{ width: sidePanelWidth, minWidth: 160, maxWidth: 600 }}
     >
       {/* ========================================================================

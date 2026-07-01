@@ -116,7 +116,70 @@ class SummaryMixin:
                 yaml_content=yaml_content,
             )
         except Exception:
-            return {"facts": [], "timeline_events": [], "character_states": []}
+            return {"facts": [], "timeline_events": [], "character_states": [], "relations": []}
+
+    async def review_consistency(
+        self, project_id: str, chapter: str, draft: str, *, max_facts: int = 20
+    ) -> Dict[str, Any]:
+        """按需一致性评审（Phase 6 · Evaluator-optimizer 的评审端，只报告不改写）。
+
+        对照已确立 canon（事实 + 确定性关系护栏报警）审阅本章草稿，给出结构化问题清单
+        （矛盾/性格越界/时间线/伏笔遗漏）。**按需触发**（用户点"查一致性/润色"或确定性护栏报警后），
+        不进入默认生成路径，故不徒增成本。失败安全返回（不抛）。
+        """
+        draft = str(draft or "").strip()
+        if not draft:
+            return {"issues": [], "alerts": []}
+
+        # ① 便宜确定性报警（无 LLM，常驻）
+        try:
+            alerts = await self.canon_storage.detect_relation_inconsistencies(project_id)
+        except Exception:
+            alerts = []
+
+        # ② 贵 LLM 评审（仅按需），喂入有界 canon 事实 + 确定性报警
+        try:
+            facts = await self.canon_storage.get_all_facts(project_id)
+        except Exception:
+            facts = []
+        fact_lines = [
+            f"- {str(getattr(f, 'statement', '') or '').strip()}"
+            for f in (facts or [])[-max_facts:]
+            if str(getattr(f, "statement", "") or "").strip()
+        ]
+        canon_block = "\n".join(fact_lines) or "（暂无已确立事实）"
+        alert_block = "\n".join(f"- {a}" for a in alerts) or "（无确定性报警）"
+        system = (
+            "你是小说一致性评审员。对照已确立设定(canon)审阅本章草稿，找出：与设定矛盾、"
+            "人物性格/能力越界、时间线冲突、伏笔遗漏。只报告问题、不改写正文。"
+            '只输出 JSON：{"issues":[{"type":"consistency|character|timeline|foreshadow",'
+            '"severity":"high|medium|low","excerpt":"原文片段","detail":"问题说明","suggestion":"修改建议"}]}'
+        )
+        user = (
+            f"【已确立设定】\n{canon_block}\n\n"
+            f"【确定性护栏报警】\n{alert_block}\n\n"
+            f"【本章草稿】\n{draft[:8000]}\n\n请只输出 JSON。"
+        )
+        issues: List[Dict[str, Any]] = []
+        try:
+            from app.agents.intent import _extract_json
+
+            provider = self.gateway.get_provider_for_agent(self.get_agent_name())
+            resp = await self.gateway.chat(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                provider=provider,
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+            data = _extract_json(resp.get("content") or "") or {}
+            raw_issues = data.get("issues") if isinstance(data, dict) else None
+            if isinstance(raw_issues, list):
+                issues = [it for it in raw_issues if isinstance(it, dict)]
+        except Exception as exc:
+            logger.warning("Consistency review failed: %s", exc)
+            issues = []
+
+        return {"issues": issues, "alerts": alerts}
 
     async def bind_focus_characters(
         self,
@@ -330,13 +393,16 @@ class SummaryMixin:
         next_fact_index = len(existing_facts) + 1
 
         raw_facts: List[Tuple[str, float]] = []
+        context_by_norm: Dict[str, str] = {}
         for item in data.get("facts", []) or []:
             statement = ""
             confidence = 1.0
+            context = ""
             if isinstance(item, str):
                 statement = item
             elif isinstance(item, dict):
                 statement = str(item.get("statement", "") or "")
+                context = str(item.get("context", "") or item.get("context_prefix", "") or "").strip()
                 conf_raw = item.get("confidence")
                 try:
                     confidence = float(conf_raw) if conf_raw is not None else 1.0
@@ -346,6 +412,8 @@ class SummaryMixin:
             if not statement.strip():
                 continue
             raw_facts.append((statement.strip(), max(0.0, min(1.0, confidence))))
+            if context:
+                context_by_norm[self._normalize_fact_statement(statement.strip())] = context
 
         selected_facts = self._select_high_value_facts(
             candidates=raw_facts,
@@ -364,6 +432,7 @@ class SummaryMixin:
                     source=chapter,
                     introduced_in=chapter,
                     confidence=max(0.0, min(1.0, float(confidence))),
+                    context_prefix=context_by_norm.get(self._normalize_fact_statement(statement.strip()), ""),
                 )
             )
 
@@ -401,10 +470,30 @@ class SummaryMixin:
                 )
             )
 
+        relations: List[Dict[str, Any]] = []
+        for item in data.get("relations", []) or []:
+            if not isinstance(item, dict):
+                continue
+            subject = str(item.get("subject", "") or "").strip()
+            relation = str(item.get("relation", "") or "").strip()
+            object_ = str(item.get("object", "") or "").strip()
+            if not (subject and relation and object_):
+                continue
+            relations.append(
+                {
+                    "subject": subject,
+                    "relation": relation,
+                    "object": object_,
+                    "change": str(item.get("change", "") or "").strip(),
+                    "chapter": chapter,
+                }
+            )
+
         return {
             "facts": facts,
             "timeline_events": timeline_events,
             "character_states": character_states,
+            "relations": relations,
         }
 
     async def _generate_chapter_summary_yaml(
@@ -537,19 +626,6 @@ class SummaryMixin:
             major_events=major_events,
             chapter_count=len(chapter_summaries),
         )
-
-    def _parse_chapter_summary(
-        self,
-        yaml_content: str,
-        chapter: str,
-        chapter_title: str,
-        final_draft: str,
-    ) -> ChapterSummary:
-        """Parse YAML into ChapterSummary."""
-        parsed = self._try_parse_chapter_summary(yaml_content, chapter, chapter_title, final_draft)
-        if parsed:
-            return parsed
-        return self._fallback_chapter_summary(chapter, chapter_title, final_draft)
 
     def _try_parse_chapter_summary(
         self,

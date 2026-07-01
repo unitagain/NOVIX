@@ -28,6 +28,13 @@ def normalize_chapter_id(chapter_id: str) -> str:
     return str(chapter_id).strip()
 
 
+def full_canon_eligible(
+    n_facts: int, n_cards: int, fact_tokens: int, *, max_facts: int, max_cards: int, max_tokens: int
+) -> bool:
+    """Phase 13 · 全 canon 注入资格：数量 + token 双门槛（防少量超长事实撑爆全注入预算）。"""
+    return n_facts <= max_facts and n_cards <= max_cards and fact_tokens <= max_tokens
+
+
 def estimate_context_tokens(context_package: Dict[str, Any]) -> int:
     """Estimate token usage for context package."""
     total = 0
@@ -66,15 +73,6 @@ def trim_context_package(context_package: Dict[str, Any], max_tokens: int) -> Tu
 
     after = estimate_context_tokens(trimmed)
     return trimmed, {"trimmed": True, "before": before, "after": after}
-
-
-def merge_card_description(description: str, rationale: str) -> str:
-    """Merge card description and rationale into display text."""
-    description_text = (description or "").strip()
-    rationale_text = (rationale or "").strip()
-    if description_text and rationale_text:
-        return f"{description_text}\n理由: {rationale_text}"
-    return description_text or rationale_text
 
 
 def extract_scene_brief_names(scene_brief: Any, limit: int = 3) -> List[str]:

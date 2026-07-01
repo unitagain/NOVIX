@@ -58,7 +58,7 @@ export default function UpdateAvailableBanner() {
       }
       setInfo(null);
     },
-    [info]
+    [info],
   );
 
   useEffect(() => {

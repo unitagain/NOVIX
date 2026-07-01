@@ -5,7 +5,7 @@ import DiffReviewView from '../ide/DiffReviewView';
 import { Input } from '../ui/core';
 import FanfictionView from '../../pages/FanfictionView';
 import { normalizeStars } from '../../utils/writingSessionHelpers';
-import StreamingDraftView from './StreamingDraftView';
+import StreamingDiffView from './StreamingDiffView';
 
 export default function WritingSessionMainContent({ vm }) {
   const {
@@ -18,6 +18,7 @@ export default function WritingSessionMainContent({ vm }) {
     dispatch,
     isDiffReviewForActiveChapter,
     isStreamingForActiveChapter,
+    streamOriginalContent,
     lockedOnActiveChapter,
     manualContent,
     onAcceptDiffHunk,
@@ -49,11 +50,17 @@ export default function WritingSessionMainContent({ vm }) {
           <div className="flex items-center justify-between mb-6 pb-4 border-b border-border">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-primary/10 rounded-lg text-primary">
-                {activeCard.type === 'character' ? <div className="i-lucide-user" /> : <div className="i-lucide-globe" />}
+                {activeCard.type === 'character' ? (
+                  <div className="i-lucide-user" />
+                ) : (
+                  <div className="i-lucide-globe" />
+                )}
               </div>
               <div>
                 <p className="text-xs text-ink-400 font-mono uppercase tracking-wider">
-                  {activeCard.type === 'character' ? t('writingSession.cardTypeChar') : t('writingSession.cardTypeWorld')}
+                  {activeCard.type === 'character'
+                    ? t('writingSession.cardTypeChar')
+                    : t('writingSession.cardTypeWorld')}
                 </p>
               </div>
             </div>
@@ -180,13 +187,20 @@ export default function WritingSessionMainContent({ vm }) {
                 revisedVersion={t('writingSession.revisedText')}
               />
             ) : isStreamingForActiveChapter ? (
-              <StreamingDraftView content={manualContent} active={isStreamingForActiveChapter} className="h-full" />
+              <StreamingDiffView
+                originalContent={streamOriginalContent}
+                content={manualContent}
+                active={isStreamingForActiveChapter}
+                className="h-full"
+              />
             ) : (
               <textarea
                 className="h-full w-full resize-none border-none outline-none bg-transparent p-6 text-base font-serif text-ink-900 leading-relaxed focus:ring-0 placeholder:text-ink-300 overflow-y-auto editor-scrollbar"
                 value={manualContent}
                 onChange={(e) => onManualContentChange(e.target.value, e.target.selectionStart, e.target.selectionEnd)}
-                onSelect={(e) => onManualSelectionChange(e.target.value, e.target.selectionStart, e.target.selectionEnd)}
+                onSelect={(e) =>
+                  onManualSelectionChange(e.target.value, e.target.selectionStart, e.target.selectionEnd)
+                }
                 placeholder={t('writingSession.writePlaceholder')}
                 disabled={!chapterInfo.chapter || lockedOnActiveChapter}
                 spellCheck={false}

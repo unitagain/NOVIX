@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Literal
 import time
 from collections import OrderedDict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel, Field, model_validator
 
 from app.orchestrator import Orchestrator, SessionStatus
@@ -205,6 +205,62 @@ class AnswerQuestionsRequest(BaseModel):
         return self
 
 
+class ClassifyIntentRequest(BaseModel):
+    """Request for vibe-writing intent classification (Phase 5).
+
+    前端单输入框只需发：用户这句话 + 上下文信号（是否选中正文 / 是否已有草稿）；
+    后端判定 write/edit 并回传决策，前端据此调用既有 /session/start 或 /session/edit-suggest。
+    """
+
+    chapter: Optional[str] = Field(None, max_length=50, description="Chapter ID")
+    message: str = Field(..., min_length=1, max_length=6000, description="User chat message")
+    has_selection: bool = Field(False, description="Whether the editor currently has a selection")
+    has_draft: bool = Field(False, description="Whether the chapter already has a draft")
+
+
+class PlanRequest(BaseModel):
+    """Request for Phase 11 plan generation（把复杂指令拆成串行 todo）。"""
+
+    goal: str = Field(..., min_length=1, max_length=6000, description="Complex writing instruction to plan")
+    context_hint: str = Field("", max_length=4000, description="Optional context hint")
+
+
+class ChatTurnRequest(BaseModel):
+    """Request for Phase 12 unified chat-turn entry（单 Writer 主循环统一对话入口）。"""
+
+    chapter: Optional[str] = Field(None, max_length=50, description="Chapter ID")
+    message: str = Field(..., min_length=1, max_length=6000, description="User chat message")
+    has_selection: bool = Field(False, description="Editor has a selection")
+    has_draft: bool = Field(False, description="Chapter already has a draft")
+    target_word_count: int = Field(3000, ge=100, le=20000, description="Target word count for write")
+    auto_execute_plan: bool = Field(False, description="Auto-execute plan after generation")
+    thinking: bool = Field(False, description="Enable deep thinking (provider param toggle) for this turn")
+
+
+class AppendMessageRequest(BaseModel):
+    """追加一条对话消息到持久历史（Git-Native sessions/conversation.jsonl）。"""
+
+    role: str = Field("user", description="user | assistant | system")
+    content: str = Field("", max_length=200000, description="Message content")
+    type: Optional[str] = Field(None, max_length=40, description="Optional message kind, e.g. summary")
+    ts: Optional[int] = Field(None, description="Client timestamp in ms; server fills if absent")
+
+
+# 对话历史 compact 触发阈值（消息数）：超过则后台压缩早期轮次 + 提炼作者偏好 → creative_memory。
+_HISTORY_COMPACT_TRIGGER = 120
+_HISTORY_KEEP_RECENT = 40
+
+
+class ReviewRequest(BaseModel):
+    """Request for on-demand consistency review (Phase 6 · Evaluator)。
+
+    按需触发的一致性评审：对照 canon 给结构化问题清单，不自动改写。
+    """
+
+    chapter: str = Field(..., min_length=1, max_length=50, description="Chapter ID")
+    content: str = Field(..., min_length=1, max_length=500000, description="Draft content to review")
+
+
 @router.post("/projects/{project_id}/session/start")
 async def start_session(project_id: str, request: StartSessionRequest):
     """Start a new writing session."""
@@ -304,6 +360,117 @@ async def suggest_edit(project_id: str, request: EditSuggestRequest):
     except ValueError as exc:
         # Expected: patch ops could not be applied, surface as user-facing error (no 500).
         return {"success": False, "error": str(exc)}
+
+
+@router.post("/projects/{project_id}/session/classify-intent")
+async def classify_intent(project_id: str, request: ClassifyIntentRequest):
+    """Phase 5（vibe writing）：判定本轮 chat 意图（write/edit），供前端单输入框路由。
+
+    后端只判定不执行：前端据返回的 action/scope 调用既有 /session/start 或 /session/edit-suggest，
+    复用已验证的撰写/编辑路径，避免重复逻辑。判定结果同时经 WS 以 intent 事件透明展示。
+    """
+    orchestrator = get_orchestrator(project_id)
+    decision = await orchestrator.decide_writing_action(
+        project_id=project_id,
+        chapter=request.chapter or "",
+        message=request.message,
+        has_selection=request.has_selection,
+        has_draft=request.has_draft,
+    )
+    return {"success": True, **decision}
+
+
+@router.post("/projects/{project_id}/session/plan")
+async def create_plan(project_id: str, request: PlanRequest):
+    """Phase 11：把复杂指令拆成串行 plan（todo）并持久化；返回 plan（含 steps）。
+
+    无可拆步骤则 success=False，前端回退普通撰写/编辑。生成事件经 WS 透明展示。
+    """
+    orchestrator = get_orchestrator(project_id)
+    plan = await orchestrator.create_plan(project_id, goal=request.goal, context_hint=request.context_hint)
+    if not plan:
+        return {"success": False, "error": "no_plan", "message": "指令未能拆出可执行步骤，请直接撰写或编辑。"}
+    return {"success": True, "plan": plan}
+
+
+@router.post("/projects/{project_id}/session/plan/{plan_id}/execute")
+async def execute_plan(project_id: str, plan_id: str):
+    """Phase 11：串行执行已生成的 plan（正文主线单线程；每步透明事件 + 可打断 + 断点续传）。"""
+    orchestrator = get_orchestrator(project_id)
+    return await orchestrator.execute_plan(project_id, plan_id)
+
+
+@router.post("/projects/{project_id}/session/chat")
+async def chat_turn(project_id: str, request: ChatTurnRequest):
+    """Phase 12：单 Writer 主循环统一入口。一句话 → 意图自判 write/edit/continue/plan → 路由执行。
+
+    5 阶段写作能力保留为被路由调用的 human-in-the-loop 检查点（作者可随时打断/反问）。
+    前端单输入框只需调本端点，无需自行分步调 classify-intent + start/edit-suggest。
+    """
+    orchestrator = get_orchestrator(project_id)
+    return await orchestrator.run_chat_turn(
+        project_id,
+        request.chapter or "",
+        request.message,
+        has_selection=request.has_selection,
+        has_draft=request.has_draft,
+        target_word_count=request.target_word_count,
+        auto_execute_plan=request.auto_execute_plan,
+        thinking=request.thinking,
+    )
+
+
+@router.get("/projects/{project_id}/session/history")
+async def get_session_history(project_id: str, limit: int = 0):
+    """读取项目的持久化对话历史（Git-Native）。前端开项目时加载，取代脆弱的 localStorage 单点。"""
+    orchestrator = get_orchestrator(project_id)
+    messages = await orchestrator.load_conversation(project_id, limit=max(0, int(limit or 0)))
+    return {"success": True, "messages": messages}
+
+
+@router.post("/projects/{project_id}/session/history")
+async def append_session_history(project_id: str, request: AppendMessageRequest, background: BackgroundTasks):
+    """追加一条对话消息到持久历史；过长时后台 compact（压缩早期轮次 + 提炼作者偏好）。"""
+    orchestrator = get_orchestrator(project_id)
+    item = await orchestrator.append_conversation(
+        project_id,
+        {"role": request.role, "content": request.content, "type": request.type, "ts": request.ts},
+    )
+    count = await orchestrator.session_history.count(project_id)
+    should_compact = count > _HISTORY_COMPACT_TRIGGER
+    if should_compact:
+        background.add_task(
+            orchestrator.compact_conversation,
+            project_id,
+            keep_recent=_HISTORY_KEEP_RECENT,
+            trigger_at=_HISTORY_COMPACT_TRIGGER,
+        )
+    return {"success": True, "item": item, "count": count, "compacting": should_compact}
+
+
+@router.post("/projects/{project_id}/session/history/compact")
+async def compact_session_history(project_id: str):
+    """显式触发对话压缩 + 偏好提炼（前端可在一轮结束后调用）。"""
+    orchestrator = get_orchestrator(project_id)
+    result = await orchestrator.compact_conversation(
+        project_id, keep_recent=_HISTORY_KEEP_RECENT, trigger_at=_HISTORY_COMPACT_TRIGGER
+    )
+    return {"success": True, **result}
+
+
+@router.post("/projects/{project_id}/session/review")
+async def review_consistency(project_id: str, request: ReviewRequest):
+    """Phase 6（按需评审环）：对照 canon 给本章草稿做一致性评审（只报告不改写）。
+
+    便宜确定性护栏报警 + 贵 LLM 评审；按需触发（用户点"查一致性/润色"），不增默认生成成本。
+    """
+    orchestrator = get_orchestrator(project_id)
+    result = await orchestrator.archivist.review_consistency(
+        project_id=project_id,
+        chapter=request.chapter,
+        draft=request.content,
+    )
+    return {"success": True, **result}
 
 
 @router.post("/projects/{project_id}/session/answer-questions")

@@ -14,14 +14,21 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 from typing import List, Optional, Dict, Any
+import hashlib
 import math
 from .models import ContextItem, ContextPriority, ContextType
 from .text_tokenizer import calculate_overlap_score, calculate_bm25_score, build_idf_table
+from .embeddings import cosine_similarity
+from .vector_store import VectorStore
 from app.config import config
 from app.utils.chapter_id import ChapterIDValidator
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Reciprocal Rank Fusion constant (standard default). Larger = flatter rank weighting.
+# 排名融合常数（业界默认 60）；越大则名次权重越平。
+_RRF_K = 60
 
 
 class ContextSelectEngine:
@@ -47,9 +54,30 @@ class ContextSelectEngine:
 
         Args:
             embeddings_service: 可选的嵌入服务 / Optional embeddings service for semantic similarity.
+                需实现 ``async embed(texts) -> List[List[float]]``（见 context_engine.embeddings）。
+                为 None 时退化为纯词法（BM25 + 词重叠），行为与历史版本一致。
         """
         self.embeddings = embeddings_service
         self._distance_alpha: float = float(config.get("context_budget", {}).get("fact_distance_alpha", 0.3))
+        retrieval_cfg = config.get("retrieval", {}) or {}
+        hybrid_cfg = retrieval_cfg.get("hybrid", {}) or {}
+        self._fusion: str = str(hybrid_cfg.get("fusion", "rrf")).lower()
+        self._bm25_weight: float = float(hybrid_cfg.get("bm25_weight", 0.5))
+        self._vector_weight: float = float(hybrid_cfg.get("vector_weight", 0.5))
+        self._semantic_rerank: bool = bool(retrieval_cfg.get("semantic_rerank", True))
+        self._rerank_top_k: int = int(retrieval_cfg.get("rerank_top_k", 16))
+        # 内容寻址的语义向量缓存（embed-once）：每个项目一个 VectorStore，按文本 sha1 存向量，
+        # 落 canon/embeddings_cache.jsonl 跨查询复用，避免每次检索重嵌入全部候选。
+        # Content-addressed embedding cache (embed-once), one VectorStore per project,
+        # persisted to disk so each fact/card/chunk is embedded once and reused.
+        self._vec_stores: Dict[str, VectorStore] = {}
+        self._vec_paths: Dict[str, Any] = {}
+        # Phase 7 降级可见：语义检索是否已降级为纯词法（首次降级时 WARNING 一次并置此标志，供运行时查询）。
+        self._semantic_degraded: bool = False
+
+    def _semantic_enabled(self) -> bool:
+        """是否启用语义打分（注入了嵌入后端即启用）。"""
+        return self.embeddings is not None
 
     # ========================================================================
     # 确定性选择：必须加载的关键项 / Deterministic Selection: Critical items
@@ -212,6 +240,9 @@ class ContextSelectEngine:
         candidates: List[ContextItem] = []
         candidate_limit = self._get_candidate_limit(total_chapters)
         query_lower = query.lower()
+        # 语义启用时不按"词法零分"丢弃候选——让语义召回有机会救回字面无重叠但语义相关的条目。
+        # When semantic is on, do NOT drop lexical-zero candidates: let embeddings rescue them.
+        semantic = self._semantic_enabled()
 
         # 预加载事实文本，构建 IDF 表提升 BM25 区分度
         # Pre-load fact statements to build IDF table for better BM25 discrimination.
@@ -269,7 +300,7 @@ class ContextSelectEngine:
                     continue
                 content = self._format_card(card)
                 s = score_text(content)
-                if s <= 0:
+                if s <= 0 and not semantic:
                     continue
                 candidates.append(
                     ContextItem(
@@ -303,7 +334,7 @@ class ContextSelectEngine:
                     continue
                 content = self._format_card(card)
                 s = score_text(content)
-                if s <= 0:
+                if s <= 0 and not semantic:
                     continue
                 candidates.append(
                     ContextItem(
@@ -330,17 +361,30 @@ class ContextSelectEngine:
                     statement = str(getattr(fact, "statement", "") or "").strip()
                     fact_id = str(getattr(fact, "id", "") or "").strip() or f"F{idx + 1:04d}"
                     introduced_in = str(getattr(fact, "introduced_in", "") or "").strip()
+                    context_prefix = str(getattr(fact, "context_prefix", "") or "").strip()
+                    status = str(getattr(fact, "status", "confirmed") or "confirmed")
                 except Exception:
                     continue
                 if not statement:
                     continue
-                s = score_text(statement)
-                if s <= 0:
+                # Contextual Retrieval：用「情境前缀 + 事实」作为检索索引文本（词法+语义都打它），
+                # 但展示/返回仍是原始 statement。前缀缺省时退化为纯 statement，行为不变。
+                index_text = f"{context_prefix} {statement}".strip() if context_prefix else statement
+                s = score_text(index_text)
+                if s <= 0 and not semantic:
                     continue
-                # 距离衰减：近期事实优先，远期事实降权但不归零
-                # Logarithmic distance decay: recent facts score higher,
-                # distant facts are down-weighted but never zeroed out.
-                s *= self._calculate_distance_decay(current_chapter, introduced_in)
+                # 距离衰减：近期事实优先，远期事实降权但不归零。
+                # 衰减延后到融合之后统一施加（存入 _decay），以免污染语义/词法的排名融合。
+                # Distance decay is deferred (stored as _decay) and applied after fusion,
+                # so it doesn't distort the lexical/semantic rank fusion.
+                decay = self._calculate_distance_decay(current_chapter, introduced_in)
+                # Phase 14 / 自审：needs_review（AI 待确认）事实降权，confirmed 优先——
+                # 避免未经作者确认的抽取事实污染检索 / 写作（"不污染主 canon" 的检索层落地）。
+                if status == "needs_review":
+                    decay *= 0.6
+                fact_meta: Dict[str, Any] = {"introduced_in": introduced_in, "_decay": decay}
+                if context_prefix:
+                    fact_meta["_index_text"] = index_text  # 供语义嵌入使用；返回前清理
                 candidates.append(
                     ContextItem(
                         id=fact_id,
@@ -348,7 +392,7 @@ class ContextSelectEngine:
                         content=statement,
                         priority=ContextPriority.MEDIUM,
                         relevance_score=s,
-                        metadata={"introduced_in": introduced_in},
+                        metadata=fact_meta,
                     )
                 )
 
@@ -366,7 +410,7 @@ class ContextSelectEngine:
                 if not text:
                     continue
                 s = score_text(text)
-                if s <= 0:
+                if s <= 0 and not semantic:
                     continue
                 candidates.append(
                     ContextItem(
@@ -382,8 +426,7 @@ class ContextSelectEngine:
         if not candidates:
             return []
 
-        candidates.sort(key=lambda item: float(item.relevance_score or 0.0), reverse=True)
-        return candidates[:top_k]
+        return await self._fuse_and_rank(candidates, query, top_k, project_id, storage)
 
     # ========================================================================
     # 距离衰减 / Distance Decay
@@ -422,3 +465,173 @@ class ContextSelectEngine:
             return 1.0 / (1.0 + alpha * math.log(1 + dist))
         except Exception:
             return 1.0
+
+    # ========================================================================
+    # 混合检索：语义 + 词法融合与重排 / Hybrid retrieval: fusion + rerank
+    # ========================================================================
+
+    async def _fuse_and_rank(
+        self, candidates: List[ContextItem], query: str, top_k: int, project_id: str = "", storage: Any = None
+    ) -> List[ContextItem]:
+        """对候选施加（可选）语义融合 + 距离衰减 + 重排，返回 top_k。
+
+        - 纯词法模式（无嵌入后端）：final = lexical × decay，与历史版本逐位一致。
+        - 语义模式：词法名次与语义名次按 RRF（或加权）融合 → final = fused × decay；
+          再对头部 rerank_top_k 个按纯语义分重排（轻量 rerank，复用已算语义分、不额外建模）。
+
+        Apply optional semantic fusion + distance decay + rerank, return top_k.
+        Lexical-only mode is byte-for-byte equivalent to the legacy behavior.
+        """
+        if not candidates:
+            return []
+
+        sem_scores: Optional[List[float]] = None
+        if self._semantic_enabled():
+            try:
+                sem_scores = await self._semantic_scores(query, candidates, project_id, storage)
+                self._semantic_degraded = False
+            except Exception as exc:
+                # Phase 7 降级可见：仅首次降级 WARNING（避免每次检索刷屏），并置可查状态标志。
+                if not self._semantic_degraded:
+                    logger.warning("语义检索降级为纯词法（缺 fastembed/模型或嵌入失败）：%s", exc)
+                    self._semantic_degraded = True
+                sem_scores = None
+
+        if sem_scores is not None:
+            fused = self._fuse_scores(candidates, sem_scores)
+            for idx, item in enumerate(candidates):
+                item.relevance_score = fused[idx] * float(item.metadata.pop("_decay", 1.0))
+                item.metadata["_sem"] = sem_scores[idx]  # 暂存语义分供 rerank
+        else:
+            # 词法路径（原生纯词法，或语义打分失败后的降级）：施加衰减并丢弃零分项，
+            # 与历史"词法零分即丢弃"的行为保持一致（语义启用时被暂留的零分候选在此剔除）。
+            kept: List[ContextItem] = []
+            for item in candidates:
+                item.relevance_score = float(item.relevance_score or 0.0) * float(item.metadata.pop("_decay", 1.0))
+                if item.relevance_score > 0:
+                    kept.append(item)
+            candidates = kept
+
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda it: float(it.relevance_score or 0.0), reverse=True)
+
+        # 轻量 rerank：仅语义模式下，对头部按纯语义分重排。
+        if sem_scores is not None and self._semantic_rerank and self._rerank_top_k > 1:
+            head = candidates[: self._rerank_top_k]
+            head.sort(key=lambda it: float(it.metadata.get("_sem", 0.0)), reverse=True)
+            candidates = head + candidates[self._rerank_top_k :]
+
+        for item in candidates:
+            item.metadata.pop("_sem", None)  # 清理临时元数据
+            item.metadata.pop("_index_text", None)
+
+        return candidates[:top_k]
+
+    async def _semantic_scores(
+        self, query: str, candidates: List[ContextItem], project_id: str = "", storage: Any = None
+    ) -> List[float]:
+        """返回与 candidates 等长的 query-候选 cosine 相似度列表（embed-once）。
+
+        候选向量按文本内容哈希缓存在 per-project VectorStore（落盘 embeddings_cache.jsonl）：
+        只对**未缓存**的文本调用一次嵌入，query 每次都嵌入。跨查询复用，避免重复嵌入全库。
+        Candidate vectors are cached by content hash and persisted; only cache-miss
+        texts are embedded (plus the query each call). This wires VectorStore into the
+        live path so each fact/card/chunk is embedded exactly once.
+        """
+        texts = [str(it.metadata.get("_index_text") or getattr(it, "content", "") or "") for it in candidates]
+        store = self._get_vector_store(project_id, storage)
+        hashes = [self._text_hash(t) for t in texts]
+
+        # 收集缓存未命中的文本（去重）/ collect cache-miss texts (deduped)
+        misses: Dict[str, str] = {}
+        for h, t in zip(hashes, texts):
+            if t and not store.has(h):
+                misses.setdefault(h, t)
+
+        miss_items = list(misses.items())  # [(hash, text)]
+        to_embed = [query] + [t for _, t in miss_items]
+        vectors = await self.embeddings.embed(to_embed)
+        if not vectors or len(vectors) != len(to_embed):
+            raise ValueError("embeddings backend returned mismatched vector count")
+
+        query_vec = vectors[0]
+        for (h, t), vec in zip(miss_items, vectors[1:]):
+            store.upsert(h, vec, text="")  # 不存正文，省空间；命中靠哈希
+        if miss_items:
+            self._persist_vector_store(project_id)
+
+        scores: List[float] = []
+        for h, t in zip(hashes, texts):
+            if not t:
+                scores.append(0.0)
+                continue
+            cached = store.get(h)
+            scores.append(cosine_similarity(query_vec, cached["vector"]) if cached else 0.0)
+        return scores
+
+    @staticmethod
+    def _text_hash(text: str) -> str:
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+    def _get_vector_store(self, project_id: str, storage: Any) -> VectorStore:
+        """惰性获取 per-project 向量缓存；首次从磁盘加载（若 storage 提供路径）。"""
+        key = project_id or "_default"
+        store = self._vec_stores.get(key)
+        if store is not None:
+            return store
+        path = None
+        getter = getattr(storage, "get_embeddings_cache_path", None)
+        if getter is not None and project_id:
+            try:
+                path = getter(project_id)
+            except Exception:
+                path = None
+        store = VectorStore.load(path) if path else VectorStore()
+        self._vec_stores[key] = store
+        if path:
+            self._vec_paths[key] = path
+        return store
+
+    def _persist_vector_store(self, project_id: str) -> None:
+        """把更新后的向量缓存落盘（无路径则跳过，纯内存复用）。"""
+        key = project_id or "_default"
+        path = self._vec_paths.get(key)
+        store = self._vec_stores.get(key)
+        if not path or store is None:
+            return
+        try:
+            store.save(path)
+        except Exception as exc:
+            logger.warning("Failed to persist embedding cache (%s): %s", path, exc)
+
+    def _fuse_scores(self, candidates: List[ContextItem], sem_scores: List[float]) -> Dict[int, float]:
+        """融合词法名次与语义名次，返回 ``{idx: fused_score}``。"""
+        n = len(candidates)
+        lex = [float(it.relevance_score or 0.0) for it in candidates]
+        if self._fusion == "weighted":
+            lw = self._normalize(lex)
+            sw = self._normalize(sem_scores)
+            return {i: self._bm25_weight * lw[i] + self._vector_weight * sw[i] for i in range(n)}
+        # 默认 RRF：对名次（而非原始分）求 1/(k+rank) 之和，量纲无关、稳健。
+        lex_rank = self._ranks(lex)
+        sem_rank = self._ranks(sem_scores)
+        return {i: 1.0 / (_RRF_K + lex_rank[i]) + 1.0 / (_RRF_K + sem_rank[i]) for i in range(n)}
+
+    @staticmethod
+    def _ranks(scores: List[float]) -> Dict[int, int]:
+        """返回每个下标的名次（1 = 最高分）；并列按下标稳定。"""
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        return {idx: position + 1 for position, idx in enumerate(order)}
+
+    @staticmethod
+    def _normalize(scores: List[float]) -> List[float]:
+        """min-max 归一到 [0, 1]；全相等则全 0。"""
+        if not scores:
+            return []
+        lo, hi = min(scores), max(scores)
+        if hi <= lo:
+            return [0.0 for _ in scores]
+        span = hi - lo
+        return [(s - lo) / span for s in scores]

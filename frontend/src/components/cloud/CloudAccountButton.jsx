@@ -68,9 +68,7 @@ export default function CloudAccountButton() {
   }
 
   if (!ready) {
-    return (
-      <div className="h-7 w-16 animate-pulse rounded-[6px] bg-[var(--vscode-list-hover)]" />
-    );
+    return <div className="h-7 w-16 animate-pulse rounded-[6px] bg-[var(--vscode-list-hover)]" />;
   }
 
   if (!authenticated) {
@@ -87,11 +85,7 @@ export default function CloudAccountButton() {
           <LogIn size={14} />
           <span>登录</span>
         </button>
-        <CloudLoginDialog
-          open={loginOpen}
-          onClose={() => setLoginOpen(false)}
-          defaultTab={loginTab}
-        />
+        <CloudLoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} defaultTab={loginTab} />
       </>
     );
   }
@@ -150,7 +144,10 @@ export default function CloudAccountButton() {
             disabled={busy}
             className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--vscode-fg)] transition-colors hover:bg-[var(--vscode-list-hover)] disabled:opacity-50"
           >
-            <RefreshCw size={14} className={busy ? 'animate-spin text-[var(--vscode-fg-subtle)]' : 'text-[var(--vscode-fg-subtle)]'} />
+            <RefreshCw
+              size={14}
+              className={busy ? 'animate-spin text-[var(--vscode-fg-subtle)]' : 'text-[var(--vscode-fg-subtle)]'}
+            />
             <span>同步账户信息</span>
           </button>
 

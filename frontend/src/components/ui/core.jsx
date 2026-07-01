@@ -27,9 +27,8 @@ import { twMerge } from 'tailwind-merge';
  * // => 'px-4 text-lg font-bold [+ bg-blue-500 if condition true]'
  */
 export function cn(...inputs) {
-    return twMerge(clsx(inputs));
+  return twMerge(clsx(inputs));
 }
-
 
 /**
  * 基础按钮组件 / Base Button Component
@@ -60,34 +59,36 @@ export function cn(...inputs) {
  * </Button>
  */
 export const Button = React.forwardRef(({ className, variant = 'default', size = 'default', ...props }, ref) => {
-    const variants = {
-        default: 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)] border border-[var(--vscode-input-border)] hover:opacity-90 shadow-none',
-        ghost: 'bg-transparent text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)]',
-        outline: 'bg-transparent border border-[var(--vscode-input-border)] text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)]',
-        link: 'text-[var(--vscode-focus-border)] underline-offset-4 hover:underline',
-    };
+  const variants = {
+    default:
+      'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)] border border-[var(--vscode-input-border)] hover:opacity-90 shadow-none',
+    ghost: 'bg-transparent text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)]',
+    outline:
+      'bg-transparent border border-[var(--vscode-input-border)] text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)]',
+    link: 'text-[var(--vscode-focus-border)] underline-offset-4 hover:underline',
+  };
 
-    const sizes = {
-        default: 'h-10 px-4',
-        sm: 'h-9 px-3',
-        lg: 'h-11 px-6',
-        icon: 'h-10 w-10',
-    };
+  const sizes = {
+    default: 'h-10 px-4',
+    sm: 'h-9 px-3',
+    lg: 'h-11 px-6',
+    icon: 'h-10 w-10',
+  };
 
-    return (
-        <button
-            className={cn(
-                'inline-flex items-center justify-center whitespace-nowrap rounded-[4px] text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vscode-focus-border)] focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 select-none',
-                variants[variant],
-                sizes[size],
-                className
-            )}
-            ref={ref}
-            {...props}
-        />
-    );
+  return (
+    <button
+      className={cn(
+        'inline-flex items-center justify-center whitespace-nowrap rounded-[4px] text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--vscode-focus-border)] focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 select-none',
+        variants[variant],
+        sizes[size],
+        className,
+      )}
+      ref={ref}
+      {...props}
+    />
+  );
 });
-Button.displayName = "Button";
+Button.displayName = 'Button';
 
 /**
  * 基础输入框组件 / Base Input Component
@@ -107,19 +108,19 @@ Button.displayName = "Button";
  * <Input type="email" placeholder="输入邮箱" value={email} onChange={handleChange} />
  */
 export const Input = React.forwardRef(({ className, type, ...props }, ref) => {
-    return (
-        <input
-            type={type}
-            className={cn(
-                "flex h-10 w-full rounded-[4px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] px-3 text-sm text-[var(--vscode-fg)] ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-[var(--vscode-fg-subtle)] focus-visible:outline-none focus-visible:border-[var(--vscode-focus-border)] focus-visible:ring-1 focus-visible:ring-[var(--vscode-focus-border)] disabled:cursor-not-allowed disabled:opacity-50 transition-colors",
-                className
-            )}
-            ref={ref}
-            {...props}
-        />
-    );
+  return (
+    <input
+      type={type}
+      className={cn(
+        'flex h-10 w-full rounded-[4px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] px-3 text-sm text-[var(--vscode-fg)] ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-[var(--vscode-fg-subtle)] focus-visible:outline-none focus-visible:border-[var(--vscode-focus-border)] focus-visible:ring-1 focus-visible:ring-[var(--vscode-focus-border)] disabled:cursor-not-allowed disabled:opacity-50 transition-colors',
+        className,
+      )}
+      ref={ref}
+      {...props}
+    />
+  );
 });
-Input.displayName = "Input";
+Input.displayName = 'Input';
 
 /**
  * 基础卡片容器组件 / Base Card Component
@@ -142,15 +143,15 @@ Input.displayName = "Input";
  * </Card>
  */
 export const Card = React.forwardRef(({ className, ...props }, ref) => {
-    return (
-        <div
-            ref={ref}
-            className={cn(
-                "rounded-[4px] bg-[var(--vscode-bg)] text-[var(--vscode-fg)] border border-[var(--vscode-sidebar-border)] shadow-none",
-                className
-            )}
-            {...props}
-        />
-    );
+  return (
+    <div
+      ref={ref}
+      className={cn(
+        'rounded-[4px] bg-[var(--vscode-bg)] text-[var(--vscode-fg)] border border-[var(--vscode-sidebar-border)] shadow-none',
+        className,
+      )}
+      {...props}
+    />
+  );
 });
-Card.displayName = "Card";
+Card.displayName = 'Card';

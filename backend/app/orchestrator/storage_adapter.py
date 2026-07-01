@@ -74,6 +74,24 @@ class UnifiedStorageAdapter:
         """获取所有事实 / Get all canonical facts for the project."""
         return await self.canon.get_all_facts(project_id)
 
+    def get_relations_path(self, project_id: str):
+        """返回 canon/relations.jsonl 的路径（轻量关系图数据源，Phase 4）。
+
+        Returns the path to the relation-graph source file. The file may not exist
+        yet (relations are appended incrementally by the Archivist); callers should
+        tolerate a missing file (RelationGraph.load handles it gracefully).
+        """
+        return self.canon.get_project_path(project_id) / "canon" / "relations.jsonl"
+
+    def get_embeddings_cache_path(self, project_id: str):
+        """返回 canon/embeddings_cache.jsonl 的路径（语义向量缓存，Phase 4）。
+
+        Returns the path to the content-addressed embedding cache. Lets the select
+        engine embed each fact/card/chunk once and reuse the vector across queries
+        (embed-once), instead of re-embedding every candidate on every query.
+        """
+        return self.canon.get_project_path(project_id) / "canon" / "embeddings_cache.jsonl"
+
     # ========================================================================
     # 草稿查询接口 / Draft Query Interface
     # ========================================================================

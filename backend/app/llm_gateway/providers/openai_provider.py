@@ -34,9 +34,11 @@ class OpenAIProvider(BaseLLMProvider):
         params: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature or self.temperature,
             "max_tokens": max_tokens or self.max_tokens,
         }
+        # 推理模型（reasoning_effort）不接受 temperature：开启 thinking 时不传。
+        if not isinstance(thinking, dict):
+            params["temperature"] = temperature or self.temperature
         if tools:
             params["tools"] = tools
             if tool_choice is not None:

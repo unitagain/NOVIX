@@ -51,7 +51,11 @@ const compareByStarsThenName = (a, b) => {
 
 export default function CardsPanel() {
   const { t, locale } = useLocale();
-  const requestLanguage = String(locale || '').toLowerCase().startsWith('en') ? 'en' : 'zh';
+  const requestLanguage = String(locale || '')
+    .toLowerCase()
+    .startsWith('en')
+    ? 'en'
+    : 'zh';
   const { projectId } = useParams();
   const { state, dispatch } = useIDE();
   const [entities, setEntities] = useState([]);
@@ -72,8 +76,10 @@ export default function CardsPanel() {
         cardsAPI.getStyle(projectId),
       ]);
 
-      const chars = charsResp.status === 'fulfilled' ? (Array.isArray(charsResp.value.data) ? charsResp.value.data : []) : [];
-      const worlds = worldsResp.status === 'fulfilled' ? (Array.isArray(worldsResp.value.data) ? worldsResp.value.data : []) : [];
+      const chars =
+        charsResp.status === 'fulfilled' ? (Array.isArray(charsResp.value.data) ? charsResp.value.data : []) : [];
+      const worlds =
+        worldsResp.status === 'fulfilled' ? (Array.isArray(worldsResp.value.data) ? worldsResp.value.data : []) : [];
       const style = styleResp.status === 'fulfilled' ? styleResp.value.data : null;
 
       const combined = [
@@ -113,7 +119,7 @@ export default function CardsPanel() {
     const newCard = { name: '', type: typeFilter, isNew: true };
     dispatch({
       type: 'SET_ACTIVE_DOCUMENT',
-      payload: { type: typeFilter, id: '', data: newCard, isNew: true }
+      payload: { type: typeFilter, id: '', data: newCard, isNew: true },
     });
   };
 
@@ -188,16 +194,22 @@ export default function CardsPanel() {
   const typeOptions = [
     { id: 'character', label: t('panels.cards.character'), icon: User },
     { id: 'world', label: t('panels.cards.world'), icon: Globe },
-    { id: 'style', label: t('panels.cards.style'), icon: FileText }
+    { id: 'style', label: t('panels.cards.style'), icon: FileText },
   ];
 
   return (
     <div className="anti-theme h-full flex flex-col bg-[var(--vscode-bg)] text-[var(--vscode-fg)]">
       <div className="p-2 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-bold uppercase tracking-wider pl-2 text-[var(--vscode-fg-subtle)]">{t('panels.cards.libraryTitle')}</span>
+          <span className="text-xs font-bold uppercase tracking-wider pl-2 text-[var(--vscode-fg-subtle)]">
+            {t('panels.cards.libraryTitle')}
+          </span>
           <div className="flex gap-1">
-            <button onClick={loadEntities} className="p-1 hover:bg-[var(--vscode-list-hover)] rounded-[4px]" title={t('common.refresh')}>
+            <button
+              onClick={loadEntities}
+              className="p-1 hover:bg-[var(--vscode-list-hover)] rounded-[4px]"
+              title={t('common.refresh')}
+            >
               <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
             </button>
             {typeFilter !== 'style' && (
@@ -226,7 +238,7 @@ export default function CardsPanel() {
                       'flex-1 py-1 px-2 text-[10px] font-medium rounded-[4px] transition-none',
                       isActive
                         ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                        : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]'
+                        : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]',
                     )}
                   >
                     <div className="flex items-center justify-center gap-1">
@@ -256,16 +268,18 @@ export default function CardsPanel() {
             {styleExpanded && (
               <div className="pl-6 pr-2 space-y-3 pb-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase">{t('panels.cards.style')}</label>
+                  <label className="text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase">
+                    {t('panels.cards.style')}
+                  </label>
                   <textarea
                     value={styleCard.style || ''}
-                    onChange={e => {
-                      setStyleCard(prev => ({ ...prev, style: e.target.value }));
+                    onChange={(e) => {
+                      setStyleCard((prev) => ({ ...prev, style: e.target.value }));
                       e.target.style.height = 'auto';
                       e.target.style.height = e.target.scrollHeight + 'px';
                     }}
                     onBlur={handleSaveStyle}
-                    onFocus={e => {
+                    onFocus={(e) => {
                       e.target.style.height = 'auto';
                       e.target.style.height = e.target.scrollHeight + 'px';
                     }}
@@ -275,7 +289,9 @@ export default function CardsPanel() {
                 </div>
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
-                    <label className="text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase">{t('card.styleExtractLabel')}</label>
+                    <label className="text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase">
+                      {t('card.styleExtractLabel')}
+                    </label>
                     <button
                       type="button"
                       onClick={handleExtractStyle}
@@ -287,7 +303,7 @@ export default function CardsPanel() {
                   </div>
                   <textarea
                     value={styleSample}
-                    onChange={e => setStyleSample(e.target.value)}
+                    onChange={(e) => setStyleSample(e.target.value)}
                     className="w-full text-xs p-2 border border-[var(--vscode-input-border)] rounded-[6px] bg-[var(--vscode-input-bg)] text-[var(--vscode-fg)] focus:border-[var(--vscode-focus-border)] focus:ring-1 focus:ring-[var(--vscode-focus-border)] min-h-[90px] resize-none overflow-hidden"
                     placeholder={t('card.styleSamplePlaceholder')}
                   />
@@ -301,7 +317,12 @@ export default function CardsPanel() {
           <>
             {filteredEntities.length === 0 && !loading && (
               <div className="text-center text-xs text-[var(--vscode-fg-subtle)] py-8">
-                <p>{t('panels.cards.noCardsType').replace('{type}', typeOptions.find(opt => opt.id === typeFilter)?.label || '')}</p>
+                <p>
+                  {t('panels.cards.noCardsType').replace(
+                    '{type}',
+                    typeOptions.find((opt) => opt.id === typeFilter)?.label || '',
+                  )}
+                </p>
                 <p className="text-[10px] mt-2 opacity-60">{t('panels.cards.createHint')}</p>
               </div>
             )}
@@ -310,20 +331,20 @@ export default function CardsPanel() {
               {filteredEntities.map((entity, idx) => (
                 <div
                   key={entity.id || entity.name || idx}
-                  onClick={() => dispatch({
-                    type: 'SET_ACTIVE_DOCUMENT',
-                    payload: { type: entity.type || 'card', id: entity.name, data: entity }
-                  })}
+                  onClick={() =>
+                    dispatch({
+                      type: 'SET_ACTIVE_DOCUMENT',
+                      payload: { type: entity.type || 'card', id: entity.name, data: entity },
+                    })
+                  }
                   className={cn(
                     'flex items-start gap-2 px-2 py-2 rounded-[6px] cursor-pointer hover:bg-[var(--vscode-list-hover)] group border border-transparent transition-none',
                     state.activeDocument?.id === entity.name && state.activeDocument?.type === (entity.type || 'card')
                       ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                      : ''
+                      : '',
                   )}
                 >
-                  <div className="mt-0.5 opacity-60">
-                    {getCardIcon(entity.type)}
-                  </div>
+                  <div className="mt-0.5 opacity-60">{getCardIcon(entity.type)}</div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-medium leading-none mb-1">{entity.name}</div>

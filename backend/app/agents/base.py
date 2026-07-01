@@ -18,6 +18,8 @@ from app.storage import CardStorage, CanonStorage, DraftStorage
 from app.context_engine.trace_collector import trace_collector, TraceEventType
 from app.context_engine.token_counter import count_tokens, get_model_context_window
 from app.prompts import base_agent_system_prompt, format_context_message
+from app.utils.llm_output import parse_json_payload
+from app.utils.json_metrics import record_json_result
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,6 +116,7 @@ class BaseAgent(ABC):
         max_tokens: Optional[int] = None,
         config_agent: Optional[str] = None,
         return_meta: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         调用大模型 - 支持智能体特定配置和流量追踪
@@ -139,7 +142,11 @@ class BaseAgent(ABC):
             temperature = self.gateway.get_temperature_for_agent(agent_name)
 
         response = await self.gateway.chat(
-            messages=messages, provider=provider, temperature=temperature, max_tokens=max_tokens
+            messages=messages,
+            provider=provider,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
         )
 
         # ============================================================================
@@ -189,7 +196,42 @@ class BaseAgent(ABC):
             return response
         return response["content"]
 
-    async def call_llm_stream(self, messages: List[Dict[str, str]], temperature: Optional[float] = None):
+    async def call_llm_json(
+        self,
+        messages: List[Dict[str, str]],
+        expected_type: Optional[type] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        config_agent: Optional[str] = None,
+    ) -> Any:
+        """结构化 JSON 调用（Phase 9）：加 response_format → 解析 → 记录成功率指标 → 返回 (data, err, raw)。
+
+        能力门控：response_format={"type":"json_object"} 对 OpenAI 兼容族强制 JSON mode；
+        Anthropic 忽略→靠 prompt 引导。parse_json_payload 始终保底（fallback），故对所有 provider 健壮。
+
+        Returns:
+            (data, err, raw)：err 为空串表示成功；raw 为原始文本（供重试/调试）。
+        """
+        raw = await self.call_llm(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            config_agent=config_agent,
+            response_format={"type": "json_object"},
+        )
+        raw_text = raw if isinstance(raw, str) else str(raw or "")
+        data, err = parse_json_payload(raw_text, expected_type=expected_type)
+        try:
+            record_json_result(config_agent or self.get_agent_name(), success=not err)
+        except Exception:
+            pass
+        if err:
+            logger.warning("JSON 结构化解析失败 [%s]: %s", self.get_agent_name(), err)
+        return data, err, raw_text
+
+    async def call_llm_stream(
+        self, messages: List[Dict[str, str]], temperature: Optional[float] = None, *, on_thinking=None
+    ):
         """
         流式输出大模型响应 - 逐token返回，适合前端实时显示
 
@@ -199,6 +241,7 @@ class BaseAgent(ABC):
         Args:
             messages: List of message dicts with "role" and "content" keys.
             temperature: Temperature override (uses agent default if None).
+            on_thinking: Optional async callback for reasoning/thinking deltas (default None).
 
         Yields:
             Token strings as they arrive from LLM.
@@ -211,7 +254,9 @@ class BaseAgent(ABC):
 
         has_chunk = False
         try:
-            async for chunk in self.gateway.stream_chat(messages=messages, provider=provider, temperature=temperature):
+            async for chunk in self.gateway.stream_chat(
+                messages=messages, provider=provider, temperature=temperature, on_thinking=on_thinking
+            ):
                 if chunk:
                     has_chunk = True
                 yield chunk

@@ -94,9 +94,7 @@ export default function CloudLoginDialog({ open, onClose, defaultTab = 'login' }
         <div className="mb-1 text-center">
           <span className="brand-logo text-3xl text-[var(--vscode-fg)]">文枢</span>
         </div>
-        <p className="mb-5 text-center text-xs text-[var(--vscode-fg-subtle)]">
-          登录账号以同步设备与版本通知
-        </p>
+        <p className="mb-5 text-center text-xs text-[var(--vscode-fg-subtle)]">登录账号以同步设备与版本通知</p>
 
         <div className="mb-4 flex gap-1 rounded-[6px] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)] p-1">
           {TABS.map((t) => (
@@ -169,9 +167,7 @@ export default function CloudLoginDialog({ open, onClose, defaultTab = 'login' }
           )}
 
           {error && (
-            <div className="rounded-[4px] border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-              {error}
-            </div>
+            <div className="rounded-[4px] border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
           )}
           {info && (
             <div className="rounded-[4px] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)] px-3 py-2 text-xs text-[var(--vscode-fg-subtle)]">

@@ -16,9 +16,7 @@ export function extractErrorDetail(error) {
   if (data) {
     // 422 Pydantic validation errors
     if (Array.isArray(data.detail)) {
-      return data.detail
-        .map((d) => `${(d.loc || []).join('.')}: ${d.msg}`)
-        .join('; ');
+      return data.detail.map((d) => `${(d.loc || []).join('.')}: ${d.msg}`).join('; ');
     }
 
     // Structured LLMError from backend (has provider field)

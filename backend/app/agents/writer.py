@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional
 from app.config import config as app_cfg
 from app.context_engine.token_counter import count_tokens, estimate_tokens_fast
 from app.utils.logger import get_logger
-from app.utils.llm_output import parse_json_payload
 from app.utils.text import normalize_prose_paragraphs
 
 from app.agents.base import BaseAgent
@@ -152,6 +151,7 @@ class WriterAgent(BaseAgent):
             user_answers=user_answers,
             user_feedback=user_feedback,
             evidence_pack=evidence_pack,
+            creative_memory=context.get("creative_memory"),
         )
 
         draft_content = normalize_prose_paragraphs(draft_content, language=self.language)
@@ -247,24 +247,68 @@ class WriterAgent(BaseAgent):
             context_items=context_items,
         )
 
-        raw = await self.call_llm(messages)
-        data, err = parse_json_payload(raw, expected_type=list)
+        data, err, _ = await self.call_llm_json(messages, expected_type=None)
         if err:
             logger.warning("Writer questions parse failed: %s", err)
-            logger.debug("Writer questions raw preview: %s", str(raw or "")[:200])
-        if isinstance(data, list) and 1 <= len(data) <= 5:
-            cleaned = []
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                q_type = item.get("type")
-                text = item.get("text")
-                if q_type and text:
-                    cleaned.append({"type": q_type, "text": text})
-            if cleaned:
-                return cleaned
+        # 健壮抽取：接受 list 或 {"questions":[...]} 等对象包裹；近义键容错（text/question/q、type/category）。
+        cleaned = self._coerce_questions(data)
+        if cleaned:
+            return cleaned[:3]
 
-        return list(self.DEFAULT_QUESTIONS.get(self.language, self.DEFAULT_QUESTIONS["zh"]))
+        # 仅当一条都救不出时才回退；默认问题用本章目标上下文化（不再纯静态通用）。
+        return self._default_questions(brief_goal or chapter_goal, brief_chapter)
+
+    @staticmethod
+    def _coerce_questions(data: Any) -> List[Dict[str, str]]:
+        """从 LLM 返回稳健抽取问题列表。
+
+        - data 为 list → 直接用；为 dict → 取常见键（questions/items/list/data）或第一个 list 值
+          （兼容 response_format=json_object 强制对象、模型把数组包进对象的情形）。
+        - 每项：text 接受 text/question/q/content；type 接受 type/category/kind，缺省 "clarify"。
+        - 纯字符串项也接受（作为 text）。返回结构合规的问题；全不合规返回 []。
+        """
+        items: Any = None
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            for key in ("questions", "items", "list", "data"):
+                if isinstance(data.get(key), list):
+                    items = data.get(key)
+                    break
+            if items is None:
+                for value in data.values():
+                    if isinstance(value, list):
+                        items = value
+                        break
+        if not isinstance(items, list):
+            return []
+
+        cleaned: List[Dict[str, str]] = []
+        for item in items:
+            if isinstance(item, str):
+                text = item.strip()
+                qtype = "clarify"
+            elif isinstance(item, dict):
+                text = str(
+                    item.get("text") or item.get("question") or item.get("q") or item.get("content") or ""
+                ).strip()
+                qtype = str(item.get("type") or item.get("category") or item.get("kind") or "clarify").strip() or "clarify"
+            else:
+                continue
+            if text:
+                cleaned.append({"type": qtype, "text": text})
+        return cleaned
+
+    def _default_questions(self, goal: str = "", chapter: str = "") -> List[Dict[str, str]]:
+        """回退默认问题：用本章目标把第一条上下文化（而非纯静态通用），其余保留。"""
+        base = [dict(q) for q in self.DEFAULT_QUESTIONS.get(self.language, self.DEFAULT_QUESTIONS["zh"])]
+        goal = str(goal or "").strip()
+        if goal and base:
+            if self.language == "en":
+                base[0]["text"] = f"To achieve “{goal[:40]}”, what plot/world information is still needed?"
+            else:
+                base[0]["text"] = f"为达成「{goal[:40]}」，尚缺的剧情 / 世界信息是什么？"
+        return base
 
     async def generate_research_plan(
         self,
@@ -309,11 +353,9 @@ class WriterAgent(BaseAgent):
             context_items=[],
         )
 
-        raw = await self.call_llm(messages)
-        data, err = parse_json_payload(raw, expected_type=dict)
+        data, err, _ = await self.call_llm_json(messages, expected_type=dict)
         if err:
             logger.warning("Writer plan parse failed: %s", err)
-            logger.debug("Writer plan raw preview: %s", str(raw or "")[:200])
         if isinstance(data, dict):
             queries = data.get("queries") or []
             if isinstance(queries, list):
@@ -329,7 +371,47 @@ class WriterAgent(BaseAgent):
         fallback = [t for t in gap_texts if t][:3]
         return {"queries": fallback, "note": "fallback_from_gaps"}
 
-    async def execute_stream_draft(self, project_id: str, chapter: str, context: Dict[str, Any]):
+    async def gather_context_via_tools(
+        self,
+        project_id: str,
+        chapter: str,
+        chapter_goal: str,
+        toolset,
+        on_event=None,
+    ) -> str:
+        """默认范式（支柱 2）：让 Writer 用工具按需检索设定（agentic 即时检索），返回条目化『写作须知』。
+
+        作为主写作流的默认上下文来源；provider 不支持工具或未触发时，调用方据『是否真的调用了工具』
+        回退到既有上下文装配（见 _context_mixin）。
+        """
+        from app.agents.agentic import run_agentic_chat
+
+        system = (
+            "你是撰稿前的资料搜集助手。请用提供的工具按需查询本项目的设定库"
+            "（角色/世界观卡、动态事实表、关系图、已写正文），把与本章目标相关的关键设定、人物关系、"
+            "伏笔与需规避的矛盾点查询齐全。优先核对最近若干章确立的事实与人物状态（时间近的更相关）。"
+            "最后用简洁中文条目化输出『写作须知』，并单列一节『信息缺口』标注设定库中查不到、"
+            "写作时需模糊化处理或不得编造的点。不要写正文。"
+        )
+        user = (
+            f"本章：{chapter}\n"
+            f"章节目标：{str(chapter_goal or '').strip() or '（见上下文）'}\n"
+            "请先调用工具查全相关设定与事实，再输出条目化『写作须知』。"
+        )
+        provider = self.gateway.get_provider_for_agent(self.get_agent_name())
+        max_iters = int(app_cfg.get("retrieval", {}).get("agentic_max_iterations", 4))
+        resp = await run_agentic_chat(
+            self.gateway,
+            provider,
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            toolset,
+            temperature=0.3,
+            max_iterations=max_iters,
+            on_event=on_event,
+        )
+        return str(resp.get("content") or "").strip()
+
+    async def execute_stream_draft(self, project_id: str, chapter: str, context: Dict[str, Any], *, on_thinking=None):
         """
         流式生成草稿 - 逐token实时输出，不包含计划标记
 
@@ -366,10 +448,11 @@ class WriterAgent(BaseAgent):
             user_answers=context.get("user_answers") or [],
             user_feedback=context.get("user_feedback") or "",
             evidence_pack=context.get("evidence_pack"),
+            creative_memory=context.get("creative_memory"),
             include_plan=False,
         )
 
-        async for chunk in self.call_llm_stream(messages):
+        async for chunk in self.call_llm_stream(messages, on_thinking=on_thinking):
             yield chunk
 
     async def _load_previous_summaries(self, project_id: str, current_chapter: str) -> List[str]:
@@ -428,6 +511,7 @@ class WriterAgent(BaseAgent):
         user_answers: List[Dict[str, str]] = None,
         user_feedback: str = None,
         evidence_pack: Dict[str, Any] = None,
+        creative_memory: List[Any] = None,
     ) -> str:
         """
         通过 LLM 生成草稿文本 - 核心生成逻辑
@@ -473,6 +557,7 @@ class WriterAgent(BaseAgent):
             user_answers=user_answers,
             user_feedback=user_feedback,
             evidence_pack=evidence_pack,
+            creative_memory=creative_memory,
             include_plan=True,
         )
 
@@ -506,6 +591,7 @@ class WriterAgent(BaseAgent):
         user_answers: List[Dict[str, str]] = None,
         user_feedback: str = None,
         evidence_pack: Dict[str, Any] = None,
+        creative_memory: List[Any] = None,
         include_plan: bool = True,
     ) -> List[Dict[str, str]]:
         """
@@ -575,6 +661,12 @@ class WriterAgent(BaseAgent):
             except Exception:
                 packer.add("Style Card:\n" + str(style_card), section="style")
 
+        # P4.5: 创作记忆（作者偏好/项目决策，跨会话 JIT 召回）— 影响写作取向，紧随风格卡
+        if creative_memory:
+            mem_text = self._format_creative_memory(creative_memory)
+            if mem_text:
+                packer.add(mem_text, section="creative_memory")
+
         # P5: 原文片段
         if text_chunks:
             chunk_text = self._format_text_chunks(text_chunks)
@@ -609,12 +701,20 @@ class WriterAgent(BaseAgent):
                 cards_text = self._format_model_list("World Cards:", world_cards[: int(_cl.get("world_cards", 10))])
                 packer.add(cards_text, section="world_cards")
 
-        # P9: 事实和状态（仅在无 working_memory 时）
-        if not use_compact_context:
-            if facts and not (evidence_pack and evidence_pack.get("items")):
+        # P8.5: 近事实常驻（Phase 8 动作②）—— 即使 compact 模式（agentic 已取数）也注入近 N 条关键事实，
+        # 作为 agentic 漏查的确定性兜底；facts 来自检索（已含对数距离衰减），靠前即最相关/最近。
+        if facts and not (evidence_pack and evidence_pack.get("items")):
+            if use_compact_context:
+                resident_text = self._format_model_list(
+                    "近期关键事实（Canon，需遵循）:", facts[: int(_cl.get("resident_facts", 8))]
+                )
+                packer.add(resident_text, section="resident_facts")
+            else:
                 facts_text = self._format_model_list("Canon Facts:", facts[: int(_cl.get("facts", 20))])
                 packer.add(facts_text, section="facts")
 
+        # P9: 角色状态（仅在无 working_memory 时）
+        if not use_compact_context:
             if character_states:
                 states_text = self._format_model_list(
                     "Character States:", character_states[: int(_cl.get("character_states", 20))]
@@ -701,6 +801,24 @@ FORBIDDEN:
             else:
                 lines.append(str(chunk))
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_creative_memory(memories: List[Any]) -> str:
+        """格式化跨会话创作记忆（Phase 10）为写作约束块。"""
+        lines = ["创作记忆（作者偏好/项目决策，写作时需遵循）:"]
+        for mem in memories or []:
+            if not isinstance(mem, dict):
+                continue
+            desc = str(mem.get("description") or "").strip()
+            if not desc:
+                continue
+            mtype = str(mem.get("type") or "").strip()
+            body = str(mem.get("body") or "").strip()
+            line = f"- [{mtype}] {desc}" if mtype else f"- {desc}"
+            if body:
+                line += f"：{body}"
+            lines.append(line)
+        return "\n".join(lines) if len(lines) > 1 else ""
 
     @staticmethod
     def _format_evidence_pack(evidence_pack: Dict[str, Any]) -> str:

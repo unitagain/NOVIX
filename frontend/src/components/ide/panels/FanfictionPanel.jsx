@@ -28,22 +28,22 @@ import { useLocale } from '../../../i18n';
  * @returns {JSX.Element} 同人导入面板 / Fanfiction panel element
  */
 const FanfictionPanel = () => {
-    const { t } = useLocale();
-    return (
-        <div className="anti-theme flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)]">
-            {/* 面板头部 / Panel header */}
-            <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
-                <h2 className="text-sm font-bold flex items-center gap-2 text-[var(--vscode-fg)]">
-                    <Library size={16} className="text-[var(--vscode-fg-subtle)]" />
-                    <span>{t('activityBar.fanfiction')}</span>
-                </h2>
-            </div>
-            {/* 指引说明 / Usage guide */}
-            <div className="flex-1 p-4 text-xs text-[var(--vscode-fg-subtle)] leading-relaxed">
-                {t('panels.fanfiction.hint')}
-            </div>
-        </div>
-    );
+  const { t } = useLocale();
+  return (
+    <div className="anti-theme flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)]">
+      {/* 面板头部 / Panel header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
+        <h2 className="text-sm font-bold flex items-center gap-2 text-[var(--vscode-fg)]">
+          <Library size={16} className="text-[var(--vscode-fg-subtle)]" />
+          <span>{t('activityBar.fanfiction')}</span>
+        </h2>
+      </div>
+      {/* 指引说明 / Usage guide */}
+      <div className="flex-1 p-4 text-xs text-[var(--vscode-fg-subtle)] leading-relaxed">
+        {t('panels.fanfiction.hint')}
+      </div>
+    </div>
+  );
 };
 
 export default FanfictionPanel;

@@ -168,6 +168,14 @@ class LLMConfigService:
             if "created_at" not in profile:
                 profile["created_at"] = now_ts
 
+            # 暴露「是否支持参数级 thinking 切换」给前端，用于对话栏「深度思考」按钮显隐（能力降级，异常默认 False）。
+            try:
+                from app.llm_gateway.thinking import supports_thinking
+
+                profile["supports_thinking"] = supports_thinking(profile["provider"], str(profile.get("model") or ""))
+            except Exception:
+                profile["supports_thinking"] = False
+
             cleaned.append(profile)
 
         return cleaned

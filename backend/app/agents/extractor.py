@@ -16,7 +16,6 @@ from app.agents.base import BaseAgent
 from app.prompts import EXTRACTOR_SYSTEM_PROMPT, extractor_cards_prompt
 from app.schemas.draft import CardProposal
 from app.utils.logger import get_logger
-from app.utils.llm_output import parse_json_payload
 
 logger = get_logger(__name__)
 
@@ -82,14 +81,11 @@ class ExtractorAgent(BaseAgent):
             user_prompt=prompt.user,
         )
 
-        response = await self.call_llm(messages)
-
         proposals = []
-        # Parse JSON response containing card proposals
-        data, err = parse_json_payload(response, expected_type=list)
+        # Parse JSON response containing card proposals (Phase 9: 结构化输出 response_format + 成功率指标)
+        data, err, _ = await self.call_llm_json(messages, expected_type=list)
         if err:
             logger.warning("Extractor parse failed: %s", err)
-            logger.debug("Extractor raw preview: %s", str(response or "")[:200])
             return proposals
 
         # Build CardProposal objects from response data

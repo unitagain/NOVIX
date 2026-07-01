@@ -185,10 +185,16 @@ async def health_check():
     data_dir = Path(settings.data_dir) if hasattr(settings, "data_dir") else Path("data")
     storage_ok = data_dir.exists() if data_dir else False
 
+    # Phase 9/13：暴露结构化输出成功率 + prompt caching 命中率指标，供运维 / 前端监控。
+    from app.utils.json_metrics import json_metrics_snapshot
+    from app.utils.cache_metrics import cache_metrics_snapshot
+
     return {
         "status": "ok",
         "version": app.version,
         "storage_accessible": storage_ok,
+        "json_metrics": json_metrics_snapshot(),
+        "cache_metrics": cache_metrics_snapshot(),
     }
 
 

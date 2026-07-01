@@ -8,63 +8,64 @@
  */
 @layer base {
   :root {
-    /* Core Backgrounds */
-    --vscode-bg: #F6F0E6;
+    /* Core Backgrounds — Trae 冷白灰 */
+    --vscode-bg: #ffffff;
     /* Main Editor BG */
-    --vscode-sidebar-bg: #EFE7D8;
+    --vscode-sidebar-bg: #f7f8fa;
+    --vscode-desktop: #eef0f3;
     /* Activity Bar / Sidebar */
-    --vscode-sidebar-border: #E0D6C5;
+    --vscode-sidebar-border: #e8e9ec;
 
     /* Lists & Trees */
-    --vscode-list-hover: #E8DFCE;
-    --vscode-list-active: #DCCFB7;
-    /* Warm selection */
-    --vscode-list-active-fg: #2B2A27;
-    --vscode-list-inactive-selection: #E9DFC9;
+    --vscode-list-hover: #eef0f3;
+    --vscode-list-active: #e3e6eb;
+    /* Cool selection */
+    --vscode-list-active-fg: #1f2329;
+    --vscode-list-inactive-selection: #eceef1;
 
     /* Text */
-    --vscode-fg: #2B2A27;
-    --vscode-fg-subtle: #6F6A60;
+    --vscode-fg: #1f2329;
+    --vscode-fg-subtle: #8a8f99;
 
     /* UI Elements */
-    --vscode-input-bg: #FBF6ED;
-    --vscode-input-border: #D8CDBB;
-    --vscode-focus-border: #2F6FDB;
-    --vscode-guide: #E2D7C4;
+    --vscode-input-bg: #ffffff;
+    --vscode-input-border: #e2e4e8;
+    --vscode-focus-border: #3478f6;
+    --vscode-guide: #eceef1;
     /* Indentation Guide */
 
-    /* Text selection (avoid default blue) */
-    --vscode-selection-bg: #DCCFB7;
-    --vscode-selection-fg: #2B2A27;
+    /* Text selection */
+    --vscode-selection-bg: #d6e4ff;
+    --vscode-selection-fg: #1f2329;
 
     /* Misc */
     --radius-sm: 2px;
     /* Very subtle rounding */
     --radius-md: 4px;
-
   }
 
   /* Antigravity scoped theme（保留局部覆盖能力） */
   .anti-theme {
-    --vscode-bg: #F6F0E6;
-    --vscode-sidebar-bg: #EFE7D8;
-    --vscode-sidebar-border: #E0D6C5;
+    --vscode-bg: #ffffff;
+    --vscode-sidebar-bg: #f7f8fa;
+    --vscode-desktop: #eef0f3;
+    --vscode-sidebar-border: #e8e9ec;
 
-    --vscode-list-hover: #E8DFCE;
-    --vscode-list-active: #DCCFB7;
-    --vscode-list-active-fg: #2B2A27;
-    --vscode-list-inactive-selection: #E9DFC9;
+    --vscode-list-hover: #eef0f3;
+    --vscode-list-active: #e3e6eb;
+    --vscode-list-active-fg: #1f2329;
+    --vscode-list-inactive-selection: #eceef1;
 
-    --vscode-fg: #2B2A27;
-    --vscode-fg-subtle: #6F6A60;
+    --vscode-fg: #1f2329;
+    --vscode-fg-subtle: #8a8f99;
 
-    --vscode-input-bg: #FBF6ED;
-    --vscode-input-border: #D8CDBB;
-    --vscode-focus-border: #2F6FDB;
-    --vscode-guide: #E2D7C4;
+    --vscode-input-bg: #ffffff;
+    --vscode-input-border: #e2e4e8;
+    --vscode-focus-border: #3478f6;
+    --vscode-guide: #eceef1;
 
-    --vscode-selection-bg: #DCCFB7;
-    --vscode-selection-fg: #2B2A27;
+    --vscode-selection-bg: #d6e4ff;
+    --vscode-selection-fg: #1f2329;
 
     --radius-sm: 2px;
     --radius-md: 4px;
@@ -114,18 +115,18 @@
 
   /* Logo 字体：志莽行书（本地字体文件） */
   @font-face {
-    font-family: "ZhiMangXing";
-    src: url("/fonts/ZhiMangXing-Regular.ttf") format("truetype");
+    font-family: 'ZhiMangXing';
+    src: url('/fonts/ZhiMangXing-Regular.ttf') format('truetype');
     font-display: swap;
     font-style: normal;
     font-weight: 400;
   }
-
 }
 
 @layer components {
   .brand-logo {
-    font-family: "ZhiMangXing", "Weibei SC", "STXingkai", "FZShuTi", "STLiti", "HanziPen SC", "Kaiti SC", "KaiTi", serif;
+    font-family:
+      'ZhiMangXing', 'Weibei SC', 'STXingkai', 'FZShuTi', 'STLiti', 'HanziPen SC', 'Kaiti SC', 'KaiTi', serif;
     letter-spacing: 0.06em;
     font-weight: 400;
   }
@@ -134,26 +135,32 @@
   .vscode-command-palette {
     @apply fixed top-0 left-1/2 -translate-x-1/2 mt-2 w-[600px] max-w-[90vw] bg-[var(--vscode-input-bg)] shadow-2xl border border-[var(--vscode-input-border)] rounded-[var(--radius-md)] text-[var(--vscode-fg)] overflow-hidden;
     /* No blur, hard shadow */
-    box-shadow: 0 0 20px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.05);
+    box-shadow:
+      0 0 20px rgba(0, 0, 0, 0.15),
+      0 0 0 1px rgba(0, 0, 0, 0.05);
   }
 
   /* Tree Item Standard */
   .vscode-tree-item {
-    @apply relative flex items-center w-full px-3 h-[24px] cursor-pointer border border-transparent outline-none select-none text-[13px] whitespace-nowrap overflow-hidden text-ellipsis z-10 rounded-[4px];
+    @apply relative flex items-center w-full px-3 h-[24px] cursor-pointer border border-transparent outline-none select-none text-[13px] whitespace-nowrap overflow-hidden text-ellipsis z-10 rounded-[6px];
+    transition:
+      background-color 0.15s cubic-bezier(0.25, 0.1, 0.25, 1),
+      color 0.15s cubic-bezier(0.25, 0.1, 0.25, 1),
+      transform 0.12s cubic-bezier(0.25, 0.1, 0.25, 1);
   }
 
   .vscode-tree-item:hover {
     @apply bg-[var(--vscode-list-hover)];
   }
 
+  /* iOS 式按压即时反馈：轻微回弹 */
+  .vscode-tree-item:active {
+    transform: scale(0.985);
+  }
+
   .vscode-tree-item.selected {
     background-color: var(--vscode-list-active) !important;
     color: var(--vscode-list-active-fg) !important;
-  }
-
-  /* Explorer 选中态：纯直角（仿 Anti 的方正选中条） */
-  .explorer-panel .vscode-tree-item.selected {
-    border-radius: 0 !important;
   }
 
   .vscode-tree-item:focus-visible {
@@ -188,6 +195,27 @@
 }
 
 @layer utilities {
+  /* 实验性 · 仿 iOS「液态玻璃 / Liquid Glass」（对话输入框）：半透明 + 背板模糊 + 高光描边 */
+  .liquid-glass {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.52));
+    backdrop-filter: blur(20px) saturate(180%);
+    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.65);
+    box-shadow:
+      0 8px 24px -6px rgba(2, 6, 23, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.85),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.45);
+    transition:
+      border-color 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+  .liquid-glass:focus-within {
+    border-color: rgba(52, 120, 246, 0.6);
+    box-shadow:
+      0 10px 30px -6px rgba(2, 6, 23, 0.22),
+      inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  }
+
   .clip-text {
     @apply bg-clip-text text-transparent bg-gradient-to-r from-ink-900 to-ink-700;
   }

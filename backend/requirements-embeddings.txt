@@ -1,0 +1,19 @@
+# WenShape — 可选：语义检索（Phase 4）依赖 / Optional: semantic retrieval dependencies
+#
+# 仅当你要开启"语义 + 词法"混合检索时才需安装；默认关闭（config.yaml →
+# retrieval.embeddings.enabled: false），不装也能正常使用（自动降级为纯 BM25 词法检索）。
+# Install ONLY to enable hybrid semantic retrieval. With embeddings disabled
+# (the default), WenShape runs fine without these — retrieval degrades to lexical BM25.
+#
+# 用法 / Usage:
+#   pip install -r requirements-embeddings.txt
+#   然后在 config.yaml 设 retrieval.embeddings.enabled: true
+#
+# 说明 / Notes:
+#   - fastembed 内部带 onnxruntime（纯 CPU，无需 GPU）。
+#   - 默认模型 BAAI/bge-small-zh-v1.5（~100MB，512 维）—— 低内存场景下中文检索性价比最优。
+#     首次使用自动下载到 config.yaml 的 retrieval.embeddings.cache_dir；
+#     离线/桌面打包可预先放置模型文件（见 desktop 打包说明）。
+#   - 故意不纳入 requirements.lock：避免为默认关闭的功能给所有安装强加重型依赖。
+
+fastembed>=0.3.6,<0.5

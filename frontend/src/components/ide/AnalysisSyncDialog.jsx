@@ -89,11 +89,7 @@ export default function AnalysisSyncDialog({
     if (!open || !projectId) return;
     setSelected(new Set());
     setFetching(true);
-    Promise.all([
-      draftsAPI.listChapters(projectId),
-      draftsAPI.listSummaries(projectId),
-      volumesAPI.list(projectId),
-    ])
+    Promise.all([draftsAPI.listChapters(projectId), draftsAPI.listSummaries(projectId), volumesAPI.list(projectId)])
       .then(([chaptersResp, summariesResp, volumesResp]) => {
         const chapterList = Array.isArray(chaptersResp.data) ? chaptersResp.data : [];
         const summaryList = Array.isArray(summariesResp.data) ? summariesResp.data : [];
@@ -151,9 +147,15 @@ export default function AnalysisSyncDialog({
 
   const selectAll = () => setSelected(new Set(chapters));
   const clearAll = () => setSelected(new Set());
-  const handleConfirm = () => { if (onConfirm) onConfirm(Array.from(selected)); };
-  const handleRebuild = () => { if (onRebuild) onRebuild(Array.from(selected)); };
-  const handleRebuildIndexes = () => { if (onRebuildIndexes) onRebuildIndexes(); };
+  const handleConfirm = () => {
+    if (onConfirm) onConfirm(Array.from(selected));
+  };
+  const handleRebuild = () => {
+    if (onRebuild) onRebuild(Array.from(selected));
+  };
+  const handleRebuildIndexes = () => {
+    if (onRebuildIndexes) onRebuildIndexes();
+  };
   const formatCharacters = (binding) => {
     const list = binding?.characters;
     if (!Array.isArray(list) || list.length === 0) return t('common.unknown');
@@ -165,14 +167,10 @@ export default function AnalysisSyncDialog({
   return createPortal(
     <>
       {/* 背景遮罩（轻微遮挡） */}
-      <div
-        className="fixed inset-0 bg-black/10 z-[100]"
-        onClick={onClose}
-      />
+      <div className="fixed inset-0 bg-black/10 z-[100]" onClick={onClose} />
 
       {/* 命令面板布局 */}
       <div className="vscode-command-palette anti-theme z-[101]">
-
         {/* 头部区域 */}
         <div className="bg-[var(--vscode-sidebar-bg)] p-2 border-b border-[var(--vscode-input-border)] flex items-center gap-2">
           <div className="p-1 px-2 text-[11px] font-bold bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)] rounded-[2px]">
@@ -187,8 +185,18 @@ export default function AnalysisSyncDialog({
 
         {/* 快捷操作栏 */}
         <div className="bg-[var(--vscode-bg)] px-2 py-1 border-b border-[var(--vscode-input-border)] flex gap-2">
-          <button onClick={selectAll} className="text-[11px] px-2 py-0.5 hover:bg-[var(--vscode-list-hover)] rounded-[2px] transition-none">{t('fanfiction.selectAll')}</button>
-          <button onClick={clearAll} className="text-[11px] px-2 py-0.5 hover:bg-[var(--vscode-list-hover)] rounded-[2px] transition-none">{t('fanfiction.deselectAll')}</button>
+          <button
+            onClick={selectAll}
+            className="text-[11px] px-2 py-0.5 hover:bg-[var(--vscode-list-hover)] rounded-[2px] transition-none"
+          >
+            {t('fanfiction.selectAll')}
+          </button>
+          <button
+            onClick={clearAll}
+            className="text-[11px] px-2 py-0.5 hover:bg-[var(--vscode-list-hover)] rounded-[2px] transition-none"
+          >
+            {t('fanfiction.deselectAll')}
+          </button>
         </div>
 
         {/* 可滚动列表 */}
@@ -196,7 +204,7 @@ export default function AnalysisSyncDialog({
           {fetching ? (
             <div className="px-4 py-8 text-center text-xs text-[var(--vscode-fg-subtle)]">{t('common.loading')}</div>
           ) : (
-            grouped.map(volume => (
+            grouped.map((volume) => (
               <div key={volume.id}>
                 {/* 分卷标题 */}
                 <div className="px-3 py-1 text-[11px] font-bold text-[var(--vscode-fg-subtle)] bg-[var(--vscode-sidebar-bg)] border-y border-[var(--vscode-sidebar-border)] mt-[-1px]">
@@ -205,28 +213,30 @@ export default function AnalysisSyncDialog({
 
                 {/* 章节网格 */}
                 <div className="grid grid-cols-2">
-                  {volume.chapters.map(chapter => {
+                  {volume.chapters.map((chapter) => {
                     const checked = selected.has(chapter.id);
                     return (
                       <div
                         key={chapter.id}
                         className={cn(
-                          "vscode-tree-item gap-2 border-r border-[var(--vscode-sidebar-border)] last:border-r-0 border-b",
-                          checked && "selected"
+                          'vscode-tree-item gap-2 border-r border-[var(--vscode-sidebar-border)] last:border-r-0 border-b',
+                          checked && 'selected',
                         )}
                         onClick={() => toggleChapter(chapter.id)}
                       >
                         {/* 简易勾选样式 */}
-                        <div className={cn(
-                          "w-3 h-3 border grid place-items-center",
-                          checked ? "border-white bg-transparent" : "border-[var(--vscode-fg-subtle)]"
-                        )}>
+                        <div
+                          className={cn(
+                            'w-3 h-3 border grid place-items-center',
+                            checked ? 'border-white bg-transparent' : 'border-[var(--vscode-fg-subtle)]',
+                          )}
+                        >
                           {checked && <Check size={10} strokeWidth={4} />}
                         </div>
                         <span className="font-mono text-[11px] opacity-70 w-8">{chapter.id}</span>
                         <span className="truncate">{chapter.title || t('chapter.noTitle')}</span>
                       </div>
-                    )
+                    );
                   })}
                 </div>
               </div>
@@ -240,9 +250,7 @@ export default function AnalysisSyncDialog({
               {t('writingSession.analysisReview')}
             </div>
             {loading && (
-              <div className="px-3 py-2 text-xs text-[var(--vscode-fg-subtle)]">
-                {t('common.processing')}
-              </div>
+              <div className="px-3 py-2 text-xs text-[var(--vscode-fg-subtle)]">{t('common.processing')}</div>
             )}
             {error && (
               <div className="px-3 py-2 text-xs text-red-500">
@@ -286,14 +294,14 @@ export default function AnalysisSyncDialog({
             )}
             {(indexRebuildLoading || indexRebuildError || indexRebuildSuccess) && (
               <div className="px-3 py-2 text-xs border-t border-[var(--vscode-sidebar-border)]">
-                {indexRebuildLoading && (
-                  <div className="text-[var(--vscode-fg-subtle)]">{t('common.processing')}</div>
-                )}
+                {indexRebuildLoading && <div className="text-[var(--vscode-fg-subtle)]">{t('common.processing')}</div>}
                 {indexRebuildSuccess && !indexRebuildLoading && !indexRebuildError && (
                   <div className="text-emerald-400">{t('common.success')}</div>
                 )}
                 {indexRebuildError && (
-                  <div className="text-red-500">{t('error.unknown')}: {indexRebuildError}</div>
+                  <div className="text-red-500">
+                    {t('error.unknown')}: {indexRebuildError}
+                  </div>
                 )}
               </div>
             )}
@@ -334,6 +342,6 @@ export default function AnalysisSyncDialog({
         </div>
       </div>
     </>,
-    document.body
+    document.body,
   );
 }

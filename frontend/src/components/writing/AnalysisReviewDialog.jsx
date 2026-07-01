@@ -59,14 +59,7 @@ const emptySummary = {
   brief_summary: '',
 };
 
-export default function AnalysisReviewDialog({
-  open,
-  analyses = [],
-  error = '',
-  onCancel,
-  onSave,
-  saving = false,
-}) {
+export default function AnalysisReviewDialog({ open, analyses = [], error = '', onCancel, onSave, saving = false }) {
   const { t } = useLocale();
   const [currentChapter, setCurrentChapter] = useState('');
   const [analysisMap, setAnalysisMap] = useState({});
@@ -126,9 +119,7 @@ export default function AnalysisReviewDialog({
    * @param {string} value - 新的事实陈述 / New fact statement
    */
   const updateFact = (index, value) => {
-    const next = current.facts.map((item, idx) => (
-      idx === index ? { ...item, statement: value } : item
-    ));
+    const next = current.facts.map((item, idx) => (idx === index ? { ...item, statement: value } : item));
     updateCurrent({ facts: next });
   };
 
@@ -223,7 +214,9 @@ export default function AnalysisReviewDialog({
               <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-4 overflow-hidden p-6">
                 {/* 章节列表侧栏 / Chapter list sidebar */}
                 <div className="border border-[var(--vscode-sidebar-border)] rounded-[6px] bg-[var(--vscode-bg)] p-2 overflow-y-auto custom-scrollbar">
-                  <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] px-2 py-1">{t('analysisReview.chapterSummary')}</div>
+                  <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] px-2 py-1">
+                    {t('analysisReview.chapterSummary')}
+                  </div>
                   <div className="space-y-1 mt-2">
                     {chapterList.map((item) => {
                       const active = item.chapter === currentChapter;
@@ -238,7 +231,12 @@ export default function AnalysisReviewDialog({
                               : 'text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)]')
                           }
                         >
-                          <CheckSquare size={12} className={active ? 'text-[var(--vscode-list-active-fg)]' : 'text-[var(--vscode-fg-subtle)]'} />
+                          <CheckSquare
+                            size={12}
+                            className={
+                              active ? 'text-[var(--vscode-list-active-fg)]' : 'text-[var(--vscode-fg-subtle)]'
+                            }
+                          />
                           <span className="font-mono text-[11px]">{item.chapter}</span>
                           <span className="truncate">{item.title || t('chapter.noTitle')}</span>
                         </button>
@@ -253,7 +251,9 @@ export default function AnalysisReviewDialog({
                     {/* 章节摘要编辑 / Chapter summary editor */}
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <h3 className="text-sm font-bold text-[var(--vscode-fg)]">{t('analysisReview.chapterSummary')}</h3>
+                        <h3 className="text-sm font-bold text-[var(--vscode-fg)]">
+                          {t('analysisReview.chapterSummary')}
+                        </h3>
                         <span className="text-[10px] text-[var(--vscode-fg-subtle)]">{t('common.default')}</span>
                       </div>
                       <textarea
@@ -306,7 +306,7 @@ export default function AnalysisReviewDialog({
                             </div>
                           ))}
                         </div>
-                  )}
+                      )}
                     </div>
                   </div>
                 </div>
@@ -314,11 +314,7 @@ export default function AnalysisReviewDialog({
 
               {/* 对话框底部操作 / Dialog footer actions */}
               <div className="flex justify-end gap-3 px-6 py-4 border-t border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
-                {error ? (
-                  <div className="mr-auto text-xs text-red-500 flex items-center">
-                    {error}
-                  </div>
-                ) : null}
+                {error ? <div className="mr-auto text-xs text-red-500 flex items-center">{error}</div> : null}
                 <Button
                   variant="ghost"
                   onClick={onCancel}

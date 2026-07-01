@@ -37,8 +37,18 @@ export default {
         ring: "#2F6FDB",        // Focus rings
       },
       fontFamily: {
-        // UI Fonts: Clean, modern sans-serif
-        sans: ['"Source Han Sans SC"', '"Noto Sans SC"', '"PingFang SC"', '"Hiragino Sans GB"', '"Microsoft YaHei"', 'system-ui', 'sans-serif'],
+        // UI Fonts: 干净系统无衬线（对齐 Trae）：拉丁/数字优先系统 UI 字体，CJK 跟思源黑体
+        sans: [
+          '"Segoe UI"',
+          'system-ui',
+          '-apple-system',
+          'Inter',
+          '"Source Han Sans SC"',
+          '"Noto Sans SC"',
+          '"PingFang SC"',
+          '"Microsoft YaHei"',
+          'sans-serif',
+        ],
         // Writing Fonts: Elegant serif
         serif: ['"Source Han Serif SC"', '"Noto Serif SC"', '"Songti SC"', '"STSong"', 'serif'],
         // Code

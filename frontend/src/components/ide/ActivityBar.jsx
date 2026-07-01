@@ -9,15 +9,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useIDE } from '../../context/IDEContext';
-import {
-  Files,
-  BookOpen,
-  Bot,
-  Library,
-  Info,
-  X,
-  Lightbulb,
-} from 'lucide-react';
+import { Files, BookOpen, Bot, Library, Info, X, Lightbulb } from 'lucide-react';
 import { cn } from '../../components/ui/core';
 import { useLocale } from '../../i18n';
 
@@ -57,13 +49,13 @@ export function ActivityBar() {
 
   return (
     <>
-      <div className="w-12 flex flex-col items-center py-2 bg-[var(--vscode-sidebar-bg)] border-r border-[var(--vscode-sidebar-border)] z-30">
+      <div className="w-10 flex flex-col items-center py-2 bg-[var(--vscode-desktop)] z-30">
         {/* 活动项按钮容器 */}
         <div className="flex-1 space-y-1 relative">
           {/* 活跃指示背景 - Animated active indicator background */}
           {activeIndex !== -1 && state.sidePanelVisible && (
             <motion.div
-              className="absolute left-1 w-10 h-10 bg-[var(--vscode-list-hover)] rounded-[6px]"
+              className="absolute left-0.5 w-9 h-10 bg-[var(--vscode-list-hover)] rounded-[6px]"
               initial={false}
               animate={{ top: `${activeIndex * 44 + 4}px` }}
               transition={{ type: 'spring', stiffness: 400, damping: 30 }}
@@ -92,8 +84,8 @@ export function ActivityBar() {
           }}
           title={t('activityBar.legalNotice')}
           className={cn(
-            'w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200 group relative z-10',
-            'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]'
+            'w-9 h-10 flex items-center justify-center rounded-xl transition-all duration-200 group relative z-10',
+            'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
           )}
         >
           <Info size={20} strokeWidth={2} />
@@ -135,28 +127,36 @@ export function ActivityBar() {
               <div className="p-6 overflow-y-auto max-h-[calc(80vh-80px)]">
                 <div className="space-y-4 text-sm text-[var(--vscode-fg)]">
                   <div className="space-y-2">
-                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">{t('activityBar.copyright')}</div>
+                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                      {t('activityBar.copyright')}
+                    </div>
                     <div className="text-sm leading-relaxed text-[var(--vscode-fg)]">
                       {t('activityBar.copyrightText')}
                     </div>
                   </div>
 
                   <div className="space-y-2">
-                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">{t('activityBar.compliance')}</div>
+                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                      {t('activityBar.compliance')}
+                    </div>
                     <div className="text-sm leading-relaxed text-[var(--vscode-fg)]">
                       {t('activityBar.complianceText')}
                     </div>
                   </div>
 
                   <div className="space-y-2">
-                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">{t('activityBar.guideline')}</div>
+                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                      {t('activityBar.guideline')}
+                    </div>
                     <div className="text-sm leading-relaxed text-[var(--vscode-fg)]">
                       {t('activityBar.guidelineText')}
                     </div>
                   </div>
 
                   <div className="space-y-2">
-                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">{t('activityBar.license')}</div>
+                    <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                      {t('activityBar.license')}
+                    </div>
                     <div className="text-sm leading-relaxed text-[var(--vscode-fg)]">
                       {t('activityBar.licenseText')}
                     </div>
@@ -174,7 +174,7 @@ export function ActivityBar() {
                     </button>
                     {showFullLicense && (
                       <pre className="mt-3 whitespace-pre-wrap text-xs leading-relaxed font-mono bg-[var(--vscode-input-bg)] p-4 rounded-[6px] border border-[var(--vscode-sidebar-border)] text-[var(--vscode-fg)]">
-{`PolyForm Noncommercial License 1.0.0
+                        {`PolyForm Noncommercial License 1.0.0
 
 https://polyformproject.org/licenses/noncommercial/1.0.0
 
@@ -251,8 +251,8 @@ function ActivityItem({ icon: Icon, label, isActive, onClick }) {
       onClick={onClick}
       title={label}
       className={cn(
-        'w-10 h-10 flex items-center justify-center rounded-xl transition-all duration-200 group relative z-10',
-        isActive ? 'text-[var(--vscode-fg)]' : 'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]'
+        'w-9 h-10 flex items-center justify-center rounded-xl transition-all duration-200 group relative z-10',
+        isActive ? 'text-[var(--vscode-fg)]' : 'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
       )}
     >
       <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />

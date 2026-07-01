@@ -19,10 +19,14 @@ export default function VolumeManageDialog({ open, projectId, onClose }) {
   const [editing, setEditing] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  const { data: volumes = [], mutate, isLoading } = useSWR(
+  const {
+    data: volumes = [],
+    mutate,
+    isLoading,
+  } = useSWR(
     projectId && open ? [projectId, 'volumes'] : null,
     () => volumesAPI.list(projectId).then((res) => res.data),
-    { revalidateOnFocus: false }
+    { revalidateOnFocus: false },
   );
 
   const sortedVolumes = useMemo(() => {
@@ -138,7 +142,9 @@ export default function VolumeManageDialog({ open, projectId, onClose }) {
           ) : mode === 'list' ? (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">{t('volume.listTitle')}</div>
+                <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                  {t('volume.listTitle')}
+                </div>
                 <button
                   className="inline-flex items-center gap-1 text-xs text-[var(--vscode-fg)] hover:text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] px-2 py-1 rounded-[4px]"
                   onClick={() => setMode('create')}
@@ -164,7 +170,9 @@ export default function VolumeManageDialog({ open, projectId, onClose }) {
                           <span className="text-sm font-semibold text-[var(--vscode-fg)] truncate">{volume.title}</span>
                         </div>
                         {volume.summary ? (
-                          <div className="text-[11px] text-[var(--vscode-fg-subtle)] mt-1 line-clamp-2">{volume.summary}</div>
+                          <div className="text-[11px] text-[var(--vscode-fg-subtle)] mt-1 line-clamp-2">
+                            {volume.summary}
+                          </div>
                         ) : null}
                       </div>
 
@@ -184,7 +192,7 @@ export default function VolumeManageDialog({ open, projectId, onClose }) {
                             'p-2 rounded-[6px] transition-none',
                             volume.id === 'V1'
                               ? 'text-[var(--vscode-fg-subtle)] cursor-not-allowed'
-                              : 'text-red-500 hover:bg-red-50'
+                              : 'text-red-500 hover:bg-red-50',
                           )}
                           onClick={() => volume.id !== 'V1' && handleDelete(volume.id)}
                           title={volume.id === 'V1' ? t('volume.v1CannotDelete') : t('common.delete')}
@@ -205,9 +213,11 @@ export default function VolumeManageDialog({ open, projectId, onClose }) {
               </div>
 
               <label className="block space-y-1">
-                <span className="text-[11px] font-semibold text-[var(--vscode-fg-subtle)] uppercase">{t('volume.titleLabel')}</span>
+                <span className="text-[11px] font-semibold text-[var(--vscode-fg-subtle)] uppercase">
+                  {t('volume.titleLabel')}
+                </span>
                 <input
-                  value={mode === 'create' ? draft.title : (editing?.title || '')}
+                  value={mode === 'create' ? draft.title : editing?.title || ''}
                   onChange={(e) => {
                     const value = e.target.value;
                     if (mode === 'create') setDraft((prev) => ({ ...prev, title: value }));
@@ -220,9 +230,11 @@ export default function VolumeManageDialog({ open, projectId, onClose }) {
               </label>
 
               <label className="block space-y-1">
-                <span className="text-[11px] font-semibold text-[var(--vscode-fg-subtle)] uppercase">{t('volume.summaryLabel')}</span>
+                <span className="text-[11px] font-semibold text-[var(--vscode-fg-subtle)] uppercase">
+                  {t('volume.summaryLabel')}
+                </span>
                 <textarea
-                  value={mode === 'create' ? draft.summary : (editing?.summary || '')}
+                  value={mode === 'create' ? draft.summary : editing?.summary || ''}
                   onChange={(e) => {
                     const value = e.target.value;
                     if (mode === 'create') setDraft((prev) => ({ ...prev, summary: value }));

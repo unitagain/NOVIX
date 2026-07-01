@@ -49,6 +49,8 @@ def test_archivist_facade_exports_summary_prompts() -> None:
     )
 
     assert "facts:" in canon_prompt.user
+    assert "relations:" in canon_prompt.user  # Phase 4: 关系三元组抽取
+    assert "context:" in canon_prompt.user  # Phase 4: 情境前缀
     assert "brief_summary:" in chapter_prompt.user
     assert "focus_characters:" in focus_prompt.user
     assert "volume_id: 卷一" in volume_prompt.user

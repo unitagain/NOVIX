@@ -215,22 +215,6 @@ class WorkingMemoryService:
 
         return _unique_gaps(gaps, limit=8)
 
-    def _is_gap_supported(self, gap: Dict[str, Any], items: List[Dict[str, Any]]) -> bool:
-        queries = [q for q in gap.get("queries", []) if q]
-        if not queries:
-            return False
-        for item in items or []:
-            try:
-                score = float(item.get("score") or 0)
-            except Exception:
-                score = 0.0
-            if score < self.MIN_GAP_SUPPORT_SCORE:
-                continue
-            text = str(item.get("text") or "")
-            if _query_hits(text, queries):
-                return True
-        return False
-
     async def prepare(
         self,
         project_id: str,

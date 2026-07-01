@@ -6,8 +6,6 @@ export default function WritingSessionAgentPanel({ vm }) {
     traceEvents,
     agentTraces,
     agentMode,
-    setAgentMode,
-    canUseWriter,
     agentBusy,
     aiLockedChapter,
     activeChapterKey,
@@ -22,37 +20,39 @@ export default function WritingSessionAgentPanel({ vm }) {
     contextDebug,
     progressEvents,
     messages,
-    memoryPackStatus,
-    chapterInfo,
-    editContextMode,
-    setEditContextMode,
     diffReview,
     agentChapterKey,
     diffDecisions,
     handleAcceptAllDiff,
     handleRejectAllDiff,
     handleApplySelectedDiff,
-    addMessage,
-    handleStart,
-    handleSubmitFeedback,
+    handleChatSubmit,
     countWords,
     writingLanguage,
     dialogMaxChars,
+    deepThinkingEnabled,
+    deepThinkingSupported,
+    onToggleDeepThinking,
+    pendingPlan,
+    planExecuting,
+    onExecutePlan,
+    onDismissPlan,
   } = vm;
+
+  // 输入禁用仅限「AI 正忙于其它章节」。无激活章节不再禁用——复杂规划 / 问答可直接对话，
+  // 撰写 / 编辑由 handleChatSubmit 在无章节时友好引导（vibe writing 灵活性）。
+  const aiBusyElsewhere = agentBusy && String(aiLockedChapter || '') !== activeChapterKey;
+  const inputDisabled = aiBusyElsewhere;
+  const inputDisabledReason = aiBusyElsewhere
+    ? t('writingSession.aiLockedHint').replace('{n}', String(aiLockedChapter))
+    : '';
 
   return (
     <AgentsPanel traceEvents={traceEvents} agentTraces={agentTraces}>
       <AgentStatusPanel
         mode={agentMode}
-        onModeChange={setAgentMode}
-        createDisabled={!canUseWriter}
-        editDisabled={canUseWriter}
-        inputDisabled={agentBusy && String(aiLockedChapter || '') !== activeChapterKey}
-        inputDisabledReason={
-          agentBusy && String(aiLockedChapter || '') !== activeChapterKey
-            ? t('writingSession.aiLockedHint').replace('{n}', String(aiLockedChapter))
-            : ''
-        }
+        inputDisabled={inputDisabled}
+        inputDisabledReason={inputDisabledReason}
         isGenerating={agentBusy && String(aiLockedChapter || '') === activeChapterKey}
         isCancelling={isCancelling}
         onCancel={handleCancel}
@@ -91,35 +91,20 @@ export default function WritingSessionAgentPanel({ vm }) {
         contextDebug={contextDebug}
         progressEvents={progressEvents}
         messages={messages}
-        memoryPackStatus={memoryPackStatus}
-        activeChapter={agentBusy ? aiLockedChapter : chapterInfo.chapter}
-        editContextMode={editContextMode}
-        onEditContextModeChange={setEditContextMode}
         diffReview={diffReview && String(diffReview?.chapterKey || '') === agentChapterKey ? diffReview : null}
         diffDecisions={diffDecisions}
         onAcceptAllDiff={handleAcceptAllDiff}
         onRejectAllDiff={handleRejectAllDiff}
         onApplySelectedDiff={handleApplySelectedDiff}
-        onSubmit={(text) => {
-          if (!chapterInfo.chapter) {
-            addMessage('system', t('writingSession.pleaseSelectChapter'));
-            return;
-          }
-
-          if (agentMode === 'create') {
-            if (!canUseWriter) {
-              addMessage('system', t('writingSession.chapterNotWritable'));
-              setAgentMode('edit');
-              return;
-            }
-            addMessage('user', text);
-            handleStart(chapterInfo.chapter, 'deep', text);
-            return;
-          }
-
-          handleSubmitFeedback(text);
-        }}
+        onSubmit={(text) => handleChatSubmit(text)}
         inputMaxLength={dialogMaxChars}
+        deepThinkingEnabled={deepThinkingEnabled}
+        deepThinkingSupported={deepThinkingSupported}
+        onToggleDeepThinking={onToggleDeepThinking}
+        pendingPlan={pendingPlan}
+        planExecuting={planExecuting}
+        onExecutePlan={onExecutePlan}
+        onDismissPlan={onDismissPlan}
       />
     </AgentsPanel>
   );

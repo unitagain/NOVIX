@@ -77,6 +77,8 @@ class CanonStorage(BaseStorage):
             "source": source or introduced_in or "C0",
             "introduced_in": introduced_in or source or "C0",
             "confidence": confidence,
+            "status": item.get("status") or "confirmed",
+            "context_prefix": item.get("context_prefix") or item.get("context") or "",
             "title": title,
             "content": content,
             "summary_ref": item.get("summary_ref"),
@@ -158,6 +160,21 @@ class CanonStorage(BaseStorage):
         # 使索引失效
         await get_index_cache().invalidate(project_id)
         return True
+
+    async def confirm_facts(self, project_id: str, fact_ids) -> int:
+        """Phase 14：把指定事实标为 confirmed（作者审核后）；返回确认条数。"""
+        file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
+        items = await self.read_jsonl(file_path)
+        ids = {str(i) for i in (fact_ids or [])}
+        changed = 0
+        for item in items:
+            if str(item.get("id")) in ids and item.get("status") != "confirmed":
+                item["status"] = "confirmed"
+                changed += 1
+        if changed:
+            await self.write_jsonl(file_path, items)
+            await get_index_cache().invalidate(project_id)
+        return changed
 
     async def delete_fact(self, project_id: str, fact_id: str) -> bool:
         """Delete a fact by ID."""
@@ -411,6 +428,117 @@ class CanonStorage(BaseStorage):
         """
         file_path = self.get_project_path(project_id) / "canon" / "character_state.jsonl"
         await self.append_jsonl(file_path, state.model_dump())
+
+    # ========================================================================
+    # 关系图（Phase 4，GraphRAG-lite） / Relation graph (lightweight)
+    # ========================================================================
+
+    @staticmethod
+    def derive_relations_from_states(character_states: List[Any], chapter: str) -> List[Dict[str, Any]]:
+        """从角色状态的 relationships 字段顺手派生关系三元组（无 LLM、确定性）。
+
+        Derive typed relation triples from each character's ``relationships`` map.
+        This is the "顺手记实体边" path: no extra model call, just structuring the
+        relationship data the Archivist already extracts. Returns triple dicts
+        ``{subject, relation, object, chapter}`` ready for ``add_relations``.
+        """
+        out: List[Dict[str, Any]] = []
+        for state in character_states or []:
+            if isinstance(state, dict):
+                data = state
+            elif hasattr(state, "model_dump"):
+                data = state.model_dump()
+            else:
+                continue
+            subject = str(data.get("character") or "").strip()
+            rels = data.get("relationships") or {}
+            if not subject or not isinstance(rels, dict):
+                continue
+            last_seen = str(data.get("last_seen") or chapter or "").strip()
+            for other, desc in rels.items():
+                other_name = str(other or "").strip()
+                if not other_name or other_name == subject:
+                    continue
+                relation = str(desc or "").strip() or "关系"
+                out.append({"subject": subject, "relation": relation, "object": other_name, "chapter": last_seen})
+        return out
+
+    async def get_all_relations(self, project_id: str) -> List[Dict[str, Any]]:
+        """读取全部关系三元组（原始 dict）。"""
+        file_path = self.get_project_path(project_id) / "canon" / "relations.jsonl"
+        items = await self.read_jsonl(file_path)
+        return [item for item in items if isinstance(item, dict)]
+
+    async def add_relations(self, project_id: str, relations: List[Dict[str, Any]]) -> int:
+        """增量追加关系三元组到 relations.jsonl（无全量重建）。返回写入条数。
+
+        Append-only; skips malformed triples (missing subject/relation/object).
+        """
+        if not relations:
+            return 0
+        file_path = self.get_project_path(project_id) / "canon" / "relations.jsonl"
+        written = 0
+        for rel in relations:
+            if not isinstance(rel, dict):
+                continue
+            subject = str(rel.get("subject") or "").strip()
+            object_ = str(rel.get("object") or "").strip()
+            relation = str(rel.get("relation") or "").strip()
+            if not (subject and object_ and relation):
+                continue
+            await self.append_jsonl(
+                file_path,
+                {
+                    "subject": subject,
+                    "relation": relation,
+                    "object": object_,
+                    "change": str(rel.get("change") or ""),
+                    "chapter": self._extract_chapter_id(str(rel.get("chapter") or "")) or str(rel.get("chapter") or ""),
+                },
+            )
+            written += 1
+        return written
+
+    async def detect_relation_inconsistencies(self, project_id: str) -> List[str]:
+        """确定性关系一致性护栏（Phase 6，无 LLM）：返回可读的"违背设定"报警字符串列表。
+
+        读 relations.jsonl 构图，找出"同一对实体关系类型前后冲突且无演变标注"的破绽。
+        无问题或读取失败时返回空列表（绝不影响主流程）。
+        """
+        try:
+            from app.context_engine.relation_graph import RelationGraph
+
+            file_path = self.get_project_path(project_id) / "canon" / "relations.jsonl"
+            graph = RelationGraph.load(file_path)
+            issues = graph.inconsistencies()
+        except Exception:
+            return []
+        messages: List[str] = []
+        for issue in issues:
+            entities = issue.get("entities") or []
+            rels = issue.get("relations") or []
+            pair = " 与 ".join(str(e) for e in entities)
+            messages.append(f"[Relation Conflict] {pair}：{' / '.join(str(r) for r in rels)}（无演变标注）")
+        return messages
+
+    async def delete_relations_by_chapter(self, project_id: str, chapter: str) -> int:
+        """删除某章引入的关系（覆盖式重新分析时用，避免重复 append）。返回删除条数。"""
+        file_path = self.get_project_path(project_id) / "canon" / "relations.jsonl"
+        items = await self.read_jsonl(file_path)
+        if not items:
+            return 0
+        target = self._extract_chapter_id(chapter)
+        if not target:
+            return 0
+        kept = [
+            item
+            for item in items
+            if not (isinstance(item, dict) and self._extract_chapter_id(str(item.get("chapter") or "")) == target)
+        ]
+        deleted = len(items) - len(kept)
+        if deleted > 0:
+            await self.write_jsonl(file_path, kept)
+        return deleted
 
     def _normalize_text(self, text: str) -> str:
         """Normalize text for comparison / 文本归一化（用于比较）"""

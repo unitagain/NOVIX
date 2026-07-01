@@ -378,6 +378,30 @@ class TraceCollector:
 
         return sorted([e.to_dict() for e in events], key=lambda x: x["timestamp"])
 
+    async def save_trace(self, file_path, *, count: int = 2000) -> bool:
+        """Phase 15：把当前 trace（事件 + agent 追踪）落盘为 JSON，供前端展开 / eval 复用。
+
+        best-effort：失败返回 False，不抛（trace 落盘不得影响主流程）。
+        """
+        try:
+            from pathlib import Path
+            import aiofiles
+
+            payload = json.dumps(
+                {"events": self.get_recent_events(count), "agent_traces": self.get_all_traces()},
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+            path = Path(file_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(path, "w", encoding="utf-8") as f:
+                await f.write(payload)
+            return True
+        except Exception as exc:
+            logger.warning("Save trace failed: %s", exc)
+            return False
+
 
 # 全局追踪收集器实例
 trace_collector = TraceCollector()

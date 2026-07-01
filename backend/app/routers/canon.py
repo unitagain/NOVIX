@@ -37,6 +37,12 @@ class ManualFactCreate(BaseModel):
     confidence: Optional[float] = None
 
 
+class ConfirmFactsRequest(BaseModel):
+    """Phase 14：作者确认 AI 抽取的 needs_review 事实为 confirmed。"""
+
+    fact_ids: List[str]
+
+
 # Facts / 事实
 @router.get("/facts")
 async def get_all_facts(project_id: str) -> List[Fact]:
@@ -49,6 +55,13 @@ async def add_fact(project_id: str, fact: Fact):
     """Add a new fact / 添加新事实"""
     await canon_storage.add_fact(project_id, fact)
     return {"success": True, "message": "Fact added"}
+
+
+@router.post("/facts/confirm")
+async def confirm_facts(project_id: str, request: ConfirmFactsRequest):
+    """Phase 14：把 needs_review 事实确认为 confirmed（作者审核后进入强约束主 canon）。"""
+    confirmed = await canon_storage.confirm_facts(project_id, request.fact_ids)
+    return {"success": True, "confirmed": confirmed}
 
 
 @router.post("/facts/manual")

@@ -19,6 +19,17 @@ class Fact(BaseModel):
     source: str = Field(..., description="Source chapter")
     introduced_in: str = Field(..., description="Chapter where the fact was introduced")
     confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence score")
+    status: str = Field(
+        "confirmed",
+        description="Phase 14 风险等级：confirmed（作者确认 / 旧数据兼容）| needs_review（AI 抽取待确认）| inferred。",
+    )
+    context_prefix: str = Field(
+        "",
+        description=(
+            "Contextual Retrieval 情境前缀：定位本条事实的场景/涉及者，仅用于检索索引"
+            "（与 statement 拼接后参与词法+语义打分），不用于展示。"
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={

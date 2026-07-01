@@ -17,8 +17,8 @@ import time
 from typing import Any, Dict, List, Optional
 
 from app.schemas.canon import Fact, TimelineEvent, CharacterState
-from app.schemas.draft import ChapterSummary, CardProposal
-from app.schemas.card import CharacterCard, WorldCard, StyleCard
+from app.schemas.draft import ChapterSummary
+from app.schemas.card import StyleCard
 from app.schemas.evidence import EvidenceItem
 from app.utils.chapter_id import ChapterIDValidator
 from app.utils.logger import get_logger
@@ -195,6 +195,7 @@ class AnalysisMixin:
             "facts": [fact.model_dump() for fact in facts],
             "timeline_events": [event.model_dump() for event in canon_updates.get("timeline_events", []) or []],
             "character_states": [state.model_dump() for state in canon_updates.get("character_states", []) or []],
+            "relations": list(canon_updates.get("relations", []) or []),
             # Auto card creation has been removed from analysis flow.
             "proposals": [],
         }
@@ -458,6 +459,11 @@ class AnalysisMixin:
             # Overwrite: normalize + delete in a single read-write pass
             if overwrite:
                 await self.canon_storage.delete_and_normalize_by_chapter(project_id, summary.chapter)
+                # 同步清掉本章旧关系边，避免重新分析时重复 append（关系图为 append-only）。
+                try:
+                    await self.canon_storage.delete_relations_by_chapter(project_id, summary.chapter)
+                except Exception as exc:
+                    logger.warning("Failed to clear chapter relations on overwrite: %s", exc)
 
             # Load existing fact IDs once before the loop (avoid N × O(M) scans)
             existing_facts = await self.canon_storage.get_all_facts_raw(project_id)
@@ -480,6 +486,8 @@ class AnalysisMixin:
                     fact_data["id"] = f"F{next_fact_index:04d}"
                     next_fact_index += 1
                 existing_ids.add(fact_data["id"])
+                # Phase 14：AI 章末抽取的事实默认 needs_review（待作者确认），不直接污染 confirmed 主 canon。
+                fact_data.setdefault("status", "needs_review")
                 await self.canon_storage.add_fact(project_id, Fact(**fact_data))
                 facts_saved += 1
 
@@ -497,12 +505,25 @@ class AnalysisMixin:
                 await self.canon_storage.update_character_state(project_id, CharacterState(**state_data))
                 states_saved += 1
 
+            # Phase 4: 顺手把角色关系沉淀为关系图边（无额外 LLM 调用）。
+            # 来源：① 角色状态的 relationships 字段派生；② 分析载荷里显式提供的 relations（前向兼容）。
+            relations_saved = 0
+            try:
+                derived = self.canon_storage.derive_relations_from_states(
+                    analysis.get("character_states", []) or [], summary.chapter
+                )
+                explicit = [r for r in (analysis.get("relations", []) or []) if isinstance(r, dict)]
+                relations_saved = await self.canon_storage.add_relations(project_id, derived + explicit)
+            except Exception as exc:
+                logger.warning("Failed to persist relation edges: %s", exc)
+
             return {
                 "success": True,
                 "stats": {
                     "facts_saved": facts_saved,
                     "timeline_saved": timeline_saved,
                     "states_saved": states_saved,
+                    "relations_saved": relations_saved,
                     "cards_created": 0,
                 },
             }
@@ -554,6 +575,11 @@ class AnalysisMixin:
             )
 
             for fact in canon_updates.get("facts", []) or []:
+                # Phase 14：AI 抽取默认 needs_review，待作者确认后才进 confirmed 主 canon。
+                try:
+                    fact.status = "needs_review"
+                except Exception:
+                    pass
                 await self.canon_storage.add_fact(project_id, fact)
 
             for event in canon_updates.get("timeline_events", []) or []:
@@ -561,6 +587,17 @@ class AnalysisMixin:
 
             for state in canon_updates.get("character_states", []) or []:
                 await self.canon_storage.update_character_state(project_id, state)
+
+            # Phase 4: 顺手沉淀关系图边（无额外 LLM 调用）。
+            # 来源：① 档案员显式抽取的 relations 三元组；② 角色状态 relationships 派生。
+            try:
+                explicit = list(canon_updates.get("relations", []) or [])
+                derived = self.canon_storage.derive_relations_from_states(
+                    canon_updates.get("character_states", []) or [], normalized_chapter
+                )
+                await self.canon_storage.add_relations(project_id, explicit + derived)
+            except Exception as exc:
+                logger.warning("Failed to persist relation edges: %s", exc)
 
             try:
                 report = await self.canon_storage.detect_conflicts(
@@ -570,6 +607,13 @@ class AnalysisMixin:
                     new_timeline_events=canon_updates.get("timeline_events", []) or [],
                     new_character_states=canon_updates.get("character_states", []) or [],
                 )
+                # Phase 6：关系一致性护栏（确定性、无 LLM）—— 把"关系前后矛盾且无演变标注"并入报告。
+                try:
+                    rel_issues = await self.canon_storage.detect_relation_inconsistencies(project_id)
+                    if rel_issues:
+                        report.setdefault("conflicts", []).extend(rel_issues)
+                except Exception as exc:
+                    logger.warning("Relation consistency check failed: %s", exc)
                 await self.draft_storage.save_conflict_report(
                     project_id=project_id,
                     chapter=chapter,
@@ -579,6 +623,50 @@ class AnalysisMixin:
                 logger.warning("Failed to detect conflicts: %s", exc)
         except Exception as exc:
             logger.warning("Failed to update canon: %s", exc)
+
+        # Phase 10：定稿后提炼跨会话创作记忆（偏好/进度/决策）→ 写 memory（best-effort，不阻断收尾）。
+        try:
+            await self._extract_and_store_memory(project_id, normalized_chapter, content)
+        except Exception as exc:
+            logger.warning("Creative memory extraction failed: %s", exc)
+
+    async def _extract_and_store_memory(
+        self,
+        project_id: str,
+        chapter: str,
+        final_draft: str,
+        user_feedback: str = "",
+    ) -> int:
+        """Phase 10 · 提炼并写入跨会话创作记忆；返回写入条数（best-effort，异常不外抛）。"""
+        summary_text = ""
+        try:
+            summary = await self.draft_storage.get_chapter_summary(project_id, chapter)
+            summary_text = str(getattr(summary, "summary", "") or "") if summary else ""
+        except Exception:
+            summary_text = ""
+
+        items = await self.archivist.extract_creative_memory(
+            final_draft=final_draft,
+            user_feedback=user_feedback,
+            chapter_summary=summary_text,
+        )
+        written = 0
+        for item in items:
+            description = str(item.get("description") or "").strip()
+            if not description:
+                continue
+            try:
+                await self.creative_memory_storage.write_memory(
+                    project_id,
+                    slug=item.get("slug") or description[:24],
+                    description=description,
+                    body=item.get("body", ""),
+                    mem_type=item.get("type", "preference"),
+                )
+                written += 1
+            except Exception as exc:
+                logger.warning("Write creative memory failed: %s", exc)
+        return written
 
     async def _detect_proposals(self, project_id: str, content: Any) -> List[Dict]:
         """
@@ -597,73 +685,6 @@ class AnalysisMixin:
         """
         # Product decision: disable auto proposal generation in analysis flow entirely.
         return []
-
-    async def _create_cards_from_proposals(
-        self,
-        project_id: str,
-        proposals: List[Dict[str, Any]],
-        overwrite: bool = False,
-    ) -> int:
-        """
-        从建议创建卡片，返回创建数量 / Create cards from proposals. Returns created count.
-
-        Converts setting proposals into actual character and world cards,
-        saving them to storage. Respects overwrite flag to update existing cards.
-
-        Args:
-            project_id: 项目ID / Project identifier.
-            proposals: 设定建议列表 / List of proposal dicts.
-            overwrite: 覆盖现有卡片 / Overwrite existing cards with same name.
-
-        Returns:
-            创建的卡片数量 / Number of cards created.
-        """
-        # Hard-stop safeguard: never auto-create cards from analysis proposals.
-        return 0
-
-        created = 0
-        for item in proposals:
-            try:
-                proposal = CardProposal(**(item or {}))
-            except Exception:
-                continue
-
-            name = (proposal.name or "").strip()
-            if not name:
-                continue
-
-            ptype = (proposal.type or "").lower()
-            if ptype == "character":
-                existing = await self.card_storage.get_character_card(project_id, name)
-                if existing and not overwrite:
-                    continue
-                card = CharacterCard(
-                    name=name,
-                    description=self._merge_card_description(
-                        proposal.description,
-                        proposal.rationale,
-                    ),
-                )
-                await self.card_storage.save_character_card(project_id, card)
-                created += 1
-                continue
-
-            if ptype == "world":
-                existing = await self.card_storage.get_world_card(project_id, name)
-                if existing and not overwrite:
-                    continue
-                card = WorldCard(
-                    name=name,
-                    description=self._merge_card_description(
-                        proposal.description,
-                        proposal.rationale,
-                    ),
-                )
-                await self.card_storage.save_world_card(project_id, card)
-                created += 1
-                continue
-
-        return created
 
     async def extract_style_profile(self, project_id: str, sample_text: str) -> StyleCard:
         """

@@ -114,6 +114,13 @@ def estimate_tokens_fast(text: str) -> int:
     用于大量文本的快速预估，避免tiktoken的开销。
     Useful for quick estimation of large texts without tiktoken overhead.
 
+    与 ``count_tokens`` 的关系（两路已统一在 ``_estimate_tokens_mixed`` 之上，无重复逻辑）：
+      - ``count_tokens``：精确路径，优先用 tiktoken，不可用时退化到 ``_estimate_tokens_mixed``。
+      - ``estimate_tokens_fast``：始终走 ``_estimate_tokens_mixed``，刻意不碰 tiktoken，
+        用于装填器等需要大批量、低开销估算的热路径（见 ``agents/writer.py`` packer）。
+    Both paths share ``_estimate_tokens_mixed``; this one deliberately skips tiktoken
+    for low-overhead bulk estimation.
+
     Args:
         text: 输入文本 / Input text
 

@@ -10,6 +10,9 @@ from .drafts import DraftStorage
 from .evidence_index import EvidenceIndexStorage
 from .bindings import ChapterBindingStorage
 from .memory_pack import MemoryPackStorage
+from .creative_memory import CreativeMemoryStorage
+from .plan_store import PlanStore
+from .session_history import SessionHistoryStorage
 
 __all__ = [
     "CardStorage",
@@ -18,4 +21,7 @@ __all__ = [
     "EvidenceIndexStorage",
     "ChapterBindingStorage",
     "MemoryPackStorage",
+    "CreativeMemoryStorage",
+    "PlanStore",
+    "SessionHistoryStorage",
 ]

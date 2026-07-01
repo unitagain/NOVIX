@@ -366,6 +366,8 @@ class LLMGateway:
         provider: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        *,
+        on_thinking: Optional[Any] = None,
     ):
         """
         Stream chat response token by token, with retry before first chunk.
@@ -376,6 +378,8 @@ class LLMGateway:
             provider: Profile ID / 配置文件ID
             temperature: Override temperature / 覆盖温度
             max_tokens: Override max tokens / 覆盖最大token数
+            on_thinking: 可选 async 回调，接收推理/思考增量（默认 None；正文仍走 yield）。
+                Optional async callback for reasoning/thinking deltas (content still yields).
 
         Yields:
             String chunks as they arrive from the LLM
@@ -402,7 +406,9 @@ class LLMGateway:
         for attempt in range(self.max_retries):
             try:
                 first_chunk = True
-                async for chunk in target_provider.stream_chat(messages, temperature, max_tokens):
+                async for chunk in target_provider.stream_chat(
+                    messages, temperature, max_tokens, on_thinking=on_thinking
+                ):
                     first_chunk = False
                     yield chunk
                 return  # Stream completed successfully
@@ -482,6 +488,23 @@ class LLMGateway:
         if profile:
             return profile.get("temperature", 0.7)
         return 0.7
+
+    def thinking_param_for_agent(self, agent_name: str, enabled: bool) -> Optional[Dict[str, Any]]:
+        """构建该 agent 当前模型开启 thinking 时要传给 ``chat(thinking=...)`` 的参数 dict。
+
+        未开启 / 模型不支持「参数级」thinking 切换 → None（能力降级，调用方不传 thinking 即正常）。
+        """
+        if not enabled:
+            return None
+        try:
+            profile = self.get_profile_for_agent(agent_name)
+        except Exception:
+            return None
+        if not profile:
+            return None
+        from app.llm_gateway.thinking import build_thinking_param
+
+        return build_thinking_param(profile.get("provider", ""), profile.get("model", ""))
 
     def get_profile_for_agent(self, agent_name: str) -> Optional[Dict[str, Any]]:
         """

@@ -16,6 +16,24 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, AsyncGenerator
 
 
+def _extract_reasoning_delta(delta: Any) -> Optional[str]:
+    """从 OpenAI 兼容流式 delta 中抽取推理/思考增量（reasoning_content）。
+
+    推理模型（deepseek-reasoner 及兼容端点）把思考过程放在非标准字段 reasoning_content；
+    优先取属性，回退到 pydantic model_extra。无则返回 None。
+    Extract the reasoning/thinking delta from an OpenAI-style streaming delta;
+    reasoning models expose it on the non-standard ``reasoning_content`` field.
+    """
+    if delta is None:
+        return None
+    reasoning = getattr(delta, "reasoning_content", None)
+    if not reasoning:
+        extra = getattr(delta, "model_extra", None)
+        if isinstance(extra, dict):
+            reasoning = extra.get("reasoning_content")
+    return reasoning or None
+
+
 def normalize_tool_calls(message: Any) -> Optional[List[Dict[str, Any]]]:
     """从 OpenAI 风格 message 提取 tool_calls，统一为可序列化 dict 列表；无则返回 None。
     Extract tool_calls from an OpenAI-style message into plain dicts; returns None if absent."""
@@ -100,7 +118,12 @@ class BaseLLMProvider(ABC):
         pass
 
     async def stream_chat(
-        self, messages: List[Dict[str, str]], temperature: Optional[float] = None, max_tokens: Optional[int] = None
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        *,
+        on_thinking: Optional[Any] = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式输出聊天响应，逐 token 返回 / Stream chat response token by token
@@ -112,6 +135,10 @@ class BaseLLMProvider(ABC):
             messages: 消息列表 / Message list.
             temperature: 覆盖温度 / Override temperature.
             max_tokens: 覆盖token数 / Override max tokens.
+            on_thinking: 可选 async 回调，接收推理/思考增量（reasoning_content）。
+                默认 None；支持推理模型的 provider 在收到推理增量时调用它（正文仍走 yield）。
+                Optional async callback receiving reasoning/thinking deltas; content
+                still flows via yield, so the default path is unchanged.
 
         Yields:
             从大模型返回的字符串片段 / String chunks as they arrive from the LLM.

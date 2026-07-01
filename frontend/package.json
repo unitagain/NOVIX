@@ -10,6 +10,9 @@
     "lint": "eslint \"src/**/*.{js,jsx,ts,tsx}\"",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx,css,json}\""
   },
   "dependencies": {
@@ -39,6 +42,7 @@
     "tailwindcss": "^3.3.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2",
-    "vite": "^5.0.8"
+    "vite": "^5.0.8",
+    "vitest": "^4.1.9"
   }
 }

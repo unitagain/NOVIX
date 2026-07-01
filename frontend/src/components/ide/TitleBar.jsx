@@ -9,7 +9,13 @@ import logger from '../../utils/logger';
 import { useLocale } from '../../i18n';
 import ExportDialog from './ExportDialog';
 import CloudAccountButton from '../cloud/CloudAccountButton';
-import { isDesktopRuntime, openDesktopDataDirectory, openDesktopLogsDirectory, openDesktopMainLog, openDesktopRuntimeDirectory } from '../../utils/desktop';
+import {
+  isDesktopRuntime,
+  openDesktopDataDirectory,
+  openDesktopLogsDirectory,
+  openDesktopMainLog,
+  openDesktopRuntimeDirectory,
+} from '../../utils/desktop';
 
 const fetcher = (fn) => fn().then((res) => res.data);
 
@@ -37,7 +43,35 @@ function setStreamingPreference(enabled) {
       return;
     }
     window.localStorage.setItem(STREAMING_PREF_KEY, String(enabled));
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
+}
+
+const DEEP_THINKING_PREF_KEY = 'wenshape_deep_thinking';
+
+/** Read deep-thinking preference from localStorage (default: false) */
+export function getDeepThinkingPreference() {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return false;
+    }
+    return window.localStorage.getItem(DEEP_THINKING_PREF_KEY) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/** Write deep-thinking preference to localStorage */
+export function setDeepThinkingPreference(enabled) {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return;
+    }
+    window.localStorage.setItem(DEEP_THINKING_PREF_KEY, String(enabled));
+  } catch {
+    /* ignore */
+  }
 }
 
 /** Read dialog max chars preference from localStorage (default: 2000) */
@@ -62,7 +96,9 @@ function setDialogMaxCharsPreference(maxChars) {
     }
     window.localStorage.setItem(DIALOG_MAX_CHARS_PREF_KEY, String(normalized));
     window.dispatchEvent(new CustomEvent('wenshape:dialog-max-chars', { detail: normalized }));
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
 /**
@@ -86,11 +122,7 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
   const settingsRef = useRef(null);
   const desktopRuntime = isDesktopRuntime();
 
-  const { data: projects = [] } = useSWR(
-    'all-projects',
-    () => fetcher(projectsAPI.list),
-    { revalidateOnFocus: false }
-  );
+  const { data: projects = [] } = useSWR('all-projects', () => fetcher(projectsAPI.list), { revalidateOnFocus: false });
 
   useEffect(() => {
     const handleClickOutside = (e) => {
@@ -195,11 +227,10 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
     }
   };
 
-  const effectiveProjectName =
-    projectName || projects.find((p) => p?.id === projectId)?.name || '';
+  const effectiveProjectName = projectName || projects.find((p) => p?.id === projectId)?.name || '';
 
   return (
-    <div className="h-10 min-h-[40px] bg-[var(--vscode-sidebar-bg)] border-b border-[var(--vscode-sidebar-border)] flex items-center justify-between px-4 select-none flex-shrink-0">
+    <div className="h-10 min-h-[40px] bg-[var(--vscode-desktop)] flex items-center justify-between px-4 select-none flex-shrink-0">
       <div className="flex items-center gap-3">
         <button
           onClick={() => navigate('/')}
@@ -220,7 +251,7 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
               'flex items-center gap-2 px-3 py-1.5 rounded-[6px] text-sm transition-colors',
               menuOpen
                 ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]'
+                : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]',
             )}
           >
             <Folder size={14} />
@@ -230,7 +261,9 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
 
           {menuOpen && (
             <div className="absolute left-0 top-full mt-1 w-64 glass-panel border border-[var(--vscode-sidebar-border)] rounded-[6px] py-1 z-50 soft-dropdown">
-              <div className="px-3 py-2 text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase">{t('titleBar.myProjects')}</div>
+              <div className="px-3 py-2 text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase">
+                {t('titleBar.myProjects')}
+              </div>
 
               <div className="max-h-48 overflow-y-auto">
                 {projects.map((project) => (
@@ -334,7 +367,7 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
               'flex items-center gap-2 px-3 py-1.5 rounded-[6px] text-sm transition-colors',
               settingsOpen
                 ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]'
+                : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]',
             )}
             title={t('titleBar.settings')}
             aria-label={t('titleBar.settings')}
@@ -356,7 +389,9 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
                   className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] transition-colors"
                 >
                   <span className="flex-1 text-left">{opt.label}</span>
-                  {opt.locale === locale && <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />}
+                  {opt.locale === locale && (
+                    <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />
+                  )}
                 </button>
               ))}
 
@@ -373,7 +408,9 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
                 <div className="flex-1 text-left">
                   <div className="text-sm">{t('titleBar.dialogMaxChars2k')}</div>
                 </div>
-                {dialogMaxChars === 2000 && <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />}
+                {dialogMaxChars === 2000 && (
+                  <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />
+                )}
               </button>
               <button
                 onClick={() => handleDialogMaxCharsChange(6000)}
@@ -382,7 +419,9 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
                 <div className="flex-1 text-left">
                   <div className="text-sm">{t('titleBar.dialogMaxChars6k')}</div>
                 </div>
-                {dialogMaxChars === 6000 && <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />}
+                {dialogMaxChars === 6000 && (
+                  <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />
+                )}
               </button>
 
               <div className="border-t border-[var(--vscode-sidebar-border)] my-1" />
@@ -478,7 +517,7 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
             'flex items-center gap-2 px-3 py-1.5 rounded-[6px] text-sm transition-colors',
             state.rightPanelVisible
               ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-              : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]'
+              : 'text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]',
           )}
           title={state.rightPanelVisible ? t('titleBar.closeAiPanel') : t('titleBar.openAiPanel')}
           aria-label={state.rightPanelVisible ? t('titleBar.closeAiPanel') : t('titleBar.openAiPanel')}

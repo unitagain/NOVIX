@@ -68,16 +68,17 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
         ]);
         if (cancelled) return;
         const summaryMap = new Map(
-          (summariesRes.data || []).map((item) => [String(item.chapter), String(item.title || '').trim()])
+          (summariesRes.data || []).map((item) => [String(item.chapter), String(item.title || '').trim()]),
         );
         const chapterItems = (chaptersRes.data || []).map((chapterId) => ({
           id: String(chapterId),
           title: summaryMap.get(String(chapterId)) || String(chapterId),
         }));
         setChapters(chapterItems);
-        const preferred = currentChapter && chapterItems.some((item) => item.id === currentChapter)
-          ? [String(currentChapter)]
-          : chapterItems.slice(0, 1).map((item) => item.id);
+        const preferred =
+          currentChapter && chapterItems.some((item) => item.id === currentChapter)
+            ? [String(currentChapter)]
+            : chapterItems.slice(0, 1).map((item) => item.id);
         setSelectedChapters(preferred);
       } catch (error) {
         alert(t('exportDialog.loadFailed', { message: extractErrorDetail(error) }));
@@ -105,11 +106,9 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
   }, [open, onClose]);
 
   const toggleChapter = (chapterId) => {
-    setSelectedChapters((prev) => (
-      prev.includes(chapterId)
-        ? prev.filter((item) => item !== chapterId)
-        : [...prev, chapterId]
-    ));
+    setSelectedChapters((prev) =>
+      prev.includes(chapterId) ? prev.filter((item) => item !== chapterId) : [...prev, chapterId],
+    );
   };
 
   const handleToggleAll = () => {
@@ -176,23 +175,25 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
                   <div className="px-4 py-6 text-sm text-[var(--vscode-fg-subtle)]">{t('common.loading')}</div>
                 ) : chapters.length === 0 ? (
                   <div className="px-4 py-6 text-sm text-[var(--vscode-fg-subtle)]">{t('exportDialog.noChapters')}</div>
-                ) : chapters.map((chapter) => (
-                  <label
-                    key={chapter.id}
-                    className="flex items-start gap-3 px-4 py-3 border-b last:border-b-0 border-[var(--vscode-input-border)] hover:bg-[var(--vscode-list-hover)] cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedChapters.includes(chapter.id)}
-                      onChange={() => toggleChapter(chapter.id)}
-                      className="mt-0.5"
-                    />
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium truncate">{chapter.title}</div>
-                      <div className="text-xs text-[var(--vscode-fg-subtle)] mt-1">{chapter.id}</div>
-                    </div>
-                  </label>
-                ))}
+                ) : (
+                  chapters.map((chapter) => (
+                    <label
+                      key={chapter.id}
+                      className="flex items-start gap-3 px-4 py-3 border-b last:border-b-0 border-[var(--vscode-input-border)] hover:bg-[var(--vscode-list-hover)] cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedChapters.includes(chapter.id)}
+                        onChange={() => toggleChapter(chapter.id)}
+                        className="mt-0.5"
+                      />
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium truncate">{chapter.title}</div>
+                        <div className="text-xs text-[var(--vscode-fg-subtle)] mt-1">{chapter.id}</div>
+                      </div>
+                    </label>
+                  ))
+                )}
               </div>
             </div>
 
@@ -213,7 +214,7 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
                           'rounded-[8px] border px-3 py-3 text-sm transition-colors',
                           active
                             ? 'border-[var(--vscode-focus-border)] bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                            : 'border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] hover:bg-[var(--vscode-list-hover)]'
+                            : 'border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] hover:bg-[var(--vscode-list-hover)]',
                         ].join(' ')}
                       >
                         <div className="flex flex-col items-center gap-2">
@@ -231,11 +232,7 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
                   {t('exportDialog.options')}
                 </div>
                 <label className="flex items-center gap-3 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={includeTitles}
-                    onChange={(e) => setIncludeTitles(e.target.checked)}
-                  />
+                  <input type="checkbox" checked={includeTitles} onChange={(e) => setIncludeTitles(e.target.checked)} />
                   <span>{t('exportDialog.includeTitles')}</span>
                 </label>
                 <p className="text-xs text-[var(--vscode-fg-subtle)] mt-3">
@@ -246,9 +243,7 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
           </div>
 
           <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-[var(--vscode-input-border)] bg-[var(--vscode-bg)]">
-            <div className="text-xs text-[var(--vscode-fg-subtle)]">
-              {t('exportDialog.footerHint')}
-            </div>
+            <div className="text-xs text-[var(--vscode-fg-subtle)]">{t('exportDialog.footerHint')}</div>
             <div className="flex items-center gap-2">
               <Button variant="outline" size="sm" onClick={onClose}>
                 {t('common.cancel')}
@@ -267,6 +262,6 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
         </div>
       </div>
     </>,
-    document.body
+    document.body,
   );
 }

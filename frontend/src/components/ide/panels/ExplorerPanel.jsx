@@ -40,7 +40,11 @@ import { useLocale } from '../../../i18n';
 
 export default function ExplorerPanel({ className }) {
   const { t, locale } = useLocale();
-  const requestLanguage = String(locale || '').toLowerCase().startsWith('en') ? 'en' : 'zh';
+  const requestLanguage = String(locale || '')
+    .toLowerCase()
+    .startsWith('en')
+    ? 'en'
+    : 'zh';
   const { state, dispatch } = useIDE();
   const [syncOpen, setSyncOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -62,10 +66,11 @@ export default function ExplorerPanel({ className }) {
     setSyncResults([]);
     setSyncLoading(true);
     try {
-      const res = await sessionAPI.analyzeSync(state.activeProjectId, { language: requestLanguage, chapters: selectedChapters });
-      const payload = Array.isArray(res.data)
-        ? { success: true, results: res.data }
-        : (res.data || {});
+      const res = await sessionAPI.analyzeSync(state.activeProjectId, {
+        language: requestLanguage,
+        chapters: selectedChapters,
+      });
+      const payload = Array.isArray(res.data) ? { success: true, results: res.data } : res.data || {};
       if (!payload?.success) {
         throw new Error(payload?.error || payload?.detail || t('writingSession.syncFailed'));
       }
@@ -86,7 +91,7 @@ export default function ExplorerPanel({ className }) {
               binding_error: error?.response?.data?.detail || error?.message || t('error.loadFailed'),
             };
           }
-        })
+        }),
       );
       setSyncResults(bindingResults.filter(Boolean));
       setReviewItems(analyses);
@@ -111,7 +116,7 @@ export default function ExplorerPanel({ className }) {
     setSyncLoading(true);
     try {
       const res = await bindingsAPI.rebuildBatch(state.activeProjectId, {
-        chapters: selectedChapters.length > 0 ? selectedChapters : undefined
+        chapters: selectedChapters.length > 0 ? selectedChapters : undefined,
       });
       if (!res.data?.success) {
         throw new Error(res.data?.error || t('error.loadFailed'));
@@ -183,9 +188,9 @@ export default function ExplorerPanel({ className }) {
       title={title}
       aria-label={title}
       className={cn(
-        "p-1 rounded-[2px] text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] transition-none outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]",
-        "opacity-70 hover:opacity-100 focus:opacity-100",
-        "flex items-center justify-center w-6 h-6"
+        'p-1 rounded-[6px] text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] transition-all duration-150 active:scale-90 outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]',
+        'opacity-70 hover:opacity-100 focus:opacity-100',
+        'flex items-center justify-center w-6 h-6',
       )}
     >
       <Icon size={14} strokeWidth={1.5} />
@@ -193,7 +198,12 @@ export default function ExplorerPanel({ className }) {
   );
 
   return (
-    <div className={cn('anti-theme explorer-panel flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)] select-none', className)}>
+    <div
+      className={cn(
+        'anti-theme explorer-panel flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)] select-none',
+        className,
+      )}
+    >
       {/* VS Code 风格工具栏 */}
       <div className="flex items-center h-[35px] px-4 font-sans text-[11px] font-bold tracking-wide text-[var(--vscode-fg-subtle)] uppercase bg-[var(--vscode-sidebar-bg)] border-b border-[var(--vscode-sidebar-border)]">
         <span>{t('panels.explorer.title')}</span>
@@ -207,7 +217,9 @@ export default function ExplorerPanel({ className }) {
             title={reorderMode ? t('panels.explorer.exitReorder') : t('panels.explorer.reorderMode')}
           />
           <ActionButton
-            onClick={() => dispatch({ type: 'OPEN_CREATE_CHAPTER_DIALOG', payload: { volumeId: state.selectedVolumeId } })}
+            onClick={() =>
+              dispatch({ type: 'OPEN_CREATE_CHAPTER_DIALOG', payload: { volumeId: state.selectedVolumeId } })
+            }
             icon={Plus}
             title={t('panels.explorer.newChapter')}
           />
@@ -231,7 +243,7 @@ export default function ExplorerPanel({ className }) {
       </div>
 
       <div className="flex-1 overflow-hidden relative">
-        <div className="absolute inset-0 overflow-y-auto custom-scrollbar">
+        <div className="absolute inset-0 overflow-y-auto custom-scrollbar px-1.5 py-1">
           <VolumeTree
             projectId={state.activeProjectId}
             onChapterSelect={handleChapterSelect}

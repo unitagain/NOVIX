@@ -12,7 +12,6 @@ import logger from '../../utils/logger';
 import { extractErrorDetail } from '../../utils/extractError';
 import { useLocale } from '../../i18n';
 
-
 const FactsEncyclopedia = ({ projectId: overrideProjectId, onFactSelect }) => {
   const { t } = useLocale();
   const { projectId: routeProjectId } = useParams();
@@ -26,11 +25,13 @@ const FactsEncyclopedia = ({ projectId: overrideProjectId, onFactSelect }) => {
   const [creatingFact, setCreatingFact] = useState(null);
   const [refreshingSummary, setRefreshingSummary] = useState(false);
 
-  const { data: factsTree = { volumes: [] }, isLoading, mutate } = useSWR(
-    projectId ? [projectId, 'facts-tree'] : null,
-    () => canonAPI.getTree(projectId).then((res) => res.data),
-    { revalidateOnFocus: false }
-  );
+  const {
+    data: factsTree = { volumes: [] },
+    isLoading,
+    mutate,
+  } = useSWR(projectId ? [projectId, 'facts-tree'] : null, () => canonAPI.getTree(projectId).then((res) => res.data), {
+    revalidateOnFocus: false,
+  });
 
   const getChapterWeight = (chapterId) => {
     const normalized = (chapterId || '').toUpperCase();
@@ -235,7 +236,9 @@ const FactsEncyclopedia = ({ projectId: overrideProjectId, onFactSelect }) => {
             <div className="leading-tight">
               <div className="flex items-baseline gap-2">
                 <div className="text-sm font-bold text-[var(--vscode-fg)]">{t('facts.encyclopediaTitle')}</div>
-                <div className="text-[11px] text-[var(--vscode-fg-subtle)]">{stats.chapterCount} {t('facts.chapterUnit')} · {stats.factCount} {t('facts.factUnit')}</div>
+                <div className="text-[11px] text-[var(--vscode-fg-subtle)]">
+                  {stats.chapterCount} {t('facts.chapterUnit')} · {stats.factCount} {t('facts.factUnit')}
+                </div>
               </div>
             </div>
           </div>
@@ -429,13 +432,15 @@ function ChapterBlock({
   const { data: bindingResp, isLoading: bindingLoading } = useSWR(
     isExpanded && projectId ? [projectId, chapter.id, 'bindings'] : null,
     () => bindingsAPI.get(projectId, chapter.id).then((res) => res.data),
-    { revalidateOnFocus: false }
+    { revalidateOnFocus: false },
   );
 
   const binding = bindingResp?.binding;
   const boundCharacters = binding?.characters || [];
   const charactersText = binding
-    ? (boundCharacters.length ? boundCharacters.join('、') : t('common.none'))
+    ? boundCharacters.length
+      ? boundCharacters.join('、')
+      : t('common.none')
     : t('facts.noBinding');
 
   return (
@@ -452,15 +457,17 @@ function ChapterBlock({
         tabIndex={0}
         className={cn(
           'w-full flex items-center gap-2 px-2 py-1.5 text-left transition-none',
-          'hover:bg-[var(--vscode-list-hover)]'
+          'hover:bg-[var(--vscode-list-hover)]',
         )}
       >
-        <span className={cn("text-[var(--vscode-fg-subtle)] inline-flex", isExpanded ? "rotate-90" : "")} aria-hidden>
+        <span className={cn('text-[var(--vscode-fg-subtle)] inline-flex', isExpanded ? 'rotate-90' : '')} aria-hidden>
           <ChevronRight size={14} />
         </span>
 
         <span className="text-[10px] font-mono text-[var(--vscode-fg-subtle)]">{chapter.id}</span>
-        <span className="text-[12px] text-[var(--vscode-fg)] truncate flex-1">{chapter.title || t('chapter.noTitle')}</span>
+        <span className="text-[12px] text-[var(--vscode-fg)] truncate flex-1">
+          {chapter.title || t('chapter.noTitle')}
+        </span>
 
         <div className="flex items-center gap-1">
           <button
@@ -536,17 +543,17 @@ function ChapterBlock({
                   const factKey = fact.id || `${chapter.id}-${idx}`;
                   const factExpanded = expandedFacts?.has(factKey);
                   return (
-                  <FactRow
-                    key={factKey}
-                    fact={fact}
-                    index={idx + 1}
-                    expanded={factExpanded}
-                    onToggleExpand={() => onToggleFact?.(factKey)}
-                    onEdit={() => onEditFact(fact)}
-                    onDelete={() => onDeleteFact(fact.id)}
-                    onSelect={onFactSelect ? () => onFactSelect(fact) : null}
-                  />
-                );
+                    <FactRow
+                      key={factKey}
+                      fact={fact}
+                      index={idx + 1}
+                      expanded={factExpanded}
+                      onToggleExpand={() => onToggleFact?.(factKey)}
+                      onEdit={() => onEditFact(fact)}
+                      onDelete={() => onDeleteFact(fact.id)}
+                      onSelect={onFactSelect ? () => onFactSelect(fact) : null}
+                    />
+                  );
                 })}
               </div>
             ) : (
@@ -563,14 +570,14 @@ function FactRow({ fact, index, expanded, onToggleExpand, onEdit, onDelete, onSe
   const { t } = useLocale();
   const statement = (fact.statement || fact.content || '').trim();
   const title = (fact.title || '').trim();
-  const display = title && title !== statement ? `${title}：${statement}` : (statement || title || t('facts.noContent'));
+  const display = title && title !== statement ? `${title}：${statement}` : statement || title || t('facts.noContent');
 
   return (
     <div
       className={cn(
         'group flex items-start gap-0.5 px-0.5 py-1.5 rounded-[4px] transition-none',
         'hover:bg-[var(--vscode-list-hover)]',
-        onSelect ? 'cursor-pointer' : ''
+        onSelect ? 'cursor-pointer' : '',
       )}
       onClick={onSelect || undefined}
     >
@@ -591,11 +598,7 @@ function FactRow({ fact, index, expanded, onToggleExpand, onEdit, onDelete, onSe
       </div>
 
       <div className="flex-1 min-w-0">
-        <div className={cn(
-          "text-[10.5px] leading-snug",
-          "text-[var(--vscode-fg)]",
-          expanded ? "" : "line-clamp-3"
-        )}>
+        <div className={cn('text-[10.5px] leading-snug', 'text-[var(--vscode-fg)]', expanded ? '' : 'line-clamp-3')}>
           {display}
         </div>
       </div>
@@ -855,7 +858,7 @@ function RefreshSummaryDialog({ open, volumes, projectId, onClose, onRefreshed }
                 'w-full flex items-center gap-2 px-3 py-2 rounded-[4px] text-left transition-none',
                 selected.size === volumes.length
                   ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                  : 'hover:bg-[var(--vscode-list-hover)]'
+                  : 'hover:bg-[var(--vscode-list-hover)]',
               )}
             >
               <span className="text-xs font-medium">{t('common.selectAll')}</span>
@@ -871,7 +874,7 @@ function RefreshSummaryDialog({ open, volumes, projectId, onClose, onRefreshed }
                   'w-full flex items-center gap-2 px-3 py-2 rounded-[4px] text-left transition-none',
                   selected.has(volume.id)
                     ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
-                    : 'hover:bg-[var(--vscode-list-hover)]'
+                    : 'hover:bg-[var(--vscode-list-hover)]',
                 )}
               >
                 <span className="text-[10px] font-mono text-[var(--vscode-fg-subtle)]">{volume.id}</span>

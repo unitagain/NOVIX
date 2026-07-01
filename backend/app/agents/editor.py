@@ -23,7 +23,6 @@ from app.prompts import (
     editor_selection_replace_prompt,
 )
 from app.utils.logger import get_logger
-from app.utils.llm_output import parse_json_payload
 from app.utils.version import increment_version
 
 logger = get_logger(__name__)
@@ -468,9 +467,8 @@ class EditorAgent(BaseAgent):
             user_prompt=prompt.user,
             context_items=context_items,
         )
-        response = await self.call_llm(messages, config_agent=config_agent, return_meta=True)
-        raw = str(response.get("content") or "").strip()
-        data, err = parse_json_payload(raw, expected_type=dict)
+        data, err, raw = await self.call_llm_json(messages, expected_type=dict, config_agent=config_agent)
+        raw = str(raw or "").strip()
         if err or not isinstance(data, dict):
             logger.info("Document locate parse failed: err=%s raw=%s", err, raw[:160])
             return None
@@ -608,9 +606,8 @@ class EditorAgent(BaseAgent):
 
         raw = ""
         try:
-            response = await self.call_llm(messages, config_agent=config_agent, return_meta=True)
-            raw = str(response.get("content") or "").strip()
-            data, err = parse_json_payload(raw, expected_type=dict)
+            data, err, raw = await self.call_llm_json(messages, expected_type=dict, config_agent=config_agent)
+            raw = str(raw or "").strip()
             if err or not isinstance(data, dict):
                 logger.warning("Patch ops parse failed: err=%s raw=%s", err, raw[:200] if raw else "empty")
                 raise ValueError(f"patch_ops_parse_failed: {err}")
@@ -680,9 +677,8 @@ class EditorAgent(BaseAgent):
                     ),
                 }
             )
-            response2 = await self.call_llm(retry_messages, config_agent=config_agent, return_meta=True)
-            raw2 = str(response2.get("content") or "").strip()
-            data2, err2 = parse_json_payload(raw2, expected_type=dict)
+            data2, err2, raw2 = await self.call_llm_json(retry_messages, expected_type=dict, config_agent=config_agent)
+            raw2 = str(raw2 or "").strip()
             if err2 or not isinstance(data2, dict):
                 logger.error("Patch ops retry parse failed: err=%s raw=%s", err2, raw2[:200] if raw2 else "empty")
                 raise ValueError(f"patch_ops_retry_parse_failed: {err2}") from exc

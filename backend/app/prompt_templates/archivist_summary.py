@@ -33,6 +33,7 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
                 "facts:",
                 "  - statement: <atomic factual statement>",
                 "    confidence: <0.0-1.0>",
+                "    context: <=20 chars situating prefix: scene/who/cause, for retrieval only>",
                 "timeline_events:",
                 "  - time: <time expression>",
                 "    event: <what happened>",
@@ -46,6 +47,11 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
                 "    relationships: { <other>: <relation change> }",
                 "    location: <current location>",
                 "    emotional_state: <emotion>",
+                "relations:",
+                "  - subject: <subject entity>",
+                "    relation: <relation type, e.g. enemy/ally/mentor/kin/loyalty>",
+                "    object: <object entity>",
+                "    change: <optional: evolution, e.g. ally->enemy>",
             ]
         )
         critical = "\n".join(
@@ -54,7 +60,7 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
                 "",
                 f"chapter: {chapter}",
                 "",
-                "Extract structured updates for facts/timeline/character_states from final draft.",
+                "Extract structured updates for facts/timeline/character_states/relations from final draft.",
                 "",
                 "### Extraction Rules",
                 "",
@@ -62,12 +68,16 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
                 "[P0-MUST] Language: all output text must be in English (no Chinese).",
                 '[P0-MUST] Keep uncertain fields empty ([] or "").',
                 "[P1-SHOULD] facts: prefer reusable, high-constraint facts over trivia.",
+                "[P1-SHOULD] facts.context: a <=20-char prefix situating the fact (scene/who/cause)",
+                "  for retrieval recall (Contextual Retrieval); do not restate the statement; empty if unsure.",
                 "[P1-SHOULD] Contradiction handling (Last-Write-Wins):",
                 "  - If this chapter's events invalidate a prior fact (relationship change, status change,",
                 "    rule broken), simply extract the new fact — no need to reference or negate the old one.",
                 "  - The system automatically prioritizes the most recent fact during context retrieval.",
                 "[P1-SHOULD] timeline_events: key event nodes only.",
                 "[P1-SHOULD] character_states: focus on major characters only.",
+                "[P1-SHOULD] relations (0-8): typed entity relations established/changed this chapter",
+                "  (the relation-graph edges); subject/relation/object required, evolution in change.",
             ]
         )
         user = "\n".join(
@@ -104,6 +114,7 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
             "facts:",
             "  - statement: <客观事实，精炼句子>",
             "    confidence: <0.0-1.0>",
+            "    context: <≤20字情境定位：场景/涉及者/因果，仅用于检索，勿重复 statement>",
             "timeline_events:",
             "  - time: <时间描述>",
             "    event: <发生了什么>",
@@ -117,6 +128,11 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
             "    relationships: { <他人>: <关系描述> }",
             "    location: <当前位置>",
             "    emotional_state: <情绪>",
+            "relations:",
+            "  - subject: <主体实体>",
+            "    relation: <关系类型，如 敌对/盟友/师承/亲属/效忠>",
+            "    object: <客体实体>",
+            "    change: <可选：关系演变，如 盟友→敌对>",
         ]
     )
     critical = "\n".join(
@@ -161,6 +177,15 @@ def archivist_canon_updates_prompt(chapter: str, final_draft: str, language: str
             "  - 只写主要人物",
             "  - relationships 格式：{对方: 关系变化}",
             "  - 不确定用空对象 {}",
+            "",
+            f"{P1_MARKER} 每条 fact 附 context（情境前缀，用于检索召回，对标 Contextual Retrieval）：",
+            "  - 一句≤20字，定位该事实的场景/涉及人物/因果（如「迷雾森林·张三揭穿李四后」）",
+            "  - 只为帮助日后语义检索定位，不要复述 statement 本身；难以定位则留空",
+            "",
+            f"{P1_MARKER} relations（0-8 条，关系图的边，用于回答『谁与谁的恩怨/关系网』）：",
+            "  - 抽取本章【确立或改变】的实体间有类型关系（人物↔人物/势力/地点）",
+            "  - subject/relation/object 必填且为正文出现的实体；关系演变写到 change",
+            "  - 与 character_states.relationships 可重叠；这里要的是规范化三元组",
         ]
     )
     user = "\n".join(

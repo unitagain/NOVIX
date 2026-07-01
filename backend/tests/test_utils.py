@@ -6,6 +6,29 @@ from app.utils.text import normalize_for_compare, normalize_newlines, normalize_
 from app.utils.path_safety import sanitize_id, validate_path_within
 from app.services.wiki_parser import WikiStructuredParser
 
+# --- stopwords unification (Phase 4 dedup) ---
+
+
+class TestStopwordsUnified:
+    """get_stopwords() 是停用词的唯一来源：含中/英文 + yaml 文件词的并集。"""
+
+    def test_union_includes_former_tokenizer_only_words(self):
+        from app.utils.stopwords import get_stopwords
+
+        sw = get_stopwords()
+        # 这些词历史上仅存在于 text_tokenizer 的硬编码集合，去重后应进入统一集合
+        assert "它" in sw and "怎么" in sw  # CJK pronouns/interrogatives
+        assert "with" in sw and "myself" in sw  # English
+        # 也应包含 yaml/默认里的词
+        assert "的" in sw and "chapter" in sw
+
+    def test_tokenizer_filters_via_shared_source(self):
+        from app.context_engine.text_tokenizer import tokenize
+
+        tokens = tokenize("他和她在城里行走", remove_stopwords=True)
+        assert "他" not in tokens and "她" not in tokens and "和" not in tokens
+
+
 # --- normalize_newlines ---
 
 

@@ -53,19 +53,18 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
   // 数据获取
   const { data: volumesData } = useSWR(
     projectId ? `/volumes/${projectId}` : null,
-    () => volumesAPI.list(projectId).then(res => res.data),
-    { refreshInterval: 5000 } // 轮询更新
+    () => volumesAPI.list(projectId).then((res) => res.data),
+    { refreshInterval: 5000 }, // 轮询更新
   );
 
   const { data: chaptersData } = useSWR(
     projectId ? `/drafts/${projectId}/chapters` : null,
-    () => draftsAPI.listChapters(projectId).then(res => res.data),
-    { refreshInterval: 5000 }
+    () => draftsAPI.listChapters(projectId).then((res) => res.data),
+    { refreshInterval: 5000 },
   );
 
-  const { data: summariesData } = useSWR(
-    projectId ? `/drafts/${projectId}/summaries` : null,
-    () => draftsAPI.listSummaries(projectId).then(res => res.data)
+  const { data: summariesData } = useSWR(projectId ? `/drafts/${projectId}/summaries` : null, () =>
+    draftsAPI.listSummaries(projectId).then((res) => res.data),
   );
 
   // 状态
@@ -82,7 +81,7 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
     // 将摘要映射为标题
     const summaryMap = {};
     if (Array.isArray(summariesData)) {
-      summariesData.forEach(s => {
+      summariesData.forEach((s) => {
         if (s.chapter) summaryMap[s.chapter] = s;
       });
     }
@@ -96,7 +95,7 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
       return match ? `V${match[1]}` : 'V1';
     };
 
-    chaptersData.forEach(chapterId => {
+    chaptersData.forEach((chapterId) => {
       const summary = summaryMap[chapterId];
       const volId = getVolumeId(chapterId, summary);
 
@@ -112,7 +111,7 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
     });
 
     // 分卷内章节排序：优先使用 order_index（用户自定义），否则回退到章节号排序。
-    Object.keys(grouped).forEach(key => {
+    Object.keys(grouped).forEach((key) => {
       grouped[key].sort((a, b) => {
         const aOrder = typeof a.order_index === 'number' ? a.order_index : Number.POSITIVE_INFINITY;
         const bOrder = typeof b.order_index === 'number' ? b.order_index : Number.POSITIVE_INFINITY;
@@ -132,7 +131,7 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
       const volId = match ? `V${match[1]}` : 'V1'; // 简化推断
       // 如需更准确可利用章节 -> 分卷映射
       // 当前确保选中章节所在分卷展开
-      setExpandedVolumes(prev => {
+      setExpandedVolumes((prev) => {
         const next = new Set(prev);
         next.add(volId);
         return next;
@@ -142,7 +141,7 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
 
   // 事件处理
   const toggleVolume = (volId) => {
-    setExpandedVolumes(prev => {
+    setExpandedVolumes((prev) => {
       const next = new Set(prev);
       if (next.has(volId)) next.delete(volId);
       else next.add(volId);
@@ -195,14 +194,16 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
       await mutate(`/drafts/${projectId}/chapters`);
       await mutate(`/drafts/${projectId}/summaries`);
     } catch (e) {
-      window.alert(t('chapter.reorderFailed').replace('{message}', e?.response?.data?.detail || e?.message || t('common.unknown')));
+      window.alert(
+        t('chapter.reorderFailed').replace('{message}', e?.response?.data?.detail || e?.message || t('common.unknown')),
+      );
     }
   };
 
   return (
     <div className="w-full text-[13px] font-sans text-[var(--vscode-fg)] select-none">
       {/* 分卷列表 */}
-      {volumeList.map(volume => {
+      {volumeList.map((volume) => {
         const isExpanded = expandedVolumes.has(volume.id);
         const isSelected = state.selectedVolumeId === volume.id; // 分卷选中逻辑（如有）
         const chapters = chaptersByVolume[volume.id] || [];
@@ -212,8 +213,8 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
             {/* 分卷标题行 */}
             <div
               className={cn(
-                "vscode-tree-item font-bold flex items-center gap-0.5",
-                isSelected && "selected" // 可选：分卷可选中
+                'vscode-tree-item font-bold flex items-center gap-0.5',
+                isSelected && 'selected', // 可选：分卷可选中
               )}
               onClick={(e) => {
                 toggleVolume(volume.id);
@@ -237,8 +238,8 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
                     <div
                       key={chapter.chapter}
                       className={cn(
-                        "vscode-tree-item pl-8 gap-2 relative group", // 缩进：20px 图标 + 12px，相对定位便于层级控制
-                        isChapterSelected && "selected"
+                        'vscode-tree-item pl-8 gap-2 relative group', // 缩进：20px 图标 + 12px，相对定位便于层级控制
+                        isChapterSelected && 'selected',
                       )}
                       onClick={() => {
                         onChapterSelect({ id: chapter.chapter, title: chapter.title });
@@ -268,9 +269,9 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
                               handleReorderChapter(volume.id, idx, 'up');
                             }}
                             className={cn(
-                              "p-1 rounded-[2px] hover:bg-[var(--vscode-list-hover)] transition-none outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]",
-                              "text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]",
-                              "opacity-80 hover:opacity-100 disabled:opacity-20 disabled:pointer-events-none"
+                              'p-1 rounded-[6px] hover:bg-[var(--vscode-list-hover)] transition-all duration-150 active:scale-90 outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]',
+                              'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
+                              'opacity-80 hover:opacity-100 disabled:opacity-20 disabled:pointer-events-none',
                             )}
                           >
                             <ArrowUp size={14} strokeWidth={1.5} />
@@ -286,9 +287,9 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
                               handleReorderChapter(volume.id, idx, 'down');
                             }}
                             className={cn(
-                              "p-1 rounded-[2px] hover:bg-[var(--vscode-list-hover)] transition-none outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]",
-                              "text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]",
-                              "opacity-80 hover:opacity-100 disabled:opacity-20 disabled:pointer-events-none"
+                              'p-1 rounded-[6px] hover:bg-[var(--vscode-list-hover)] transition-all duration-150 active:scale-90 outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]',
+                              'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
+                              'opacity-80 hover:opacity-100 disabled:opacity-20 disabled:pointer-events-none',
                             )}
                           >
                             <ArrowDown size={14} strokeWidth={1.5} />
@@ -305,9 +306,9 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
                           handleDeleteChapter(chapter.chapter, chapter.title);
                         }}
                         className={cn(
-                          "p-1 rounded-[2px] hover:bg-[var(--vscode-list-hover)] transition-none outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]",
-                          "text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]",
-                          "opacity-0 group-hover:opacity-80 hover:opacity-100"
+                          'p-1 rounded-[6px] hover:bg-[var(--vscode-list-hover)] transition-all duration-150 active:scale-90 outline-none focus:ring-1 focus:ring-[var(--vscode-focus-border)]',
+                          'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
+                          'opacity-0 group-hover:opacity-80 hover:opacity-100',
                         )}
                       >
                         <Trash2 size={14} strokeWidth={1.5} />

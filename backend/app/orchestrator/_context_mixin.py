@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from app.context_engine.token_counter import count_tokens
 from app.context_engine.budget_manager import create_budget_manager
 from app.context_engine.trace_collector import trace_collector
+from app.orchestrator.orchestrator_helpers import full_canon_eligible
 from app.schemas.draft import SceneBrief
 from app.utils.text import normalize_newlines
 from app.utils.logger import get_logger
@@ -36,59 +37,6 @@ class ContextMixin:
     """
 
     # ---------- public entry points ----------
-
-    async def ensure_memory_pack_payload(
-        self,
-        project_id: str,
-        chapter: str,
-        chapter_goal: Optional[str] = None,
-        scene_brief: Optional[SceneBrief] = None,
-        user_feedback: str = "",
-        force_refresh: bool = False,
-        source: str = "editor",
-    ) -> Optional[Dict[str, Any]]:
-        """
-        确保为章节准备了最新的记忆包载荷 / Ensure the latest memory pack payload exists for the chapter.
-
-        Returns the working memory payload (evidence, gaps, questions) without
-        wrapping it in the full memory pack structure. Used for direct context access.
-
-        Args:
-            project_id: 项目ID / Project identifier.
-            chapter: 章节ID / Chapter identifier.
-            chapter_goal: 章节目标 / Chapter goal (optional).
-            scene_brief: 场景简要 / Scene brief object (optional).
-            user_feedback: 用户反馈 / User feedback text.
-            force_refresh: 强制刷新 / Force regenerate payload.
-            source: 来源标识 / Source identifier for logging.
-
-        Returns:
-            Working memory payload dict or None if generation failed.
-        """
-        self.current_project_id = project_id
-        self.current_chapter = chapter
-
-        resolved_scene_brief = scene_brief
-        if resolved_scene_brief is None:
-            try:
-                resolved_scene_brief = await self.draft_storage.get_scene_brief(project_id, chapter)
-            except Exception as exc:
-                logger.warning("Failed to load scene_brief in prepare_memory_pack: %s", exc)
-                resolved_scene_brief = None
-
-        goal_text = self._resolve_chapter_goal(chapter_goal or "", resolved_scene_brief, user_feedback)
-        if not goal_text:
-            goal_text = "未提供"
-
-        return await self._prepare_memory_pack_payload(
-            project_id=project_id,
-            chapter=chapter,
-            chapter_goal=goal_text,
-            scene_brief=resolved_scene_brief,
-            user_answers=None,
-            force_refresh=force_refresh,
-            source=source,
-        )
 
     async def ensure_memory_pack(
         self,
@@ -610,6 +558,46 @@ class ContextMixin:
                     }
                 )
 
+        # 支柱 7 · 自适应上下文预算（"do the simplest thing that works"）：
+        # canon 规模够小（早期/短篇）→ 整体注入全部卡片+事实，免 top-k 截断遗漏、免 agentic 导航；
+        # 规模大 → 走情境检索 + agentic JIT（下方默认路径）。阈值见 config.retrieval.full_canon_max_*。
+        inject_full_canon = False
+        try:
+            from app.config import config as app_cfg
+
+            _rc = app_cfg.get("retrieval", {}) or {}
+            _max_facts = int(_rc.get("full_canon_max_facts", 80))
+            _max_cards = int(_rc.get("full_canon_max_cards", 30))
+            _max_tokens = int(_rc.get("full_canon_max_tokens", 12000))
+            _char_names = await self.card_storage.list_character_cards(project_id)
+            _world_names = await self.card_storage.list_world_cards(project_id)
+            _all_facts = await self.canon_storage.get_all_facts(project_id)
+            # Phase 13：从纯数量升级为「数量 + token」双门槛——少量超长事实也不会撑爆全注入预算。
+            _fact_text = " ".join(str(getattr(f, "statement", "") or "") for f in _all_facts)
+            _fact_tokens = count_tokens(_fact_text)
+            if full_canon_eligible(
+                len(_all_facts),
+                len(_char_names) + len(_world_names),
+                _fact_tokens,
+                max_facts=_max_facts,
+                max_cards=_max_cards,
+                max_tokens=_max_tokens,
+            ):
+                inject_full_canon = True
+                character_cards = []
+                for _n in _char_names:
+                    _c = await self.card_storage.get_character_card(project_id, _n)
+                    if _c:
+                        character_cards.append(_c)
+                world_cards = []
+                for _n in _world_names:
+                    _c = await self.card_storage.get_world_card(project_id, _n)
+                    if _c:
+                        world_cards.append(_c)
+                facts = [str(getattr(f, "statement", "") or "") for f in _all_facts if getattr(f, "statement", None)]
+        except Exception as exc:
+            logger.warning("Full-canon adaptive injection skipped; fallback to retrieval: %s", exc)
+
         timeline = await self.canon_storage.get_all_timeline_events(project_id)
         character_states = await self.canon_storage.get_all_character_states(project_id)
 
@@ -666,16 +654,6 @@ class ContextMixin:
                     if card:
                         character_cards.append(card)
 
-        working_memory_payload = await self._prepare_memory_pack_payload(
-            project_id=project_id,
-            chapter=chapter,
-            chapter_goal=chapter_goal,
-            scene_brief=scene_brief,
-            user_answers=user_answers,
-            force_refresh=force_refresh_memory_pack,
-            source=memory_pack_source,
-        )
-
         writer_context = {
             "scene_brief": scene_brief,
             "chapter_goal": chapter_goal,
@@ -688,11 +666,134 @@ class ContextMixin:
             "character_states": character_states,
             "context_package": context_package,
         }
-        if working_memory_payload:
-            writer_context["working_memory"] = working_memory_payload.get("working_memory")
-            writer_context["evidence_pack"] = working_memory_payload.get("evidence_pack")
-            writer_context["gaps"] = working_memory_payload.get("gaps")
-            writer_context["unresolved_gaps"] = working_memory_payload.get("unresolved_gaps")
+
+        # Phase 8 · 单一上下文供给：agentic 工具循环（JIT）是默认主路径。先跑 agentic 检索；
+        # 成功（真的调用了工具）则其『写作须知』即 working_memory，**跳过 research loop 的重复多轮检索**；
+        # gaps 用轻量规则（build_gap_items，不检索/不 LLM）保留"不得编造"约束，questions 由调用方 generate_questions 兜底，
+        # memory_pack 延后到写作完成后由 _run_writing_flow.ensure_memory_pack 重建（供 editor）。
+        # agentic 不可用（provider 不支持工具 / 未触发 / inject_full_canon / 异常）才回退 research loop（旧装配，行为不变）。
+        tools_used = False
+        gathered = ""
+        try:
+            from app.agents.tools import WriterToolset
+
+            toolset = WriterToolset(
+                project_id,
+                self.storage_adapter,
+                self.select_engine,
+                current_chapter=chapter,
+                total_chapters=total_chapters,
+            )
+
+            progress_cb = getattr(self, "progress_callback", None)
+
+            async def _on_agentic_event(ev: Dict[str, Any]) -> None:
+                """把 agentic 的 thinking/tool 事件转成结构化 WS 事件（真实过程，非伪进度）。"""
+                nonlocal tools_used
+                etype = ev.get("type")
+                if etype == "tool_call":
+                    tools_used = True
+                if not progress_cb:
+                    return
+                try:
+                    if etype == "thinking":
+                        await progress_cb(
+                            {
+                                "type": "agent_thinking",
+                                "project_id": project_id,
+                                "chapter": chapter,
+                                "content": str(ev.get("content") or "")[:2000],
+                            }
+                        )
+                    elif etype == "tool_call":
+                        await progress_cb(
+                            {
+                                "type": "agent_tool_call",
+                                "project_id": project_id,
+                                "chapter": chapter,
+                                "name": ev.get("name"),
+                                "arguments": ev.get("arguments"),
+                            }
+                        )
+                    elif etype == "tool_result":
+                        await progress_cb(
+                            {
+                                "type": "agent_tool_result",
+                                "project_id": project_id,
+                                "chapter": chapter,
+                                "name": ev.get("name"),
+                                "result": str(ev.get("result") or "")[:800],
+                            }
+                        )
+                except Exception:
+                    pass  # 透明化事件不得影响主流程
+
+            if not inject_full_canon:
+                gathered = await self.writer.gather_context_via_tools(
+                    project_id=project_id,
+                    chapter=chapter,
+                    chapter_goal=chapter_goal,
+                    toolset=toolset,
+                    on_event=_on_agentic_event,
+                )
+        except Exception as exc:
+            logger.warning("Agentic tool retrieval failed; fallback to assembled context: %s", exc)
+
+        if gathered and tools_used:
+            # agentic 成功：单一来源，跳过 research loop 的多轮检索。
+            light_gaps: List[Dict[str, Any]] = []
+            try:
+                from app.services.working_memory_service import working_memory_service
+
+                light_gaps = working_memory_service.build_gap_items(
+                    scene_brief, chapter_goal, language=getattr(self, "language", "zh")
+                )
+            except Exception as exc:
+                logger.warning("Light gap build failed: %s", exc)
+            writer_context["working_memory"] = gathered
+            writer_context["unresolved_gaps"] = light_gaps
+            # working_memory 显式 None：让 _run_writing_flow 写作后重建 memory_pack（供 editor 复用）。
+            working_memory_payload = {
+                "source": "agentic_jit",
+                "working_memory": None,
+                "evidence_pack": {},
+                "gaps": [],
+                "unresolved_gaps": light_gaps,
+                "questions": [],
+            }
+        else:
+            # 回退：research loop（旧装配多轮检索），行为与历史一致。
+            working_memory_payload = await self._prepare_memory_pack_payload(
+                project_id=project_id,
+                chapter=chapter,
+                chapter_goal=chapter_goal,
+                scene_brief=scene_brief,
+                user_answers=user_answers,
+                force_refresh=force_refresh_memory_pack,
+                source=memory_pack_source,
+            )
+            if working_memory_payload:
+                writer_context["working_memory"] = working_memory_payload.get("working_memory")
+                writer_context["evidence_pack"] = working_memory_payload.get("evidence_pack")
+                writer_context["gaps"] = working_memory_payload.get("gaps")
+                writer_context["unresolved_gaps"] = working_memory_payload.get("unresolved_gaps")
+
+        # Phase 10：JIT 召回跨会话创作记忆（作者偏好/决策），独立通道注入（不污染 working_memory 的 compact 判定）。
+        try:
+            mem_query = " ".join(
+                str(x or "")
+                for x in [
+                    chapter_goal,
+                    getattr(scene_brief, "goal", "") if scene_brief else "",
+                    getattr(scene_brief, "title", "") if scene_brief else "",
+                ]
+            ).strip()
+            if mem_query and getattr(self, "creative_memory_storage", None) is not None:
+                creative_memories = await self.creative_memory_storage.recall(project_id, mem_query, top_k=5)
+                if creative_memories:
+                    writer_context["creative_memory"] = creative_memories
+        except Exception as exc:
+            logger.warning("Creative memory recall failed: %s", exc)
 
         return {
             "writer_context": writer_context,

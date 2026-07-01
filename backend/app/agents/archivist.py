@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.agents.base import BaseAgent
 from app.agents._fanfiction_mixin import FanfictionMixin
 from app.agents._summary_mixin import SummaryMixin
-from app.schemas.draft import SceneBrief, CardProposal
+from app.schemas.draft import SceneBrief
 from app.schemas.card import StyleCard
 from app.prompts import (
     get_archivist_system_prompt,
@@ -68,6 +68,62 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
             Window size (number of chapters to include).
         """
         return get_chapter_window(window_type, total_chapters)
+
+    async def extract_creative_memory(
+        self,
+        final_draft: str,
+        user_feedback: str = "",
+        chapter_summary: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Phase 10 · 从定稿 / 作者反馈提炼**跨会话**创作软知识（偏好 / 进度 / 决策）。
+
+        返回 [{slug, description, body, type}]；提取失败或无可记返回 []（best-effort，不阻断主流程）。
+        作者偏好(preference)主要来自 user_feedback；进度(progress)/决策(decision)来自章节内容与摘要。
+        与 canon 的边界：只记无法从故事事实表推导的「怎么写 / 作者喜欢什么 / 进行到哪」软知识。
+        """
+        feedback = str(user_feedback or "").strip()
+        draft = str(final_draft or "").strip()
+        summary = str(chapter_summary or "").strip()
+        if not feedback and not draft and not summary:
+            return []
+
+        system = (
+            "你是创作记忆维护助手。从【作者反馈】与【章节内容】中，提炼真正值得**跨会话长期记住**的要点："
+            "preference=作者写作偏好/风格要求（多来自反馈）；progress=项目进度/已写到哪；"
+            "decision=关键创作决策（人物走向、世界规则取舍等）。"
+            "只记无法从故事事实表(canon)推导的软知识，不要记一次性的具体改动。"
+        )
+        user = (
+            f"【作者反馈】\n{feedback or '（无）'}\n\n"
+            f"【章节摘要】\n{summary or '（无）'}\n\n"
+            f"【章节正文节选】\n{draft[:1800]}\n\n"
+            "请输出 JSON 数组，每项含 "
+            '{"slug": "英文短横线标识", "description": "一行中文摘要", "body": "简要说明", '
+            '"type": "preference|progress|decision"}。'
+            "最多 5 条；只提炼真正值得长期记住的，没有则返回 []。"
+        )
+        messages = self.build_messages(system_prompt=system, user_prompt=user, context_items=[])
+        data, err, _ = await self.call_llm_json(messages, expected_type=list, config_agent="archivist")
+        if err or not isinstance(data, list):
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for item in data[:5]:
+            if not isinstance(item, dict):
+                continue
+            description = str(item.get("description") or "").strip()
+            if not description:
+                continue
+            mem_type = str(item.get("type") or "preference").strip().lower()
+            out.append(
+                {
+                    "slug": str(item.get("slug") or description[:24]).strip(),
+                    "description": description,
+                    "body": str(item.get("body") or "").strip(),
+                    "type": mem_type,
+                }
+            )
+        return out
 
     @property
     def STOPWORDS(self) -> set:
@@ -453,26 +509,6 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
             "after": "",
         }
 
-    def _extract_participants(self, events: List[Any]) -> List[str]:
-        names = []
-        for event in events:
-            participants = getattr(event, "participants", []) or []
-            for name in participants:
-                if name and name not in names:
-                    names.append(name)
-        return names
-
-    async def _build_world_constraints(self, project_id: str, limit: int) -> List[str]:
-        constraints = []
-        names = await self.card_storage.list_world_cards(project_id)
-        for name in names[:limit]:
-            card = await self.card_storage.get_world_card(project_id, name)
-            if not card:
-                continue
-            if card.description:
-                constraints.append(f"{card.name}: {card.description}")
-        return constraints
-
     def _extract_keywords(self, text: str) -> List[str]:
         if not text:
             return []
@@ -634,229 +670,11 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
         scored.sort(key=lambda x: x[0], reverse=True)
         return [fact for _, fact in scored[:max_extra]]
 
-    async def _select_character_names(
-        self,
-        project_id: str,
-        chapter_id: str,
-        keywords: List[str],
-        explicit_names: List[str],
-        timeline_events: List[Any],
-    ) -> List[str]:
-        names = await self.card_storage.list_character_cards(project_id)
-        name_scores: Dict[str, int] = {}
-        explicit_set = [n for n in explicit_names if n]
-        for name in explicit_set:
-            name_scores[name] = name_scores.get(name, 0) + 100
-
-        for event in timeline_events or []:
-            for name in getattr(event, "participants", []) or []:
-                if name:
-                    name_scores[name] = name_scores.get(name, 0) + 10
-
-        for name in names:
-            score = 0
-            if name in keywords:
-                score += 5
-            score += self._score_text_match(name, keywords)
-            if score > 0:
-                name_scores[name] = max(name_scores.get(name, 0), score)
-
-        ranked = sorted(name_scores.items(), key=lambda x: x[1], reverse=True)
-        selected = [name for name, _ in ranked][: self.MAX_CHARACTERS]
-        return selected
-
-    async def _select_relevant_facts(
-        self,
-        project_id: str,
-        chapter_id: str,
-        keywords: List[str],
-    ) -> List[Dict[str, Any]]:
-        all_facts = await self.canon_storage.get_all_facts_raw(project_id)
-        if not all_facts:
-            return []
-
-        parsed_current = ChapterIDValidator.parse(chapter_id)
-        previous_same_volume: Optional[str] = None
-        if parsed_current and parsed_current.get("volume") and parsed_current.get("chapter") is not None:
-            chapters = await self.draft_storage.list_chapters(project_id)
-            candidates = []
-            for ch in chapters:
-                parsed = ChapterIDValidator.parse(ch)
-                if not parsed or parsed.get("volume") != parsed_current.get("volume"):
-                    continue
-                if parsed.get("chapter", 0) < parsed_current.get("chapter", 0):
-                    candidates.append((parsed.get("chapter", 0), ch))
-            if candidates:
-                previous_same_volume = max(candidates, key=lambda x: x[0])[1]
-
-        selected: List[Dict[str, Any]] = []
-        remaining = []
-
-        for fact in all_facts:
-            fact_chapter = normalize_chapter_id(fact.get("introduced_in") or fact.get("source") or "")
-            if previous_same_volume and fact_chapter == previous_same_volume:
-                selected.append(fact)
-            else:
-                remaining.append(fact)
-
-        if len(selected) < self.MAX_FACTS:
-            scored: List[Tuple[int, Dict[str, Any]]] = []
-            for fact in remaining:
-                statement = str(fact.get("statement") or fact.get("content") or "")
-                fact_chapter = normalize_chapter_id(fact.get("introduced_in") or fact.get("source") or "")
-                dist = ChapterIDValidator.calculate_distance(chapter_id, fact_chapter) if fact_chapter else 999
-                recency = max(0, 10 - min(dist, 10))
-                match = self._score_text_match(statement, keywords) * 2
-                score = recency + match
-                if score > 0:
-                    scored.append((score, fact))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            for _, fact in scored:
-                if len(selected) >= self.MAX_FACTS:
-                    break
-                selected.append(fact)
-
-        return selected[: self.MAX_FACTS]
-
-    async def _select_world_constraints(
-        self,
-        project_id: str,
-        keywords: List[str],
-        facts: List[Dict[str, Any]],
-        summaries: List[str],
-    ) -> List[str]:
-        names = await self.card_storage.list_world_cards(project_id)
-        if not names:
-            return []
-
-        facts_text = " ".join([str(f.get("statement") or "") for f in facts])
-        summary_text = " ".join(summaries)
-        combined = " ".join([facts_text, summary_text])
-        combined_keywords = list(dict.fromkeys(keywords + self._extract_keywords(combined)))
-
-        scored: List[Tuple[int, str]] = []
-        for name in names:
-            card = await self.card_storage.get_world_card(project_id, name)
-            if not card:
-                continue
-            text = f"{card.name} {card.description or ''}"
-            score = 0
-            if card.name and card.name in combined:
-                score += 5
-            score += self._score_text_match(text, combined_keywords)
-            if score > 0:
-                scored.append((score, f"{card.name}: {card.description or ''}".strip()))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [item for _, item in scored][: self.MAX_WORLD_CONSTRAINTS]
-
     def _build_style_reminder(self, style_card: Optional[StyleCard]) -> str:
         if not style_card:
             return ""
         style_text = getattr(style_card, "style", "") or ""
         return style_text.strip()
-
-    async def detect_setting_changes(self, draft_content: str, existing_card_names: List[str]) -> List[CardProposal]:
-        """Detect potential new setting cards with pure heuristics (no LLM)."""
-        existing = {name for name in (existing_card_names or []) if name}
-        proposals: List[CardProposal] = []
-
-        text = draft_content or ""
-        if not text.strip():
-            return proposals
-
-        sentences = self._split_sentences(text)
-
-        world_candidates = self._extract_world_candidates(text)
-        character_candidates = self._extract_character_candidates(text)
-
-        proposals.extend(
-            self._build_card_proposals(
-                candidates=world_candidates,
-                card_type="World",
-                existing=existing,
-                sentences=sentences,
-                min_count=2,
-            )
-        )
-        proposals.extend(
-            self._build_card_proposals(
-                candidates=character_candidates,
-                card_type="Character",
-                existing=existing,
-                sentences=sentences,
-                min_count=1,
-            )
-        )
-
-        return proposals
-
-    def _split_sentences(self, text: str) -> List[str]:
-        parts = re.split(r"[。！？\n]", text)
-        return [p.strip() for p in parts if p.strip()]
-
-    def _extract_world_candidates(self, text: str) -> Dict[str, int]:
-        suffixes = "帮|派|门|宗|城|山|谷|镇|村|府|馆|寺|庙|观|宫|殿|岛|关|寨|营|会|国|州|郡|湾|湖|河"
-        pattern = re.compile(rf"([\u4e00-\u9fff]{{2,8}}(?:{suffixes}))")
-        counts: Dict[str, int] = {}
-        for match in pattern.findall(text):
-            counts[match] = counts.get(match, 0) + 1
-        return counts
-
-    def _extract_character_candidates(self, text: str) -> Dict[str, int]:
-        counts: Dict[str, int] = {}
-        if not text:
-            return counts
-
-        say_pattern = re.compile(r"([\u4e00-\u9fff]{2,3})(?:\s*)(?:说道|问道|答道|笑道|喝道|低声道|沉声道|道)")
-        action_verbs = "走|看|望|想|叹|笑|皱|点头|摇头|转身|停下|沉默|开口|伸手|拔剑|抬眼"
-        action_pattern = re.compile(rf"([\u4e00-\u9fff]{{2,3}})(?:\s*)(?:{action_verbs})")
-
-        for match in say_pattern.findall(text):
-            if match in self.STOPWORDS:
-                continue
-            counts[match] = counts.get(match, 0) + 2
-
-        for match in action_pattern.findall(text):
-            if match in self.STOPWORDS:
-                continue
-            counts[match] = counts.get(match, 0) + 1
-
-        return counts
-
-    def _build_card_proposals(
-        self,
-        candidates: Dict[str, int],
-        card_type: str,
-        existing: set,
-        sentences: List[str],
-        min_count: int = 2,
-    ) -> List[CardProposal]:
-        proposals: List[CardProposal] = []
-        for name, count in candidates.items():
-            if not name or name in existing:
-                continue
-            if count < min_count:
-                continue
-            source_sentence = ""
-            for sent in sentences:
-                if name in sent:
-                    source_sentence = sent
-                    break
-            if not source_sentence:
-                continue
-            confidence = min(0.9, 0.5 + 0.1 * min(count, 4))
-            proposals.append(
-                CardProposal(
-                    name=name,
-                    type=card_type,
-                    description=source_sentence,
-                    rationale=f"在本章中多次出现（{count} 次），具备可复用设定价值。",
-                    source_text=source_sentence,
-                    confidence=confidence,
-                )
-            )
-        return proposals
 
     def _sample_text_for_style_profile(self, sample_text: str, max_chars: int = 20000) -> str:
         """

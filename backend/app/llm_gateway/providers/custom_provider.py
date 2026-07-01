@@ -5,7 +5,7 @@ OpenAI-compatible custom provider adapter.
 """
 
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from app.llm_gateway.providers.base import BaseLLMProvider, normalize_tool_calls
+from app.llm_gateway.providers.base import BaseLLMProvider, normalize_tool_calls, _extract_reasoning_delta
 from app.utils.openai_client import create_async_openai_client
 
 
@@ -77,11 +77,19 @@ class CustomProvider(BaseLLMProvider):
         }
 
     async def stream_chat(
-        self, messages: List[Dict[str, str]], temperature: Optional[float] = None, max_tokens: Optional[int] = None
+        self,
+        messages: List[Dict[str, str]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        *,
+        on_thinking: Optional[Any] = None,
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat response token by token
         流式输出聊天响应
+
+        推理模型（如 deepseek-reasoner / 兼容端点）会在 delta.reasoning_content 给出思考增量；
+        若提供 on_thinking 则把思考增量旁路推出（正文仍逐 token yield，行为不变）。
         """
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -92,8 +100,15 @@ class CustomProvider(BaseLLMProvider):
         )
 
         async for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                yield chunk.choices[0].delta.content
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            if on_thinking is not None:
+                reasoning = _extract_reasoning_delta(delta)
+                if reasoning:
+                    await on_thinking(reasoning)
+            if delta.content:
+                yield delta.content
 
     def get_provider_name(self) -> str:
         """Get provider name / 获取提供商名称"""

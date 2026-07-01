@@ -104,7 +104,7 @@ export const cardsAPI = {
     api.put(`${API_BASE}/projects/${projectId}/cards/style`, data),
   extractStyle: (
     projectId: string,
-    data: { content: string; language?: string }
+    data: { content: string; language?: string },
   ): Promise<AxiosResponse<{ style: string }>> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/cards/style/extract`, data),
 };
@@ -121,10 +121,30 @@ export const sessionAPI = {
     llmApi.post(`${API_BASE}/projects/${projectId}/session/feedback`, data),
   suggestEdit: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse<EditSuggestResult>> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/edit-suggest`, data),
+  // Phase 5（vibe writing）：让后端自判本轮意图（write/edit），前端据此单输入框路由。
+  classifyIntent: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
+    api.post(`${API_BASE}/projects/${projectId}/session/classify-intent`, data),
+  // Phase 12（单 Writer 主循环）：统一对话入口——一句话 → 后端自判 write/edit/continue/plan 并执行。
+  chat: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
+    llmApi.post(`${API_BASE}/projects/${projectId}/session/chat`, data, { timeout: LLM_SYNC_TIMEOUT }),
+  // Phase 11（Plan 编排）：把复杂指令拆成串行 todo。
+  plan: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
+    llmApi.post(`${API_BASE}/projects/${projectId}/session/plan`, data, { timeout: LLM_SYNC_TIMEOUT }),
+  executePlan: (projectId: string, planId: string): Promise<AxiosResponse> =>
+    llmApi.post(`${API_BASE}/projects/${projectId}/session/plan/${planId}/execute`, {}, { timeout: LLM_SYNC_TIMEOUT }),
+  // Phase 6（按需评审）：对照 canon 给本章一致性评审（只报告不改写）。
+  review: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
+    llmApi.post(`${API_BASE}/projects/${projectId}/session/review`, data),
+  // 对话记忆层（Git-Native 持久化 + compact）：开项目加载历史、每条消息追加、长对话压缩。
+  getHistory: (projectId: string, limit = 0): Promise<AxiosResponse> =>
+    api.get(`${API_BASE}/projects/${projectId}/session/history`, { params: { limit } }),
+  appendHistory: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
+    api.post(`${API_BASE}/projects/${projectId}/session/history`, data),
+  compactHistory: (projectId: string): Promise<AxiosResponse> =>
+    llmApi.post(`${API_BASE}/projects/${projectId}/session/history/compact`, {}, { timeout: LLM_SYNC_TIMEOUT }),
   answerQuestions: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/answer-questions`, data, { timeout: LLM_SYNC_TIMEOUT }),
-  cancel: (projectId: string): Promise<AxiosResponse> =>
-    api.post(`${API_BASE}/projects/${projectId}/session/cancel`),
+  cancel: (projectId: string): Promise<AxiosResponse> => api.post(`${API_BASE}/projects/${projectId}/session/cancel`),
   analyze: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/analyze`, data),
   saveAnalysis: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
@@ -179,8 +199,7 @@ export const draftsAPI = {
 // 卷 API / Volumes API
 // ============================================================================
 export const volumesAPI = {
-  list: (projectId: string): Promise<AxiosResponse<Volume[]>> =>
-    api.get(`${API_BASE}/projects/${projectId}/volumes`),
+  list: (projectId: string): Promise<AxiosResponse<Volume[]>> => api.get(`${API_BASE}/projects/${projectId}/volumes`),
   create: (projectId: string, data: Partial<Volume>): Promise<AxiosResponse<Volume>> =>
     api.post(`${API_BASE}/projects/${projectId}/volumes`, data),
   update: (projectId: string, volumeId: string, data: Partial<Volume>): Promise<AxiosResponse<Volume>> =>
@@ -205,8 +224,7 @@ export const canonAPI = {
     api.put(`${API_BASE}/projects/${projectId}/canon/facts/by-id/${factId}`, data),
   delete: (projectId: string, factId: string): Promise<AxiosResponse> =>
     api.delete(`${API_BASE}/projects/${projectId}/canon/facts/by-id/${factId}`),
-  getTree: (projectId: string): Promise<AxiosResponse> =>
-    api.get(`${API_BASE}/projects/${projectId}/facts/tree`),
+  getTree: (projectId: string): Promise<AxiosResponse> => api.get(`${API_BASE}/projects/${projectId}/facts/tree`),
 };
 
 // ============================================================================
@@ -247,7 +265,7 @@ export const exportAPI = {
       chapter_ids: string[];
       format: 'txt' | 'md' | 'docx';
       include_chapter_titles?: boolean;
-    }
+    },
   ): Promise<AxiosResponse<Blob>> =>
     api.post(`${API_BASE}/projects/${projectId}/export`, data, { responseType: 'blob' }),
 };
@@ -256,18 +274,13 @@ export const exportAPI = {
 // 配置 API / Config API
 // ============================================================================
 export const configAPI = {
-  getProfiles: (): Promise<AxiosResponse<LLMProfile[]>> =>
-    api.get(`${API_BASE}/config/llm/profiles`),
-  saveProfile: (data: Partial<LLMProfile>): Promise<AxiosResponse> =>
-    api.post(`${API_BASE}/config/llm/profiles`, data),
+  getProfiles: (): Promise<AxiosResponse<LLMProfile[]>> => api.get(`${API_BASE}/config/llm/profiles`),
+  saveProfile: (data: Partial<LLMProfile>): Promise<AxiosResponse> => api.post(`${API_BASE}/config/llm/profiles`, data),
   fetchModels: (data: Record<string, unknown>): Promise<AxiosResponse> =>
     api.post(`${API_BASE}/proxy/fetch-models`, data),
-  testModel: (data: Record<string, unknown>): Promise<AxiosResponse> =>
-    api.post(`${API_BASE}/proxy/test-model`, data),
-  deleteProfile: (id: string): Promise<AxiosResponse> =>
-    api.delete(`${API_BASE}/config/llm/profiles/${id}`),
-  getAssignments: (): Promise<AxiosResponse> =>
-    api.get(`${API_BASE}/config/llm/assignments`),
+  testModel: (data: Record<string, unknown>): Promise<AxiosResponse> => api.post(`${API_BASE}/proxy/test-model`, data),
+  deleteProfile: (id: string): Promise<AxiosResponse> => api.delete(`${API_BASE}/config/llm/profiles/${id}`),
+  getAssignments: (): Promise<AxiosResponse> => api.get(`${API_BASE}/config/llm/assignments`),
   updateAssignments: (data: Record<string, unknown>): Promise<AxiosResponse> =>
     api.post(`${API_BASE}/config/llm/assignments`, data),
 };
@@ -285,11 +298,11 @@ type WSStatus = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
  * WebSocket 选项配置
  */
 interface WebSocketOptions {
-  onStatus?: (status: WSStatus) => void;           // 状态变更回调
-  maxRetries?: number;                             // 最大重连次数
-  retryDelay?: number;                             // 初始重连延迟（毫秒）
-  maxDelay?: number;                               // 最大重连延迟
-  heartbeatInterval?: number;                      // 心跳间隔
+  onStatus?: (status: WSStatus) => void; // 状态变更回调
+  maxRetries?: number; // 最大重连次数
+  retryDelay?: number; // 初始重连延迟（毫秒）
+  maxDelay?: number; // 最大重连延迟
+  heartbeatInterval?: number; // 心跳间隔
 }
 
 /**
@@ -334,13 +347,7 @@ export const createWebSocket = (
   const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
   const wsHost = window.location.host;
 
-  const {
-    onStatus,
-    maxRetries = 6,
-    retryDelay = 800,
-    maxDelay = 8000,
-    heartbeatInterval = 20000
-  } = options;
+  const { onStatus, maxRetries = 6, retryDelay = 800, maxDelay = 8000, heartbeatInterval = 20000 } = options;
 
   let ws: WebSocket | null = null;
   let heartbeatTimer: number | null = null;
@@ -440,6 +447,6 @@ export const createWebSocket = (
       }
       stopHeartbeat();
       ws?.close();
-    }
+    },
   };
 };
