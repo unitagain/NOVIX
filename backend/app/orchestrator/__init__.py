@@ -5,6 +5,24 @@ Coordinates multi-agent workflow for chapter writing
 """
 
 from .orchestrator import Orchestrator
-from ._types import SessionStatus
+from .contracts import SessionStatus
+from .application_ports import OrchestratorApplicationPorts
+from .commit_coordinator import CommitCoordinator
+from .chat_turn_service import ChatTurnService
+from .context_assembly_service import ContextAssemblyService
+from .turn_runtime import TurnRuntime, TurnState
+from .writing_service import WritingService
+from .post_turn_service import PostTurnService
 
-__all__ = ["Orchestrator", "SessionStatus"]
+__all__ = [
+    "CommitCoordinator",
+    "ChatTurnService",
+    "ContextAssemblyService",
+    "Orchestrator",
+    "OrchestratorApplicationPorts",
+    "SessionStatus",
+    "TurnRuntime",
+    "TurnState",
+    "WritingService",
+    "PostTurnService",
+]

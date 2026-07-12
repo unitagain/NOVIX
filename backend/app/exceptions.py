@@ -12,7 +12,10 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 
-class WenShapeError(Exception):
+from app.error_contract import DomainError, ErrorCategory
+
+
+class WenShapeError(DomainError):
     """
     WenShape 业务错误的基类
 
@@ -38,6 +41,10 @@ class StorageError(WenShapeError):
     - 数据格式错误 / Invalid data format
     """
 
+    default_code = "storage_error"
+    default_category = ErrorCategory.STORAGE
+    default_retryable = True
+
 
 class LLMError(WenShapeError):
     """
@@ -53,6 +60,9 @@ class LLMError(WenShapeError):
     - 模型不可用 / Model unavailable
     """
 
+    default_code = "llm_error"
+    default_category = ErrorCategory.PROVIDER
+
 
 class AgentError(WenShapeError):
     """
@@ -66,6 +76,9 @@ class AgentError(WenShapeError):
     - 状态转换无效 / Invalid state transition
     - 输入验证失败 / Input validation failed
     """
+
+    default_code = "agent_error"
+    default_category = ErrorCategory.INTERNAL
 
 
 class ValidationError(WenShapeError):
@@ -81,3 +94,6 @@ class ValidationError(WenShapeError):
 
     Note: Pydantic ValidationError 由框架自动处理，不需要手动抛出此异常。
     """
+
+    default_code = "validation_error"
+    default_category = ErrorCategory.VALIDATION

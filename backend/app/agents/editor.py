@@ -23,6 +23,7 @@ from app.prompts import (
     editor_selection_replace_prompt,
 )
 from app.utils.logger import get_logger
+from app.error_contract import safe_error_code
 from app.utils.version import increment_version
 
 logger = get_logger(__name__)
@@ -662,7 +663,7 @@ class EditorAgent(BaseAgent):
                     "content": "\n".join(
                         [
                             "你刚才输出的 patch ops 无法应用到原文。",
-                            f"错误：{exc}",
+                            f"错误代码：{safe_error_code(exc)}",
                             "请重新输出 JSON，并确保：",
                             "- replace/delete 的 before 能在摘录中逐字匹配",
                             "- insert_* 的 anchor 能在摘录中逐字匹配",

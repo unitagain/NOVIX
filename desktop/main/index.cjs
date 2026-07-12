@@ -10,6 +10,7 @@ const { applyElectronPathOverrides, ensureDesktopPaths, resolveDesktopPaths } = 
 const { createProtocolBridge } = require("./protocol.cjs");
 const { buildDesktopWindowTitle, buildFailurePageHtml, buildStartupPageHtml, getShellMetadata } = require("./runtime.cjs");
 const { startSidecar, stopSidecar } = require("./sidecar.cjs");
+const { installSidecarAuthInterceptor } = require("./sidecar-auth.cjs");
 const { createTrayController } = require("./tray.cjs");
 const { createCloudController } = require("./cloud-controller.cjs");
 
@@ -199,10 +200,17 @@ function createWindow() {
       preload: resolvePreloadPath(),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      sandbox: true,
       webSecurity: true,
       devTools: true
     }
+  });
+
+  installSidecarAuthInterceptor(mainWindow.webContents.session, () => {
+    return {
+      sidecarState,
+      frontendDevUrl: isRuntimeDev() ? shellMetadata.frontendDevUrl : ""
+    };
   });
 
   mainWindow.once("ready-to-show", () => {
@@ -315,6 +323,23 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    let allowed = false;
+    try {
+      const target = new URL(url);
+      const allowedOrigins = new Set(
+        [sidecarState?.baseUrl, isRuntimeDev() ? shellMetadata.frontendDevUrl : ""].filter(Boolean)
+      );
+      allowed = target.protocol === "file:" || allowedOrigins.has(target.origin);
+    } catch (_error) {
+      allowed = false;
+    }
+    if (!allowed) {
+      event.preventDefault();
+      shell.openExternal(url).catch(() => {});
+    }
+  });
+
   if (isRuntimeDev()) {
     mainWindow.webContents.openDevTools({ mode: "detach" });
   }
@@ -423,6 +448,7 @@ async function launchSidecar() {
     isPackaged: app.isPackaged,
     userDataDir: desktopPaths?.runtimeRoot,
     paths: desktopPaths,
+    frontendDevUrl: isRuntimeDev() ? shellMetadata.frontendDevUrl : "",
     // PyInstaller first-run extraction can be slow on some disks; give it
     // plenty of time in packaged mode.
     startupTimeoutMs: app.isPackaged ? 90000 : 45000

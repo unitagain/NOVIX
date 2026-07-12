@@ -14,6 +14,8 @@ License: PolyForm Noncommercial License 1.0.0
 
 from typing import List, Optional, Any, Dict
 
+from app.services.text_chunk_service import text_chunk_service
+
 
 class UnifiedStorageAdapter:
     """
@@ -120,6 +122,4 @@ class UnifiedStorageAdapter:
         Returns:
             匹配的文本片段列表 / List of matching text chunks.
         """
-        if hasattr(self.draft, "search_text_chunks"):
-            return await self.draft.search_text_chunks(project_id, query, limit=limit)
-        return []
+        return await text_chunk_service.search(project_id=project_id, query=query, limit=limit)

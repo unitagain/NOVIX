@@ -111,13 +111,22 @@ gateway:
   retry_delays: [1, 2, 4, 8, 16]
   # 最大单次延迟（秒） / Maximum single delay in seconds
   max_retry_delay: 60.0
+  request_timeout_seconds: 120
+  max_concurrency_per_provider: 4
+  min_request_interval_ms: 0
+  circuit_failure_threshold: 5
+  circuit_cooldown_seconds: 30
 
 # Retrieval Configuration / 检索配置
 retrieval:
-  semantic_rerank: true           # 头部 top_k 候选按语义分重排序（确定性，复用已算语义分）
   rerank_top_k: 16
-  # 真正的 cross-encoder / LLM reranker（更高精度，但需额外模型 / LLM 成本）为可选增强；
-  # 现状 semantic_rerank 是确定性"按语义分重排"，对小说规模检索已够用（Phase 13 诚实标注）。
+  # 二阶段重排只允许使用真实 cross-encoder。旧“按 embedding cosine 重排”已被 benchmark 证明会损伤 recall，已移除。
+  # 默认关闭：BAAI/bge-reranker-base 约 1.04GB；启用前必须通过跨语料质量/延迟 A/B。
+  reranker:
+    enabled: false
+    backend: onnx_cross_encoder
+    model: BAAI/bge-reranker-base
+    cache_dir: models/reranker
   # Writer 用工具按需取设定（agentic 即时检索）是默认主路径（能力降级：provider 不支持工具时回退到装配上下文）。
   # agentic 工具循环的最大轮数。
   agentic_max_iterations: 4
@@ -137,7 +146,7 @@ retrieval:
     enabled: true
     backend: onnx                 # onnx（本地 fastembed/bge-small-zh）| api（走 LLM 网关，Phase 4b）
     model: BAAI/bge-small-zh-v1.5
-    cache_dir: ../data/models     # 模型缓存目录（打包时随附，见 Phase 4c）
+    cache_dir: models             # 相对 DATA_DIR；桌面端持久化到用户数据目录，避免每次启动重下
   # 混合检索融合（语义 + 词法）：rrf=排名融合，weighted=加权和
   hybrid:
     fusion: rrf
@@ -146,6 +155,14 @@ retrieval:
   # Phase 4: 关系图（GraphRAG-lite），读 canon/relations.jsonl，本地遍历查询
   relations:
     enabled: true
+
+# Governance / 治理配置
+governance:
+  memory_auto_active:
+    enabled: true
+    min_confidence: 0.85
+    allowed_types: [preference, progress]
+    allowed_scopes: [project, chapter]
 
 # 深度思考能力表 / Thinking capability map（对话栏「深度思考」按钮）
 # 只覆盖「能用请求参数切换 thinking」的厂商；DeepSeek 等靠换模型的不在此（用户规则：需换模型的不做）。
@@ -187,3 +204,17 @@ storage:
   max_memory_pack_history: 3
   # 草稿备份保留数 / Max draft previous-version backups
   max_draft_prev_backups: 3
+
+observability:
+  # file: local privacy-safe SDK exporter; otlp: OTLP/gRPC collector; none: disable export.
+  otel_exporter: file
+  slo:
+    window_seconds: 300
+    targets:
+      writer_turn_success_rate: 0.99
+      writer_turn_p95_ms: 120000
+      queue_oldest_age_seconds: 300
+      provider_retry_exhaustion_rate: 0.01
+      compact_reject_rate: 0.02
+      commit_conflict_rate: 0.01
+      dead_letter_count: 0

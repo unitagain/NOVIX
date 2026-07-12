@@ -23,14 +23,18 @@ import json
 import asyncio
 import os
 import yaml
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 from enum import Enum
 import aiofiles
 from app.storage.file_lock import get_file_lock
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_active_content_project: ContextVar[str] = ContextVar("wenshape_active_content_project", default="")
 
 
 class _SafeCompatLoader(yaml.SafeLoader):
@@ -125,6 +129,50 @@ class BaseStorage:
             resolved = (backend_root / resolved).resolve()
         self.data_dir = resolved
         self.encoding = "utf-8"
+        self._generation_store = None
+
+    def _control_store(self):
+        if self._generation_store is None:
+            from app.control_plane.store import SQLiteControlStore
+
+            self._generation_store = SQLiteControlStore(self.data_dir / "_system" / "control.sqlite3")
+        return self._generation_store
+
+    def _project_id_for_path(self, file_path: Path) -> str:
+        try:
+            relative = Path(file_path).resolve().relative_to(self.data_dir.resolve())
+        except ValueError:
+            return ""
+        if not relative.parts or relative.parts[0].startswith("_"):
+            return ""
+        return str(relative.parts[0])
+
+    @asynccontextmanager
+    async def content_transaction(self, project_id: str) -> AsyncIterator[None]:
+        project = str(project_id or "").strip()
+        if not project or _active_content_project.get() == project:
+            yield
+            return
+        try:
+            await self._control_call(self._control_store().begin_project_write, project)
+        except asyncio.CancelledError:
+            await self._control_call(self._control_store().end_project_write, project)
+            raise
+        token = _active_content_project.set(project)
+        try:
+            yield
+        finally:
+            _active_content_project.reset(token)
+            await self._control_call(self._control_store().end_project_write, project)
+
+    @staticmethod
+    async def _control_call(function, *args):
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
 
     def get_project_path(self, project_id: str) -> Path:
         """
@@ -176,6 +224,12 @@ class BaseStorage:
         Raises:
             OSError: 如果写入失败且无法恢复 / If write fails and cannot recover
         """
+        project_id = self._project_id_for_path(file_path)
+        if project_id and _active_content_project.get() != project_id:
+            async with self.content_transaction(project_id):
+                await self._atomic_write(file_path, content)
+            return
+
         self.ensure_dir(file_path.parent)
         tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
         tmp_written = False
@@ -238,7 +292,7 @@ class BaseStorage:
                             await asyncio.sleep(0.05 * (attempt + 1))
                             tmp_path.unlink(missing_ok=True)
                             break
-                        except Exception:
+                        except OSError:
                             continue
 
     async def read_yaml(self, file_path: Path) -> Dict[str, Any]:
@@ -321,6 +375,12 @@ class BaseStorage:
             file_path: JSONL文件路径 / Path to JSONL file
             item: 要追加的条目 / Item to append
         """
+        project_id = self._project_id_for_path(file_path)
+        if project_id and _active_content_project.get() != project_id:
+            async with self.content_transaction(project_id):
+                await self.append_jsonl(file_path, item)
+            return
+
         self.ensure_dir(file_path.parent)
 
         file_lock = get_file_lock()
@@ -343,9 +403,19 @@ class BaseStorage:
         """
         file_lock = get_file_lock()
         async with file_lock.lock(file_path):
-            lines = [json.dumps(item, ensure_ascii=False) for item in items]
-            payload = "\n".join(lines) + ("\n" if lines else "")
-            await self._atomic_write(file_path, payload)
+            await self._write_jsonl_unlocked(file_path, items)
+
+    async def _write_jsonl_unlocked(self, file_path: Path, items: list) -> None:
+        """Write JSONL while the caller owns the transaction lock."""
+
+        lines = [json.dumps(item, ensure_ascii=False) for item in items]
+        payload = "\n".join(lines) + ("\n" if lines else "")
+        await self._atomic_write(file_path, payload)
+
+    async def _read_jsonl_unlocked(self, file_path: Path) -> list:
+        """Read JSONL while the caller owns the transaction lock."""
+
+        return await self.read_jsonl(file_path)
 
     async def read_text(self, file_path: Path) -> str:
         """

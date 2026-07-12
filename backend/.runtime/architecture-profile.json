@@ -1,0 +1,771 @@
+{
+  "schema_version": 2,
+  "backend_root": "F:\\Github-WenShape\\WenShape-main\\backend",
+  "orchestrator": "app\\orchestrator\\orchestrator.py",
+  "method_count": 32,
+  "facade_candidates": 1,
+  "unreferenced_candidates": 0,
+  "public_method_count": 9,
+  "methods": [
+    {
+      "method": "__init__",
+      "line": 106,
+      "references": 0,
+      "reference_files": [],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "set_language",
+      "line": 261,
+      "references": 2,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py",
+        "app/routers/session.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "set_progress_callback",
+      "line": 274,
+      "references": 1,
+      "reference_files": [
+        "app/routers/session.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_p",
+      "line": 278,
+      "references": 28,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "start_session",
+      "line": 281,
+      "references": 3,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py",
+        "app/routers/session.py",
+        "scripts/regression_eval.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "answer_questions",
+      "line": 439,
+      "references": 1,
+      "reference_files": [
+        "app/routers/session.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "process_feedback",
+      "line": 553,
+      "references": 2,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py",
+        "app/routers/session.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_finalize_chapter",
+      "line": 682,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_run_writing_flow",
+      "line": 693,
+      "references": 2,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_needs_memory_pack_refresh",
+      "line": 801,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_run_research_loop",
+      "line": 817,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/_context_mixin.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_stream_writer_output",
+      "line": 1138,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_update_status",
+      "line": 1280,
+      "references": 13,
+      "reference_files": [
+        "app/orchestrator/_analysis_mixin.py",
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_handle_error",
+      "line": 1295,
+      "references": 14,
+      "reference_files": [
+        "app/orchestrator/_analysis_mixin.py",
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_handle_cancelled",
+      "line": 1321,
+      "references": 8,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "get_status",
+      "line": 1342,
+      "references": 1,
+      "reference_files": [
+        "app/routers/session.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "decide_writing_action",
+      "line": 1351,
+      "references": 11,
+      "reference_files": [
+        "app/orchestrator/chat_turn_service.py",
+        "app/routers/session.py",
+        "tests/test_chat_turn.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_plan_write_step",
+      "line": 1383,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_plan_edit_step",
+      "line": 1389,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_plan_analyze_step",
+      "line": 1395,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_summarize_conversation",
+      "line": 1404,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_verify_compact_artifact",
+      "line": 1447,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "run_chat_turn",
+      "line": 1501,
+      "references": 11,
+      "reference_files": [
+        "app/routers/session.py",
+        "scripts/runtime_smoke.py",
+        "tests/test_chat_turn.py"
+      ],
+      "delegation_target": "self.chat_turn_service.run",
+      "facade_candidate": true,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_cancel_active_turns",
+      "line": 1526,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "cancel_session",
+      "line": 1535,
+      "references": 2,
+      "reference_files": [
+        "app/routers/session.py",
+        "tests/test_plan_executor.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_run_command",
+      "line": 1544,
+      "references": 4,
+      "reference_files": [
+        "app/ops/release_gate.py",
+        "app/orchestrator/application_ports.py",
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_emit_progress",
+      "line": 1614,
+      "references": 21,
+      "reference_files": [
+        "app/orchestrator/_context_mixin.py",
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_normalize_chapter_id",
+      "line": 1630,
+      "references": 6,
+      "reference_files": [
+        "app/orchestrator/_analysis_mixin.py",
+        "app/storage/canon.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_trim_context_package",
+      "line": 1633,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/_context_mixin.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_extract_scene_brief_names",
+      "line": 1640,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_extract_top_sources",
+      "line": 1643,
+      "references": 1,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    },
+    {
+      "method": "_build_context_debug",
+      "line": 1646,
+      "references": 2,
+      "reference_files": [
+        "app/orchestrator/orchestrator.py"
+      ],
+      "delegation_target": "",
+      "facade_candidate": false,
+      "unreferenced_candidate": false
+    }
+  ],
+  "module_count": 206,
+  "dependency_edges": 546,
+  "dependency_cycles": [],
+  "dependency_cycle_count": 0,
+  "external_private_accesses": [],
+  "change_fanout": [
+    {
+      "module": "app.utils.logger",
+      "importers": 52,
+      "importer_modules": [
+        "app.agents._fanfiction_mixin",
+        "app.agents._summary_mixin",
+        "app.agents.agentic",
+        "app.agents.archivist",
+        "app.agents.base",
+        "app.agents.editor",
+        "app.agents.extractor",
+        "app.agents.intent",
+        "app.agents.planner",
+        "app.agents.tools",
+        "app.agents.writer",
+        "app.agents.writing_actions",
+        "app.context_engine.budget_manager",
+        "app.context_engine.embeddings",
+        "app.context_engine.relation_graph",
+        "app.context_engine.reranker",
+        "app.context_engine.retrieval_pipeline",
+        "app.context_engine.select_engine",
+        "app.context_engine.smart_compressor",
+        "app.context_engine.token_counter",
+        "app.context_engine.trace_collector",
+        "app.context_engine.vector_store",
+        "app.llm_gateway.gateway",
+        "app.llm_gateway.provider_registry",
+        "app.llm_gateway.telemetry",
+        "app.llm_gateway.thinking",
+        "app.main",
+        "app.orchestrator._analysis_mixin",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.context_planning_service",
+        "app.orchestrator.orchestrator",
+        "app.orchestrator.plan_execution_service",
+        "app.orchestrator.post_turn_service",
+        "app.orchestrator.writing_service",
+        "app.routers.drafts",
+        "app.routers.fanfiction",
+        "app.routers.proxy",
+        "app.routers.volumes",
+        "app.routers.websocket",
+        "app.services.crawler_service",
+        "app.services.llm_config_service",
+        "app.services.search_service",
+        "app.storage.base",
+        "app.storage.creative_memory",
+        "app.storage.drafts",
+        "app.storage.file_lock",
+        "app.storage.indexed_cache",
+        "app.storage.memory_pack",
+        "app.storage.plan_store",
+        "app.storage.session_history",
+        "app.utils.stopwords",
+        "app.utils.version"
+      ]
+    },
+    {
+      "module": "app.error_contract",
+      "importers": 34,
+      "importer_modules": [
+        "app.agents.agent_task",
+        "app.agents.agentic",
+        "app.agents.base",
+        "app.agents.editor",
+        "app.agents.tools",
+        "app.agents.writing_actions",
+        "app.context_engine.source_snapshot",
+        "app.context_engine.trace_collector",
+        "app.eval.campaign_runner",
+        "app.eval.longform_benchmark",
+        "app.eval.p12_context_eval",
+        "app.eval.writing_judge",
+        "app.exceptions",
+        "app.jobs.durable_queue",
+        "app.llm_gateway.errors",
+        "app.llm_gateway.gateway",
+        "app.llm_gateway.providers.anthropic_provider",
+        "app.main",
+        "app.ops.project_maintenance",
+        "app.orchestrator._analysis_mixin",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.application_ports",
+        "app.orchestrator.chat_turn_service",
+        "app.orchestrator.orchestrator",
+        "app.orchestrator.plan_execution_service",
+        "app.orchestrator.writing_service",
+        "app.routers.session",
+        "app.routers.websocket",
+        "app.services.chapter_binding_service",
+        "app.services.crawler_service",
+        "app.services.llm_config_service",
+        "app.services.volume_stats_service",
+        "app.storage.drafts",
+        "app.storage.session_history"
+      ]
+    },
+    {
+      "module": "app.config",
+      "importers": 26,
+      "importer_modules": [
+        "app.agents.archivist",
+        "app.agents.writer",
+        "app.context_engine.budget_manager",
+        "app.context_engine.embeddings",
+        "app.context_engine.select_engine",
+        "app.control_plane.runtime",
+        "app.eval.longform_benchmark",
+        "app.jobs.runtime",
+        "app.llm_gateway.gateway",
+        "app.llm_gateway.providers.anthropic_provider",
+        "app.llm_gateway.reliability",
+        "app.llm_gateway.thinking",
+        "app.main",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.context_assembly_service",
+        "app.orchestrator.orchestrator",
+        "app.routers.session",
+        "app.security.egress_ledger",
+        "app.services.llm_config_service",
+        "app.services.working_memory_service",
+        "app.storage.base",
+        "app.storage.creative_memory",
+        "app.storage.drafts",
+        "app.storage.memory_pack",
+        "app.utils.dynamic_ranges",
+        "app.utils.logger"
+      ]
+    },
+    {
+      "module": "app.utils.chapter_id",
+      "importers": 15,
+      "importer_modules": [
+        "app.agents.archivist",
+        "app.agents.tools",
+        "app.context.retriever",
+        "app.context_engine.retrieval_pipeline",
+        "app.context_engine.select_engine",
+        "app.eval.longform_benchmark",
+        "app.orchestrator._analysis_mixin",
+        "app.orchestrator.orchestrator_helpers",
+        "app.routers.drafts",
+        "app.routers.facts",
+        "app.services.chapter_binding_service",
+        "app.storage.bindings",
+        "app.storage.canon",
+        "app.storage.drafts",
+        "app.storage.memory_pack"
+      ]
+    },
+    {
+      "module": "app.dependencies",
+      "importers": 12,
+      "importer_modules": [
+        "app.jobs.runtime",
+        "app.routers.actions",
+        "app.routers.canon",
+        "app.routers.cards",
+        "app.routers.drafts",
+        "app.routers.facts",
+        "app.routers.fanfiction",
+        "app.routers.memory",
+        "app.routers.memory_pack",
+        "app.routers.projects",
+        "app.routers.volumes",
+        "app.services.export_service"
+      ]
+    },
+    {
+      "module": "app.schemas.draft",
+      "importers": 12,
+      "importer_modules": [
+        "app.agents._summary_mixin",
+        "app.agents.archivist",
+        "app.agents.extractor",
+        "app.agents.writer",
+        "app.orchestrator._analysis_mixin",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.orchestrator",
+        "app.routers.drafts",
+        "app.routers.session",
+        "app.services.working_memory_helpers",
+        "app.services.working_memory_service",
+        "app.storage.drafts"
+      ]
+    },
+    {
+      "module": "app.context_engine.turn_scope",
+      "importers": 11,
+      "importer_modules": [
+        "app.agents.tools",
+        "app.context_engine.trace_collector",
+        "app.llm_gateway.gateway",
+        "app.llm_gateway.payload_accounting",
+        "app.llm_gateway.telemetry",
+        "app.orchestrator.chat_turn_service",
+        "app.orchestrator.commit_coordinator",
+        "app.orchestrator.context_planning_service",
+        "app.orchestrator.orchestrator",
+        "app.orchestrator.worker_task_service",
+        "app.orchestrator.writing_service"
+      ]
+    },
+    {
+      "module": "app.observability.runtime_metrics",
+      "importers": 11,
+      "importer_modules": [
+        "app.context_engine.trace_collector",
+        "app.error_contract",
+        "app.jobs.durable_queue",
+        "app.llm_gateway.gateway",
+        "app.llm_gateway.telemetry",
+        "app.main",
+        "app.observability",
+        "app.observability.slo",
+        "app.orchestrator.chat_turn_service",
+        "app.orchestrator.post_turn_service",
+        "app.storage.drafts"
+      ]
+    },
+    {
+      "module": "app.storage.base",
+      "importers": 11,
+      "importer_modules": [
+        "app.storage.bindings",
+        "app.storage.canon",
+        "app.storage.cards",
+        "app.storage.creative_memory",
+        "app.storage.drafts",
+        "app.storage.evidence_index",
+        "app.storage.memory_pack",
+        "app.storage.pending_actions",
+        "app.storage.plan_store",
+        "app.storage.session_history",
+        "app.storage.volumes"
+      ]
+    },
+    {
+      "module": "app.context_engine.token_counter",
+      "importers": 9,
+      "importer_modules": [
+        "app.agents.base",
+        "app.agents.writer",
+        "app.context_engine.budget_manager",
+        "app.context_engine.context_plan",
+        "app.context_engine.models",
+        "app.context_engine.token_accounting",
+        "app.llm_gateway.payload_accounting",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.orchestrator_helpers"
+      ]
+    },
+    {
+      "module": "app.control_plane.store",
+      "importers": 9,
+      "importer_modules": [
+        "app.context_engine.source_snapshot",
+        "app.control_plane",
+        "app.control_plane.runtime",
+        "app.jobs.durable_queue",
+        "app.llm_gateway.reliability",
+        "app.ops.production_validation",
+        "app.ops.project_maintenance",
+        "app.storage.base",
+        "app.storage.drafts"
+      ]
+    },
+    {
+      "module": "app.context_engine.trace_collector",
+      "importers": 8,
+      "importer_modules": [
+        "app.agents.agent_task",
+        "app.agents.base",
+        "app.llm_gateway.gateway",
+        "app.llm_gateway.telemetry",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.context_planning_service",
+        "app.orchestrator.orchestrator",
+        "app.routers.websocket"
+      ]
+    },
+    {
+      "module": "app.llm_gateway.providers.base",
+      "importers": 8,
+      "importer_modules": [
+        "app.llm_gateway.capabilities",
+        "app.llm_gateway.payload_accounting",
+        "app.llm_gateway.provider_registry",
+        "app.llm_gateway.providers.anthropic_provider",
+        "app.llm_gateway.providers.custom_provider",
+        "app.llm_gateway.providers.deepseek_provider",
+        "app.llm_gateway.providers.gemini_provider",
+        "app.llm_gateway.providers.openai_provider"
+      ]
+    },
+    {
+      "module": "app.prompts",
+      "importers": 8,
+      "importer_modules": [
+        "app.agents._fanfiction_mixin",
+        "app.agents._summary_mixin",
+        "app.agents.archivist",
+        "app.agents.base",
+        "app.agents.editor",
+        "app.agents.extractor",
+        "app.agents.writer",
+        "app.services.text_chunk_service"
+      ]
+    },
+    {
+      "module": "app.services.chapter_binding_service",
+      "importers": 8,
+      "importer_modules": [
+        "app.agents.archivist",
+        "app.agents.writer",
+        "app.orchestrator._analysis_mixin",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.orchestrator",
+        "app.routers.bindings",
+        "app.routers.drafts",
+        "app.services.working_memory_service"
+      ]
+    },
+    {
+      "module": "app.llm_gateway",
+      "importers": 7,
+      "importer_modules": [
+        "app.agents.base",
+        "app.eval.longform_benchmark",
+        "app.eval.writing_judge",
+        "app.orchestrator.orchestrator",
+        "app.routers.cards",
+        "app.routers.config_llm",
+        "app.services.text_chunk_service"
+      ]
+    },
+    {
+      "module": "app.storage.file_lock",
+      "importers": 7,
+      "importer_modules": [
+        "app.eval.campaign_runner",
+        "app.security.egress_ledger",
+        "app.storage.base",
+        "app.storage.creative_memory",
+        "app.storage.drafts",
+        "app.storage.session_history",
+        "app.storage.volumes"
+      ]
+    },
+    {
+      "module": "app.utils.text",
+      "importers": 7,
+      "importer_modules": [
+        "app.agents._fanfiction_mixin",
+        "app.agents.editor",
+        "app.agents.writer",
+        "app.orchestrator._context_mixin",
+        "app.orchestrator.orchestrator",
+        "app.routers.session",
+        "app.services.text_chunk_service"
+      ]
+    },
+    {
+      "module": "app.llm_gateway.providers.custom_provider",
+      "importers": 6,
+      "importer_modules": [
+        "app.llm_gateway.providers.aistudio_provider",
+        "app.llm_gateway.providers.glm_provider",
+        "app.llm_gateway.providers.grok_provider",
+        "app.llm_gateway.providers.kimi_provider",
+        "app.llm_gateway.providers.qwen_provider",
+        "app.llm_gateway.providers.wenxin_provider"
+      ]
+    },
+    {
+      "module": "app.schemas.canon",
+      "importers": 6,
+      "importer_modules": [
+        "app.agents._summary_mixin",
+        "app.eval.eval_suite",
+        "app.eval.longform_benchmark",
+        "app.orchestrator._analysis_mixin",
+        "app.routers.canon",
+        "app.storage.canon"
+      ]
+    }
+  ],
+  "violations": []
+}

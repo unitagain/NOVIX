@@ -6,16 +6,23 @@ FastAPI 应用入口
 import os
 import sys
 import re
+import secrets
+import uuid
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
-from app.config import settings
+from app.config import config, settings
 from app.utils.logger import get_logger
 from app.llm_gateway.errors import LLMError
+from app.error_contract import error_envelope, normalize_error_code, status_code_for
+from app.security.local_auth import LocalAuthMiddleware
+from app.security.headers import SecurityHeadersMiddleware
+from app.observability.otel import OpenTelemetryMiddleware
 from app.routers import (
     projects_router,
     cards_router,
@@ -29,6 +36,8 @@ from app.routers import (
     evidence_router,
     bindings_router,
     memory_pack_router,
+    memory_router,
+    actions_router,
     export_router,
 )
 from app.routers.fanfiction import router as fanfiction_router
@@ -44,8 +53,24 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """Application lifespan hooks."""
+    from app.jobs.runtime import start_task_worker, stop_task_worker
+
+    from app.observability.otel import telemetry
+    from app.control_plane.runtime import get_control_store
+
+    telemetry.configure(
+        settings.data_dir,
+        exporter_mode=str((config.get("observability", {}) or {}).get("otel_exporter") or "file"),
+    )
+    get_control_store().recover_abandoned_project_writes()
     await run_startup_tasks()
-    yield
+    await start_task_worker()
+    try:
+        yield
+    finally:
+        await stop_task_worker()
+        telemetry.force_flush()
+        telemetry.shutdown()
 
 
 # Create FastAPI application / 创建 FastAPI 应用
@@ -66,6 +91,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch all unhandled exceptions and return a structured error response."""
+    request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex}"
     logger.error(
         "Unhandled exception on %s %s: %s",
         request.method,
@@ -74,24 +100,26 @@ async def global_exception_handler(request: Request, exc: Exception):
         exc_info=True,
     )
 
-    # LLM provider errors → 502
+    envelope = error_envelope(exc, request_id=request_id)
+    payload = envelope.to_dict()
     if isinstance(exc, LLMError):
-        return JSONResponse(
-            status_code=502,
-            content=exc.to_dict(),
-        )
-
-    # Client-side validation errors → 400
-    if isinstance(exc, ValueError):
-        return JSONResponse(
-            status_code=400,
-            content={"detail": str(exc)},
-        )
-
-    # All other errors → 500 with message
+        payload["provider"] = exc.provider
+        payload["reason"] = normalize_error_code(exc.reason, "provider_error")
     return JSONResponse(
-        status_code=500,
-        content={"detail": str(exc)},
+        status_code=status_code_for(exc),
+        content=payload,
+        headers={"X-Request-ID": request_id},
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError):
+    request_id = request.headers.get("x-request-id") or f"req_{uuid.uuid4().hex}"
+    errors = [{"type": item.get("type"), "loc": item.get("loc")} for item in exc.errors()]
+    return JSONResponse(
+        status_code=422,
+        content={"code": "validation_error", "detail": "Request validation failed", "errors": errors, "request_id": request_id},
+        headers={"X-Request-ID": request_id},
     )
 
 
@@ -105,7 +133,7 @@ def is_localhost(origin: str) -> bool:
     """Check if origin is a localhost address (safe for desktop apps)"""
     try:
         return bool(re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?(/|$)", origin))
-    except Exception:
+    except (TypeError, re.error):
         return False
 
 
@@ -134,20 +162,23 @@ class LoopbackOriginsMatcher:
 
 loopback_matcher = LoopbackOriginsMatcher()
 
+
+def configured_cors_origins() -> list[str]:
+    configured = [item.strip().rstrip("/") for item in os.getenv("WENSHAPE_DESKTOP_ALLOWED_ORIGINS", "").split(",") if item.strip()]
+    if configured:
+        return configured
+    return loopback_matcher.allow_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?(/|$)" if getattr(sys, "frozen", False) else None,
-    allow_origins=[
-        "http://localhost:3000",  # Dev: Vite dev server
-        "http://localhost:8000",  # Prod: Packaged app (default port)
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:8000",
-        # Frozen mode supports any localhost port via regex above
-    ],
+    allow_origins=configured_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(LocalAuthMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(OpenTelemetryMiddleware)
 
 # Register routers / 注册路由
 # Strategy: Dual Mount
@@ -169,6 +200,8 @@ routers = [
     evidence_router,
     bindings_router,
     memory_pack_router,
+    memory_router,
+    actions_router,
     export_router,
 ]
 
@@ -178,8 +211,13 @@ for router in routers:
 
 
 @app.get("/health")
-async def health_check():
+async def health_check(request: Request):
     """Health check endpoint / 健康检查"""
+    desktop_token = os.getenv("WENSHAPE_DESKTOP_SESSION_TOKEN", "").strip()
+    supplied_token = request.headers.get("x-wenshape-session-token", "")
+    if desktop_token and not (supplied_token and secrets.compare_digest(supplied_token, desktop_token)):
+        return {"status": "ok", "version": app.version}
+
     from pathlib import Path
 
     data_dir = Path(settings.data_dir) if hasattr(settings, "data_dir") else Path("data")
@@ -188,6 +226,11 @@ async def health_check():
     # Phase 9/13：暴露结构化输出成功率 + prompt caching 命中率指标，供运维 / 前端监控。
     from app.utils.json_metrics import json_metrics_snapshot
     from app.utils.cache_metrics import cache_metrics_snapshot
+    from app.jobs.runtime import get_task_queue, task_worker_status
+    from app.observability.otel import telemetry
+    from app.observability.runtime_metrics import runtime_metrics
+    from app.observability.slo import SLOEvaluator
+    from app.control_plane.runtime import get_control_store
 
     return {
         "status": "ok",
@@ -195,6 +238,19 @@ async def health_check():
         "storage_accessible": storage_ok,
         "json_metrics": json_metrics_snapshot(),
         "cache_metrics": cache_metrics_snapshot(),
+        "runtime_metrics": runtime_metrics.snapshot(),
+        "task_queue": get_task_queue().health(),
+        "task_worker": task_worker_status(),
+        "control_plane": get_control_store().health(),
+        "telemetry": telemetry.snapshot(),
+        "slo": SLOEvaluator(
+            targets=((config.get("observability", {}) or {}).get("slo", {}) or {}).get("targets") or {}
+        ).evaluate(
+            window_seconds=float(
+                ((config.get("observability", {}) or {}).get("slo", {}) or {}).get("window_seconds") or 300
+            ),
+            queue=get_task_queue().health(),
+        ),
     }
 
 
@@ -409,7 +465,7 @@ if __name__ == "__main__":
                 print("")
                 try:
                     input("按回车键退出...")
-                except Exception:
+                except (EOFError, OSError):
                     pass
                 raise
     else:

@@ -79,8 +79,14 @@ async def test_edit_suggest_returns_user_facing_error_when_revision_unchanged(mo
     class FakeOrchestrator:
         editor = FakeEditor()
 
-        async def ensure_memory_pack(self, **kwargs):
-            return {"summary": "cached"}
+        class Application:
+            class Context:
+                async def ensure_memory_pack(self, **kwargs):
+                    return {"summary": "cached"}
+
+            context = Context()
+
+        application = Application()
 
     monkeypatch.setattr(
         session_router, "get_orchestrator", lambda project_id, request_language=None: FakeOrchestrator()

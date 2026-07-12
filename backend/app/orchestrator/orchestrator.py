@@ -17,11 +17,13 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 import asyncio
+import json
 import time
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.llm_gateway import get_gateway
-from app.llm_gateway.errors import LLMError
+from app.error_contract import error_envelope, record_degradation, safe_error_code
 from app.storage import (
     CardStorage,
     CanonStorage,
@@ -32,26 +34,46 @@ from app.storage import (
     SessionHistoryStorage,
 )
 from app.agents import ArchivistAgent, WriterAgent, EditorAgent
-from app.agents.planner import generate_plan
 from app.context_engine.select_engine import ContextSelectEngine
 from app.context_engine.embeddings import create_embeddings_backend
+from app.context_engine.reranker import create_reranker_backend
 from app.context_engine.trace_collector import trace_collector
+from app.context_engine.turn_scope import bind_turn_scope, current_turn_scope, new_turn_scope
 from app.orchestrator.storage_adapter import UnifiedStorageAdapter
 from app.schemas.draft import SceneBrief
 from app.utils.language import normalize_language
 from app.utils.logger import get_logger
 from app.utils.text import normalize_prose_paragraphs
 from app.services.chapter_binding_service import chapter_binding_service
-from app.orchestrator._types import SessionStatus
+from app.orchestrator.contracts import SessionStatus
 from app.orchestrator._context_mixin import ContextMixin
 from app.orchestrator._analysis_mixin import AnalysisMixin
 from app.orchestrator.architecture import route_contract
+from app.orchestrator.context_planning_service import ContextPlanningService
+from app.orchestrator.context_assembly_service import ContextAssemblyService
+from app.orchestrator.writing_service import WritingService
+from app.orchestrator.commit_coordinator import CommitCoordinator
+from app.orchestrator.turn_runtime import TurnState
+from app.orchestrator.chat_turn_service import ChatTurnService
+from app.orchestrator.post_turn_service import PostTurnService
+from app.orchestrator.finalize_pipeline import FinalizePipeline
 from app.orchestrator.orchestrator_helpers import (
     build_context_debug,
     extract_scene_brief_names,
     extract_top_sources,
     normalize_chapter_id,
     trim_context_package,
+)
+from app.orchestrator.plan_execution_service import PlanExecutionService
+from app.orchestrator.worker_task_service import WorkerTaskService
+from app.orchestrator.application_ports import (
+    AnalysisPort,
+    CommandPort,
+    ContextPort,
+    ConversationPort,
+    OrchestratorApplicationPorts,
+    StreamTaskRegistry,
+    VolumeSummaryService,
 )
 
 logger = get_logger(__name__)
@@ -141,10 +163,15 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             from app.config import config as _app_config
 
             embeddings_backend = create_embeddings_backend(_app_config)
+            reranker_backend = create_reranker_backend(_app_config)
         except Exception as exc:
-            logger.warning("Embeddings backend unavailable; semantic retrieval disabled: %s", exc)
+            logger.warning("Retrieval model backend unavailable; affected capability disabled: %s", exc)
             embeddings_backend = None
-        self.select_engine = ContextSelectEngine(embeddings_service=embeddings_backend)
+            reranker_backend = None
+        self.select_engine = ContextSelectEngine(
+            embeddings_service=embeddings_backend,
+            reranker_service=reranker_backend,
+        )
         # Phase 7 降级可见：启动即明示语义检索配置状态（依赖缺失会在首次检索时降级，见 select_engine）。
         if embeddings_backend is not None:
             logger.info("语义检索：已配置启用（嵌入后端就绪；缺 fastembed/模型时首次检索降级为纯词法）。")
@@ -157,9 +184,10 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         self.current_chapter: Optional[str] = None
         self.iteration_count = 0
         self.question_round = 0
-        self._stream_tasks: Dict[str, asyncio.Task] = {}  # 按章节隔离的流式任务
+        self.stream_tasks = StreamTaskRegistry()
         self._last_stream_results: Dict[str, Dict[str, Any]] = {}
         self._cancelled: bool = False  # 通用取消标志，用于在所有阶段响应用户取消 / General cancel flag
+        self._active_turn_scopes: Dict[str, Any] = {}
 
         # Load session config from config.yaml with sensible defaults
         # 从 config.yaml 加载会话配置
@@ -169,6 +197,66 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         self.max_iterations = int(session_cfg.get("max_iterations", 5))
         self.max_question_rounds = int(session_cfg.get("max_question_rounds", 2))
         self.max_research_rounds = int(session_cfg.get("max_research_rounds", 5))
+        self.worker_task_service = WorkerTaskService()
+        self.context_planning_service = ContextPlanningService(
+            select_engine=self.select_engine,
+            draft_storage=self.draft_storage,
+            gateway=self.gateway,
+        )
+        self.context_assembly_service = ContextAssemblyService(language=self.language)
+        self.commit_coordinator = CommitCoordinator(draft_storage=self.draft_storage)
+        self.writing_service = WritingService(
+            gateway=self.gateway,
+            writer=self.writer,
+            draft_storage=self.draft_storage,
+            storage_adapter=self.storage_adapter,
+            select_engine=self.select_engine,
+            context_assembly=self.context_assembly_service,
+            progress_callback=self.progress_callback,
+            detect_proposals=self._detect_proposals,
+            is_cancelled=lambda: self._cancelled,
+        )
+        self.chat_turn_service = ChatTurnService(self)
+        self.post_turn_service = PostTurnService(
+            session_history=self.session_history,
+            archivist=self.archivist,
+            creative_memory_storage=self.creative_memory_storage,
+            summarize_conversation=self._summarize_conversation,
+            verify_compact=self._verify_compact_artifact,
+        )
+        self.plan_execution_service = PlanExecutionService(
+            gateway=self.gateway,
+            writer=self.writer,
+            draft_storage=self.draft_storage,
+            plan_store=self.plan_store,
+            select_engine=self.select_engine,
+            storage_adapter=self.storage_adapter,
+            worker_service=self.worker_task_service,
+            emit_progress=self._emit_progress,
+            translate=self._p,
+            is_cancelled=lambda: self._cancelled,
+            write_step=self._plan_write_step,
+            edit_step=self._plan_edit_step,
+            analyze_step=self._plan_analyze_step,
+        )
+        self.finalize_pipeline = FinalizePipeline(
+            draft_storage=self.draft_storage,
+            commit_coordinator=self.commit_coordinator,
+            analyze_content=self._analyze_content,
+            update_status=self._update_status,
+        )
+        self.volume_summary_service = VolumeSummaryService(
+            draft_storage=self.draft_storage,
+            archivist=self.archivist,
+        )
+        self.application = OrchestratorApplicationPorts(
+            conversation=ConversationPort(self.session_history, self.post_turn_service),
+            commands=CommandPort(self._run_command),
+            analysis=AnalysisPort(self),
+            context=ContextPort(self.ensure_memory_pack),
+            volumes=self.volume_summary_service,
+            plans=self.plan_execution_service,
+        )
 
     def set_language(self, language: str) -> None:
         normalized = normalize_language(language, default=self.language)
@@ -179,8 +267,13 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             self.archivist.language = normalized
             self.writer.language = normalized
             self.editor.language = normalized
+            self.context_assembly_service.set_language(normalized)
         except Exception:
             return
+
+    def set_progress_callback(self, callback: Optional[Callable]) -> None:
+        self.progress_callback = callback
+        self.writing_service.progress_callback = callback
 
     def _p(self, zh: str, en: str) -> str:
         return en if self.language == "en" else zh
@@ -341,7 +434,7 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             return result
 
         except Exception as exc:
-            return await self._handle_error(f"Session error: {exc}", exc=exc)
+            return await self._handle_error("Session operation failed", exc=exc)
 
     async def answer_questions(
         self,
@@ -584,35 +677,18 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             }
 
         except Exception as exc:
-            return await self._handle_error(f"Feedback processing error: {exc}", exc=exc)
+            return await self._handle_error("Feedback processing failed", exc=exc)
 
     async def _finalize_chapter(self, project_id: str, chapter: str) -> Dict[str, Any]:
-        """Finalize chapter and save final draft."""
+        """Finalize chapter through the P7 FinalizePipeline."""
         try:
-            versions = await self.draft_storage.list_draft_versions(project_id, chapter)
-            if not versions:
-                return await self._handle_error("No draft found to finalize")
-
-            latest_version = versions[-1]
-            draft = await self.draft_storage.get_draft(project_id, chapter, latest_version)
-            if not draft:
-                return await self._handle_error("No draft content found to finalize")
-
-            await self.draft_storage.save_final_draft(project_id=project_id, chapter=chapter, content=draft.content)
-
-            await self._analyze_content(project_id, chapter, draft.content)
-
-            await self._update_status(SessionStatus.COMPLETED, "Chapter completed.")
-
-            return {
-                "success": True,
-                "status": SessionStatus.COMPLETED,
-                "message": "Chapter finalized successfully",
-                "final_draft": draft,
-            }
+            result = await self.finalize_pipeline.finalize_chapter(project_id, chapter)
+            if not result.get("success"):
+                return await self._handle_error(str(result.get("error") or "Finalization failed"))
+            return result
 
         except Exception as exc:
-            return await self._handle_error(f"Finalization error: {exc}", exc=exc)
+            return await self._handle_error("Finalization failed", exc=exc)
 
     async def _run_writing_flow(
         self,
@@ -653,10 +729,6 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         # 取消该章节的旧流式任务（如有），按章节隔离避免跨章节竞态
         # Cancel previous stream task for this chapter to prevent cross-chapter race
         chapter_key = str(chapter)
-        old_task = self._stream_tasks.pop(chapter_key, None)
-        if old_task:
-            old_task.cancel()
-
         try:
             task = asyncio.create_task(
                 self._stream_writer_output(
@@ -666,9 +738,9 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                     working_memory_payload=working_memory_payload,
                 )
             )
-            self._stream_tasks[chapter_key] = task
+            self.stream_tasks.replace(chapter_key, task)
             await task
-            self._stream_tasks.pop(chapter_key, None)
+            self.stream_tasks.discard(chapter_key)
         except asyncio.CancelledError:
             # 区分用户主动取消（_cancelled=True）和其他原因的 task 取消
             # Distinguish user-initiated cancel from other task cancellations
@@ -676,7 +748,7 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                 return await self._handle_cancelled()
             return await self._handle_error("Stream cancelled")
         except Exception as exc:
-            return await self._handle_error(f"Draft generation failed: {exc}", exc=exc)
+            return await self._handle_error("Draft generation failed", exc=exc)
 
         # 流任务正常完成，但若中途被取消（_stream_writer_output 静默 return），也需要退出
         if self._cancelled:
@@ -1126,8 +1198,8 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                                 "content": str(delta)[:2000],
                             }
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        record_degradation("writer_thinking_event", exc)
 
         except Exception:
             on_thinking = None
@@ -1163,7 +1235,7 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             raise RuntimeError("Empty draft result")
 
         pending_confirmations = []
-        draft = await self.draft_storage.save_draft(
+        draft = await self.commit_coordinator.save_draft(
             project_id=project_id,
             chapter=chapter,
             version="v1",
@@ -1222,9 +1294,14 @@ class Orchestrator(ContextMixin, AnalysisMixin):
 
     async def _handle_error(self, error_message: str, *, exc: Exception | None = None) -> Dict[str, Any]:
         """Handle error and update status."""
-        # Enrich message with LLM provider details if available
-        if exc is not None and isinstance(exc, LLMError):
-            error_message = f"{error_message} [provider={exc.provider}, reason={exc.reason}]"
+        resolved = exc or RuntimeError("orchestrator_error")
+        envelope = error_envelope(resolved)
+        logger.error(
+            "Orchestrator operation failed: code=%s internal_message=%s",
+            safe_error_code(resolved),
+            error_message,
+            exc_info=exc is not None,
+        )
 
         self.current_status = SessionStatus.ERROR
 
@@ -1232,13 +1309,14 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             await self.progress_callback(
                 {
                     "status": SessionStatus.ERROR.value,
-                    "message": error_message,
+                    "message": envelope.safe_detail,
+                    "error": envelope.to_dict(),
                     "project_id": self.current_project_id,
                     "chapter": self.current_chapter,
                 }
             )
 
-        return {"success": False, "status": SessionStatus.ERROR, "error": error_message}
+        return {"success": False, "status": SessionStatus.ERROR, "error": envelope.to_dict()}
 
     async def _handle_cancelled(self) -> Dict[str, Any]:
         """Handle user-initiated cancellation: reset state and broadcast cancel event."""
@@ -1302,473 +1380,123 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             await self.progress_callback({"type": "intent", "project_id": project_id, "chapter": chapter, **decision})
         return decision
 
-    async def create_plan(self, project_id: str, goal: str, context_hint: str = "") -> Optional[Dict[str, Any]]:
-        """Phase 11：把复杂指令拆成串行 plan 并持久化；无可执行步骤则返回 None（调用方回退普通 write/edit）。"""
-        try:
-            provider = self.gateway.get_provider_for_agent(self.writer.get_agent_name())
-        except Exception:
-            provider = None
-        try:
-            existing_chapters = await self.draft_storage.list_chapters(project_id)
-        except Exception:
-            existing_chapters = []
-        steps = await generate_plan(self.gateway, provider, goal, context_hint, chapters=existing_chapters)
-        if not steps:
-            return None
-        plan = {
-            "id": f"plan_{int(time.time() * 1000)}",
-            "goal": str(goal or "").strip(),
-            "steps": steps,
-            "status": "planning",
-            "created_at": int(time.time() * 1000),
-        }
-        await self.plan_store.write_plan(project_id, plan)
-        await self._emit_progress(
-            self._p("已生成执行计划", "Plan generated"),
-            stage="plan_created",
-            status="plan",
-            plan_id=plan["id"],
-            steps=len(steps),
-        )
-        return plan
-
-    async def execute_plan(self, project_id: str, plan_id: str, step_runner=None) -> Dict[str, Any]:
-        """Phase 11：串行执行 plan（红线 1：正文主线单线程）。
-
-        每步持久化进度（断点续传）、发透明事件、响应用户打断（self._cancelled）。
-        step_runner 可注入（默认 self._run_plan_step）以便单测编排逻辑。
-        """
-        plan = await self.plan_store.read_plan(project_id, plan_id)
-        if not plan:
-            return {"success": False, "error": "plan_not_found"}
-        runner = step_runner or self._run_plan_step
-        steps = plan.get("steps") or []
-        plan["status"] = "running"
-        await self.plan_store.write_plan(project_id, plan)
-
-        completed = True
-        for step in steps:
-            if self._cancelled:
-                completed = False
-                break
-            if step.get("status") == "done":
-                continue  # 断点续传：跳过已完成步骤
-            await self._emit_progress(
-                self._p(
-                    f"计划步骤 {step.get('id')}/{len(steps)}：{step.get('description', '')}",
-                    f"Plan step {step.get('id')}/{len(steps)}: {step.get('description', '')}",
-                ),
-                stage="plan_step",
-                status="plan",
-                step_id=step.get("id"),
-                action=step.get("action"),
-            )
-            try:
-                result = await runner(project_id, step)
-                step["status"] = "done"
-                if result:
-                    step["result"] = str(result)[:500]
-            except Exception as exc:
-                step["status"] = "failed"
-                step["error"] = str(exc)
-                logger.warning("Plan step %s failed: %s", step.get("id"), exc)
-                completed = False
-                await self.plan_store.write_plan(project_id, plan)
-                break  # 失败即停：不在坏状态上盲跑后续（可能依赖前序）步骤
-            await self.plan_store.write_plan(project_id, plan)  # 每步持久化进度
-
-        if self._cancelled:
-            plan["status"] = "interrupted"
-        elif completed:
-            plan["status"] = "done"
-        else:
-            plan["status"] = "failed"
-        await self.plan_store.write_plan(project_id, plan)
-        return {"success": completed, "plan": plan}
-
-    async def _run_plan_step(self, project_id: str, step: Dict[str, Any]) -> str:
-        """把单个 plan 步骤分发到既有能力。
-
-        - research：做真实 canon 检索并返回要点（不再空操作）。
-        - edit/analyze：先校验章节存在（grounding 兜底，避免在捏造章节上执行）。
-        - 注：plan 是「自主批处理」→ 直接落稿（start_session / process_feedback），而非交互式
-          agent+diff 提议（run_writing_agent）——批量自主与单轮人审语境不同，刻意区分。
-        """
-        action = str(step.get("action") or "").strip()
+    async def _plan_write_step(self, project_id: str, step: Dict[str, Any]) -> str:
         chapter = str(step.get("chapter") or "").strip()
         description = str(step.get("description") or "").strip()
+        res = await self.start_session(project_id, chapter, step.get("title") or chapter, description, skip_questions=True)
+        return f"write {chapter}: {res.get('status')}"
 
-        if action == "research":
-            return f"research: {await self._plan_research_note(project_id, description)}"
+    async def _plan_edit_step(self, project_id: str, step: Dict[str, Any]) -> str:
+        chapter = str(step.get("chapter") or "").strip()
+        description = str(step.get("description") or "").strip()
+        res = await self.process_feedback(project_id, chapter, description, action="revise")
+        return f"edit {chapter}: {res.get('status')}"
 
-        if action in ("edit", "analyze") and chapter:
-            try:
-                existing = await self.draft_storage.list_chapters(project_id)
-            except Exception:
-                existing = []
-            if existing and chapter not in existing:
-                raise ValueError(f"章节 {chapter} 不存在，无法 {action}")
-
-        if action == "write" and chapter:
-            res = await self.start_session(
-                project_id, chapter, step.get("title") or chapter, description, skip_questions=True
-            )
-            return f"write {chapter}: {res.get('status')}"
-        if action == "edit" and chapter:
-            res = await self.process_feedback(project_id, chapter, description, action="revise")
-            return f"edit {chapter}: {res.get('status')}"
-        if action == "analyze" and chapter:
-            res = await self.analyze_chapter(project_id, chapter)
-            return f"analyze {chapter}: {res.get('success')}"
-        return f"{action}: {description[:80]}"
-
-    async def _plan_research_note(self, project_id: str, query: str) -> str:
-        """plan 的 research 步骤：真实检索 canon，返回要点摘要（供透明展示，非空操作）。"""
-        query = str(query or "").strip()
-        if not query:
-            return "（空查询）"
-        try:
-            items = (
-                await self.select_engine.retrieval_select(
-                    project_id=project_id,
-                    query=query,
-                    item_types=["fact", "character", "world"],
-                    storage=self.storage_adapter,
-                    top_k=5,
-                )
-                or []
-            )
-        except Exception as exc:
-            logger.warning("plan research retrieval failed: %s", exc)
-            return f"检索失败：{exc}"
-        parts = []
-        for it in items[:5]:
-            content = str(getattr(it, "content", "") or "").strip()
-            if content:
-                parts.append(content[:120])
-        return "查到：" + "；".join(parts) if parts else "未检索到相关已确立设定/事实"
-
-    async def run_writing_agent(
-        self,
-        project_id: str,
-        chapter: str,
-        message: str,
-        *,
-        has_selection: bool = False,
-        has_draft: bool = False,
-        thinking: bool = False,
-        target_word_count: int = 3000,
-    ) -> Dict[str, Any]:
-        """阶段 C：agent 写作主循环（对齐 AI coding 的 Write/Edit）。
-
-        agent 自主用 write_content / edit_lines（+ 检索工具）操作正文工作副本——不区分写/改，
-        由 agent 看着当前正文自主选择。完成后 working_text 经 WS 模拟流式推送（stream_start/token/
-        stream_end），前端据此走流式 diff 审阅采纳（finalizeDraftAsDiff）。
-
-        Returns:
-            {success, action, changed, ...}；provider 不支持工具 / agent 未动笔 → {fallback: True}，
-            调用方据此回退既有预判路由（能力降级，红线 4）。
-        """
-        from app.agents.tools import WriterToolset
-        from app.agents.writing_actions import WritingActionToolset
-        from app.agents.agentic import run_agentic_chat
-        from app.config import config as _cfg
-
-        # 当前正文：diff 基线 + 工作副本
-        current_text = ""
-        try:
-            versions = await self.draft_storage.list_draft_versions(project_id, chapter)
-            if versions:
-                latest_draft = await self.draft_storage.get_draft(project_id, chapter, versions[-1])
-                current_text = str(getattr(latest_draft, "content", "") or "")
-        except Exception:
-            current_text = ""
-
-        retrieval = WriterToolset(
-            project_id,
-            self.storage_adapter,
-            self.select_engine,
-            current_chapter=chapter,
-        )
-        writing_ts = WritingActionToolset(current_text, retrieval_toolset=retrieval)
-
-        system = self._build_writing_agent_system(
-            has_draft=bool(current_text.strip()), target_word_count=target_word_count
-        )
-        user = self._build_writing_agent_user(
-            message, chapter, current_text, has_selection, target_word_count=target_word_count
-        )
-
-        tools_used = {"any": False}
-        progress_cb = self.progress_callback
-
-        async def _on_event(ev: Dict[str, Any]) -> None:
-            etype = ev.get("type")
-            if etype == "tool_call":
-                tools_used["any"] = True
-            if not progress_cb:
-                return
-            try:
-                if etype == "thinking":
-                    await progress_cb(
-                        {
-                            "type": "agent_thinking",
-                            "project_id": project_id,
-                            "chapter": chapter,
-                            "content": str(ev.get("content") or "")[:2000],
-                        }
-                    )
-                elif etype == "tool_call":
-                    await progress_cb(
-                        {
-                            "type": "agent_tool_call",
-                            "project_id": project_id,
-                            "chapter": chapter,
-                            "name": ev.get("name"),
-                            "arguments": ev.get("arguments"),
-                        }
-                    )
-                elif etype == "tool_result":
-                    await progress_cb(
-                        {
-                            "type": "agent_tool_result",
-                            "project_id": project_id,
-                            "chapter": chapter,
-                            "name": ev.get("name"),
-                            "result": str(ev.get("result") or "")[:1000],
-                        }
-                    )
-            except Exception:
-                pass
-
-        try:
-            provider = self.gateway.get_provider_for_agent(self.writer.get_agent_name())
-        except Exception:
-            provider = None
-        if not provider:
-            return {"success": False, "fallback": True, "reason": "no_provider"}
-
-        thinking_param = None
-        if thinking:
-            _builder = getattr(self.gateway, "thinking_param_for_agent", None)
-            if callable(_builder):
-                thinking_param = _builder(self.writer.get_agent_name(), thinking)
-        # 写整章需要较长输出：按目标字数放宽 max_tokens（中文约 1.6~2 token/字，留足余量）。
-        gen_max_tokens = max(4096, int(target_word_count * 2.0))
-        max_iters = int(_cfg.get("retrieval", {}).get("agentic_max_iterations", 4)) + 2
-        try:
-            resp = await run_agentic_chat(
-                self.gateway,
-                provider,
-                [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                writing_ts,
-                temperature=0.7,
-                max_tokens=gen_max_tokens,
-                max_iterations=max_iters,
-                on_event=_on_event,
-                thinking=thinking_param,
-            )
-        except Exception as exc:
-            logger.warning("run_writing_agent failed; will fallback to routed path: %s", exc)
-            return {"success": False, "fallback": True, "reason": f"agent_error:{exc}"}
-
-        if not writing_ts.changed:
-            # agent 没动笔：完全没调工具（很可能 provider 不支持工具）→ 回退预判路由；
-            # 调了工具但只检索没写 → 作为纯回复返回（不改正文）。
-            if not tools_used["any"]:
-                return {"success": False, "fallback": True, "reason": "no_tool_calls"}
-            return {"success": True, "action": "reply", "changed": False, "message": str(resp.get("content") or "")}
-
-        final_text = writing_ts.working_text
-        proposals = await self._stream_text_as_diff(project_id, chapter, final_text)
-        return {
-            "success": True,
-            "action": "agentic_write",
-            "changed": True,
-            "proposals": proposals,
-            "actions": writing_ts.actions,
-            "summary": str(resp.get("content") or "").strip(),
-        }
-
-    def _build_writing_agent_system(self, *, has_draft: bool, target_word_count: int = 3000) -> str:
-        """写作 agent 的 system prompt：把写/改统一为两个工具，先检索后落笔（对齐 AI coding）。"""
-        lang = "中文" if self.language == "zh" else "英文"
-        base = (
-            "你是小说撰稿 agent，工作方式与 AI 编程助手一致：先用检索工具核对设定，再用写作工具落笔。"
-            "『写新内容』与『改旧文』不是两件事，而是你的两个工具，由你看着当前正文自主选择：\n"
-            "- write_content(content[, mode]): 写入整章/整段正文（mode=replace 覆盖 / append 续写），"
-            "content 是你直接创作的小说正文本身。\n"
-            "- edit_lines(old_text, new_text): 精确替换正文中唯一出现的一处片段，用于局部修改/润色/删减"
-            "（old_text 须与正文逐字一致且唯一）。\n"
-            "检索工具（lookup_card/query_canon/query_relations/read_chapter/search_prose）供你按需"
-            "核对人物设定、关系、伏笔与已确立事实，避免前后矛盾。\n\n"
-            "工作原则：\n"
-            "1) 先检索后落笔：动笔前查全相关设定与事实，时间近的章节更相关。\n"
-            "2) 选对工具：正文为空或需大段新内容 → write_content；只改局部 → edit_lines。\n"
-            "3) content 只含小说正文，不夹带解释、标题或标记。\n"
-            "4) 完成后用一句话说明你改了什么/为何，不要复述正文。\n"
-        )
-        if has_draft:
-            base += (
-                "本章已有正文（见用户消息）。这是『编辑』场景：优先用 edit_lines 做针对性的局部修改/润色"
-                "（按需改写，不必长篇）；仅当用户明确要求重写整章时才 write_content(replace)。\n"
-            )
-        else:
-            base += (
-                f"本章暂无正文。这是『撰写整章』场景：必须用 write_content **一次写出完整的一整章**，"
-                f"目标约 {target_word_count} 字（不少于 {int(target_word_count * 0.8)} 字），要有起承转合、"
-                "场景与对白充分展开，写到本章自然收束——绝不能只写开头、提纲或片段就停。\n"
-            )
-        base += f"\n请用{lang}创作。"
-        return base
-
-    def _build_writing_agent_user(
-        self, message: str, chapter: str, current_text: str, has_selection: bool, target_word_count: int = 3000
-    ) -> str:
-        """写作 agent 的 user 消息：注入当前正文（供 edit_lines 定位）+ 用户指令。"""
-        parts = [f"本章 ID：{chapter}"]
-        body = str(current_text or "")
-        if body.strip():
-            if len(body) > 6000:
-                body = body[:3500] + "\n…（中段省略，如需修改中段请用检索或要求重写）…\n" + body[-2000:]
-            parts.append(f"【当前正文】\n{body}")
-        else:
-            parts.append("【当前正文】（空）")
-        if has_selection:
-            parts.append("（用户在编辑器中有选中片段，优先聚焦该处修改。）")
-        parts.append(f"\n用户指令：{str(message or '').strip()}")
-        if not body.strip():
-            parts.append(
-                f"请先检索必要设定，再用 write_content 写出**完整一整章**（目标约 {target_word_count} 字，写足写完，勿只开头）。"
-            )
-        else:
-            parts.append("请先检索必要设定，再用写作工具完成本轮。")
-        return "\n".join(parts)
-
-    async def _stream_text_as_diff(self, project_id: str, chapter: str, final_text: str) -> List[Dict[str, Any]]:
-        """把既成正文经 WS 模拟流式推送（stream_start/token/stream_end），前端据此走流式 diff 审阅。
-
-        与 _stream_writer_output 同构，但内容是 agent 工作副本（既成文本），故不重新流式生成、不预存草稿
-        （提议态，采纳后由前端落地——红线 2：真相在文件、对话可弃）。返回设定建议（proposals）。
-        """
-        cb = self.progress_callback
-        text = str(final_text or "")
-        if cb:
-            await cb({"type": "stream_start", "project_id": project_id, "chapter": chapter})
-            for chunk in self._chunk_for_stream(text):
-                if self._cancelled:
-                    break
-                await cb({"type": "token", "project_id": project_id, "chapter": chapter, "content": chunk})
-        proposals: List[Dict[str, Any]] = []
-        if text and not self._cancelled:
-            try:
-                proposals = await self._detect_proposals(project_id, text)
-            except Exception:
-                proposals = []
-        if cb:
-            await cb(
-                {
-                    "type": "stream_end",
-                    "project_id": project_id,
-                    "chapter": chapter,
-                    "draft": {"chapter": chapter, "version": "v1", "content": text, "word_count": len(text)},
-                    "proposals": proposals,
-                }
-            )
-        return proposals
-
-    @staticmethod
-    def _chunk_for_stream(text: str, size: int = 24) -> List[str]:
-        """把文本切成固定长度小块，用于 WS 模拟流式推送（前端 StreamingDiffView 逐块显示）。"""
-        text = str(text or "")
-        return [text[i : i + size] for i in range(0, len(text), size)]
+    async def _plan_analyze_step(self, project_id: str, step: Dict[str, Any]) -> str:
+        chapter = str(step.get("chapter") or "").strip()
+        res = await self.analyze_chapter(project_id, chapter)
+        return f"analyze {chapter}: {res.get('success')}"
 
     # ---------------------------------------------------------------- 对话记忆层 --
     # 持久化对话历史（Git-Native）+ compact 长对话压缩 + 顺带提炼作者偏好 → creative_memory。
     # 取代脆弱的前端 localStorage 单点：刷新/重启/清缓存/换机均不丢，且可 Git 追踪。
 
-    async def append_conversation(self, project_id: str, message: Dict[str, Any]) -> Dict[str, Any]:
-        """追加一条对话消息到持久存储（sessions/conversation.jsonl）。"""
-        return await self.session_history.append(project_id, message)
-
-    async def load_conversation(self, project_id: str, *, limit: int = 0) -> List[Dict[str, Any]]:
-        """读取持久化的对话历史（limit>0 只取最近 N 条）。"""
-        return await self.session_history.load(project_id, limit=limit)
-
-    async def _summarize_conversation(self, text: str) -> str:
-        """把早期对话压成简明要点：优先 LLM 摘要，失败降级规则压缩（smart_compress）。"""
+    async def _summarize_conversation(self, text: str) -> Dict[str, Any]:
+        """Build CompactArtifactV2 sections; safely degrade to a recoverable summary."""
         text = str(text or "").strip()
         if not text:
-            return ""
+            return {}
         try:
             provider = self.gateway.get_provider_for_agent(self.archivist.get_agent_name())
             system = self._p(
-                "你是对话摘要助手。把下面早期的人机创作对话压成简明要点，保留：作者的关键指令/偏好、"
-                "已做的写作决策、进行到哪。中文，≤200 字，分条，不要逐句复述。",
-                "You summarize an earlier human-AI writing conversation into concise bullets: keep the author's "
-                "key instructions/preferences, decisions made, and progress. ≤200 words, bulleted.",
+                "你是创作会话状态压缩器。只输出 JSON 对象，字段固定为 decisions、constraints、entity_state、"
+                "open_loops（字符串数组）和 recent_summary（字符串）。只保留输入明确支持的内容；不推断新事实，"
+                "不把助手建议当作作者决定，不遗漏仍生效的硬约束和未决事项。recent_summary 不超过 300 字。",
+                "You compress writing-session state. Return one JSON object with decisions, constraints, entity_state, "
+                "open_loops (string arrays), and recent_summary (string). Include only source-supported claims; do not "
+                "turn assistant suggestions into user decisions. Preserve active constraints and unresolved work.",
             )
             resp = await self.gateway.chat(
                 [{"role": "system", "content": system}, {"role": "user", "content": text[:6000]}],
                 provider=provider,
                 temperature=0.3,
+                response_format={"type": "json_object"},
             )
             out = str(resp.get("content") or "").strip()
             if out:
-                return out
+                from app.utils.llm_output import parse_json_payload
+
+                parsed, error = parse_json_payload(out, expected_type=dict)
+                if parsed and not error:
+                    parsed["_provenance"] = {
+                        "provider": str(resp.get("provider") or provider or ""),
+                        "model": str(resp.get("model") or ""),
+                        "prompt_fingerprint": str(resp.get("request_fingerprint") or ""),
+                    }
+                    return parsed
         except Exception as exc:
             logger.warning("conversation summary via LLM failed; falling back to rule-based: %s", exc)
         try:
             from app.context_engine.smart_compressor import smart_compress
 
             compressed, _ = smart_compress(text, target_ratio=0.35)
-            return str(compressed or "").strip() or text[:600]
+            return {"recent_summary": str(compressed or "").strip() or text[:600]}
         except Exception:
-            return text[:600]
+            return {"recent_summary": text[:600]}
 
-    async def compact_conversation(
-        self, project_id: str, *, keep_recent: int = 40, trigger_at: int = 120
-    ) -> Dict[str, Any]:
-        """长对话压缩 + 顺带从被压缩对话提炼作者偏好 → creative_memory（best-effort，不阻断）。
+    async def _verify_compact_artifact(self, artifact: Any, source_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Use an independent reviewer profile to reject lossy or unsupported compact state."""
+        from app.utils.llm_output import parse_json_payload
 
-        summarizer 注入 SessionHistoryStorage.compact：把早期对话压成一条 summary；同时把其中用户消息
-        当作"作者反馈"喂给 Archivist 提取偏好/进度/决策，Upsert 到创作记忆（与 canon 边界清晰）。
-        """
-        extracted: List[str] = []
-
-        async def _summarizer(old_messages: List[Dict[str, Any]]) -> str:
-            convo = "\n".join(
-                f"{m.get('role', 'user')}: {str(m.get('content') or '').strip()}"
-                for m in old_messages
-                if str(m.get("content") or "").strip()
-            )
-            summary = await self._summarize_conversation(convo)
-            try:
-                user_text = "\n".join(
-                    str(m.get("content") or "").strip()
-                    for m in old_messages
-                    if m.get("role") == "user" and str(m.get("content") or "").strip()
-                )
-                if user_text:
-                    mems = await self.archivist.extract_creative_memory(final_draft="", user_feedback=user_text)
-                    for mem in mems:
-                        slug = await self.creative_memory_storage.write_memory(
-                            project_id,
-                            mem["slug"],
-                            mem["description"],
-                            mem.get("body", ""),
-                            mem.get("type", "preference"),
-                        )
-                        extracted.append(slug)
-            except Exception as exc:
-                logger.warning("preference extraction during compact failed: %s", exc)
-            return summary
-
-        result = await self.session_history.compact(
-            project_id, _summarizer, keep_recent=keep_recent, trigger_at=trigger_at
+        provider = self.gateway.get_provider_for_agent(self.editor.get_agent_name())
+        source = "\n".join(
+            f"{item.get('role', 'user')}: {str(item.get('content') or '').strip()}"
+            for item in source_messages
+            if str(item.get("content") or "").strip()
         )
-        result["preferences_extracted"] = extracted
-        return result
+        payload = {
+            "source_conversation": source[:60000],
+            "compact_artifact": artifact.to_dict(),
+            "criteria": {
+                "unsupported_claims": "artifact claims absent from source",
+                "severe_omissions": "missing active hard constraints, decisions, entity state, or open loops",
+                "contradictions": "artifact conflicts with source",
+            },
+        }
+        response = await self.gateway.chat(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是独立的会话压缩审计器。只输出 JSON：unsupported_claims、severe_omissions、"
+                        "contradictions（字符串数组）及 valid（布尔值）。只有三个数组均为空时 valid 才为 true。"
+                        "不要评价文风，不要补充来源中不存在的信息。"
+                    ),
+                },
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            provider=provider,
+            temperature=0.0,
+            max_tokens=800,
+            response_format={"type": "json_object"},
+        )
+        parsed, error = parse_json_payload(str(response.get("content") or ""), expected_type=dict)
+        if error or not parsed:
+            return {"available": True, "valid": False, "reason": "invalid_verifier_response", "error": error}
+        unsupported = [str(item) for item in parsed.get("unsupported_claims") or [] if str(item).strip()]
+        omissions = [str(item) for item in parsed.get("severe_omissions") or [] if str(item).strip()]
+        contradictions = [str(item) for item in parsed.get("contradictions") or [] if str(item).strip()]
+        valid = not unsupported and not omissions and not contradictions and parsed.get("valid") is True
+        return {
+            "available": True,
+            "valid": valid,
+            "unsupported_claims": unsupported,
+            "severe_omissions": omissions,
+            "contradictions": contradictions,
+            "provider": response.get("provider") or provider,
+            "model": response.get("model"),
+            "request_fingerprint": response.get("request_fingerprint"),
+        }
 
     async def run_chat_turn(
         self,
@@ -1782,61 +1510,106 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         auto_execute_plan: bool = False,
         thinking: bool = False,
     ) -> Dict[str, Any]:
-        """Phase 12 · 单 Writer 主循环的统一对话入口：意图自判 → 路由到既有能力。
+        """Delegate the main route to ChatTurnService."""
 
-        一个输入框、一个对话回合：作者发一句话，AI 自判 write/edit/continue/plan 并执行。
-        5 阶段写作能力保留为被路由调用的 human-in-the-loop 检查点（不删——作者可随时打断/反问，
-        与 G-3 教训一致）。这是『意图路由式主循环』，非 agentic-loop 重写 5 阶段。
-        """
-        decision = await self.decide_writing_action(
-            project_id, chapter, message, has_selection=has_selection, has_draft=has_draft
+        return await self.chat_turn_service.run(
+            project_id,
+            chapter,
+            message,
+            has_selection=has_selection,
+            has_draft=has_draft,
+            target_word_count=target_word_count,
+            auto_execute_plan=auto_execute_plan,
+            thinking=thinking,
         )
-        action = str(decision.get("action") or "write")
 
-        if action == "plan":
-            plan = await self.create_plan(project_id, goal=message)
-            if plan:
-                result: Dict[str, Any] = {"success": True, "status": "plan_ready", "plan": plan}
-                if auto_execute_plan:
-                    result["execution"] = await self.execute_plan(project_id, plan["id"])
-                return {
-                    **result,
-                    "action": "plan",
-                    "decision": decision,
-                    "route_contract": route_contract("plan", auto_execute_plan=auto_execute_plan),
-                }
-            action = "write"  # 拆不出可执行步骤 → 回退普通撰写
+    def _cancel_active_turns(self) -> int:
+        """Cancel every active turn owned by this project orchestrator."""
 
-        # 阶段 C（对齐 AI coding，默认主路径）：写/改统一交给 agent 主循环自主用工具完成
-        # （write_content / edit_lines + 检索），不再预判分流。
-        if chapter:
-            agent_result = await self.run_writing_agent(
-                project_id,
-                chapter,
-                message,
-                has_selection=has_selection,
-                has_draft=has_draft,
-                thinking=thinking,
-                target_word_count=target_word_count,
-            )
-            if not agent_result.get("fallback"):
-                result_action = str(agent_result.get("action") or action)
-                return {
-                    **agent_result,
-                    "decision": decision,
-                    "route_contract": route_contract(result_action),
-                }
-            logger.info("writing agent fell back: %s", agent_result.get("reason"))
+        scopes = list(self._active_turn_scopes.values())
+        for scope in scopes:
+            scope.cancel()
+        self._cancelled = True
+        return len(scopes)
 
-        # 能力降级（红线 4）/ 无章节：返回 fallback 信号，由前端用成熟的 write/edit 流程兜底
-        # （含 5 阶段反问、editor 精确 diff 等 human-in-the-loop 检查点，不在此单轮强行完成）。
-        return {
-            "success": True,
-            "fallback": True,
-            "action": action,
-            "decision": decision,
-            "route_contract": route_contract(action, fallback=True),
-        }
+    def cancel_session(self) -> Dict[str, int]:
+        """Cancel all turn scopes and active stream tasks, then reset session state."""
+        turns = self._cancel_active_turns()
+        streams = self.stream_tasks.cancel_all()
+        self.current_status = SessionStatus.IDLE
+        self.current_project_id = None
+        self.current_chapter = None
+        return {"turns": turns, "streams": streams}
+
+    async def _run_command(
+        self,
+        *,
+        project_id: str,
+        chapter: str,
+        intent: str,
+        route_path: str,
+        operation: Callable[[], Any],
+        target_word_count: int = 3000,
+    ) -> Any:
+        """Execute a legacy/fallback operation under the P10 control plane."""
+
+        existing = current_turn_scope()
+        owns_scope = existing is None
+        scope = existing or new_turn_scope(project_id=project_id, chapter_id=chapter)
+        if owns_scope:
+            scope.context_epoch = await self.session_history.current_context_epoch(project_id)
+        if owns_scope:
+            self._active_turn_scopes[scope.turn_id] = scope
+        try:
+            with bind_turn_scope(scope) if owns_scope else nullcontext(scope):
+                if scope.runtime.state == TurnState.CREATED:
+                    scope.runtime.transition(TurnState.ROUTING)
+                if scope.runtime.state == TurnState.ROUTING:
+                    scope.runtime.transition(TurnState.CONTEXT_PLANNING, metadata={"intent": intent})
+                self.context_planning_service.prepare_context_plan(
+                    scope=scope,
+                    project_id=project_id,
+                    chapter=chapter,
+                    intent=intent,
+                    route_path=route_path,
+                    target_word_count=target_word_count,
+                )
+                result = operation()
+                if route_path == "fallback_workflow" and scope.runtime.state == TurnState.CONTEXT_PLANNING:
+                    scope.runtime.transition(TurnState.FALLBACK_RUNNING)
+                elif route_path == "plan_workflow" and scope.runtime.state == TurnState.CONTEXT_PLANNING:
+                    scope.runtime.transition(TurnState.PLAN_RUNNING)
+                elif route_path == "agentic_writer" and scope.runtime.state == TurnState.CONTEXT_PLANNING:
+                    scope.runtime.transition(TurnState.WRITER_RUNNING)
+                elif scope.runtime.state == TurnState.CONTEXT_PLANNING:
+                    scope.runtime.transition(TurnState.WORKER_RUNNING, metadata={"route": route_path})
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if owns_scope and isinstance(result, dict):
+                    result.setdefault(
+                        "route_contract", route_contract(intent, fallback=route_path == "fallback_workflow")
+                    )
+                    result = await self.context_planning_service.attach_chat_context_plan(
+                        result,
+                        project_id=project_id,
+                        chapter=chapter,
+                        intent=intent,
+                        target_word_count=target_word_count,
+                    )
+                if owns_scope:
+                    scope.runtime.complete()
+                    if isinstance(result, dict):
+                        result["runtime"] = scope.runtime.to_dict()
+                return result
+        except asyncio.CancelledError:
+            scope.runtime.cancel("task_cancelled")
+            raise
+        except Exception as exc:
+            scope.runtime.fail(exc)
+            raise
+        finally:
+            if owns_scope:
+                self._active_turn_scopes.pop(scope.turn_id, None)
 
     async def _emit_progress(self, message: str, **kwargs) -> None:
         if not self.progress_callback:

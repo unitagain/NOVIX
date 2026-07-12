@@ -74,3 +74,37 @@ def test_upsert_overwrites_same_slug(tmp_path):
     assert mem["description"] == "新描述" and mem["type"] == "decision"
     headers = asyncio.run(s.list_headers("p1"))
     assert len(headers) == 1  # 同 slug 覆盖，不重复
+
+
+def test_candidate_memory_waits_for_review_and_not_recalled(tmp_path):
+    s = _store(tmp_path)
+    asyncio.run(
+        s.write_candidate_memory(
+            "p1",
+            "auto-tone",
+            "AI 推断作者喜欢冷峻文风",
+            "来自章节定稿后的自动抽取",
+            "preference",
+            source="chapter_finalize:V1C001",
+        )
+    )
+    assert asyncio.run(s.recall("p1", "冷峻文风", top_k=3)) == []
+    review_items = asyncio.run(s.list_review_items("p1"))
+    assert len(review_items) == 1
+    assert review_items[0]["status"] == "needs_review"
+    assert review_items[0]["source"] == "chapter_finalize:V1C001"
+
+
+def test_confirm_and_reject_memory_status(tmp_path):
+    s = _store(tmp_path)
+    asyncio.run(s.write_candidate_memory("p1", "tone", "作者喜欢冷峻文风", "避免煽情", "preference"))
+    assert asyncio.run(s.confirm_memory("p1", "tone"))
+    hits = asyncio.run(s.recall("p1", "文风", top_k=3))
+    assert hits and hits[0]["status"] == "active"
+    assert "recall_reason" in hits[0]
+
+    asyncio.run(s.write_candidate_memory("p1", "bad", "错误偏好", "误抽取", "preference"))
+    assert asyncio.run(s.reject_memory("p1", "bad"))
+    rejected = asyncio.run(s.read_memory("p1", "bad"))
+    assert rejected["status"] == "rejected"
+    assert asyncio.run(s.recall("p1", "错误偏好", top_k=3)) == []

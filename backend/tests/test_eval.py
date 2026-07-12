@@ -39,6 +39,9 @@ def test_recall_perfect_on_lexical_cases():
     assert result["num_cases"] == 3
     assert result["recall"] == 1.0  # 字面命中全召回
     assert result["hit_rate"] == 1.0
+    assert result["latency_ms"]["p95"] >= 0
+    assert result["selected_chars"]["mean"] > 0
+    assert result["cases"][0]["ranking_trace"]["fusion"] == "lexical"
 
 
 def test_recall_partial_and_structure():
@@ -60,3 +63,32 @@ def test_empty_cases():
     storage = _FakeFactStorage(_fixture())
     result = asyncio.run(evaluate_retrieval_recall(engine, storage, [], top_k=5))
     assert result["recall"] == 0.0 and result["num_cases"] == 0
+
+
+def test_longform_retrieval_eval_does_not_truncate_early_facts():
+    facts = [
+        Fact(
+            id=f"C{chapter:04d}-F{idx:02d}",
+            statement=f"章节{chapter} 关键事实 {idx} 唯一锚点 anchor-{chapter}-{idx}",
+            source=f"C{chapter:04d}",
+            introduced_in=f"C{chapter:04d}",
+        )
+        for chapter in range(1, 19)
+        for idx in range(1, 5)
+    ]
+    engine = ContextSelectEngine()
+    storage = _FakeFactStorage(facts)
+    cases = [
+        {
+            "query": "anchor-1-1",
+            "expect": ["C0001-F01"],
+            "chapter_id": "C0001",
+        },
+        {
+            "query": "anchor-18-4",
+            "expect": ["C0018-F04"],
+            "chapter_id": "C0018",
+        },
+    ]
+    result = asyncio.run(evaluate_retrieval_recall(engine, storage, cases, top_k=5, total_chapters=18))
+    assert result["recall"] == 1.0

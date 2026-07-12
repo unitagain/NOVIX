@@ -9,10 +9,13 @@ Phase 4 验收（4b 集成）：select_engine 混合检索 —— 注入式 Fake
 
 import asyncio
 import json
+from types import SimpleNamespace
 
-from app.context_engine.embeddings import cosine_similarity
+from app.context_engine import embeddings as embeddings_module
+from app.context_engine.embeddings import cosine_similarity, create_embeddings_backend
 from app.context_engine.vector_store import VectorStore
 from app.context_engine.relation_graph import Relation, RelationGraph
+from app.context_engine.reranker import create_reranker_backend
 from app.context_engine.select_engine import ContextSelectEngine
 from app.schemas.canon import Fact
 
@@ -165,6 +168,29 @@ class _FakeFactStorage:
         return list(self._facts)
 
 
+class _MixedStorage(_FakeFactStorage):
+    def __init__(self, facts=None, characters=None, worlds=None, chunks=None):
+        super().__init__(facts or [])
+        self._characters = characters or {}
+        self._worlds = worlds or {}
+        self._chunks = chunks or []
+
+    async def list_character_cards(self, project_id):
+        return list(self._characters)
+
+    async def get_character_card(self, project_id, name):
+        return self._characters.get(name)
+
+    async def list_world_cards(self, project_id):
+        return list(self._worlds)
+
+    async def get_world_card(self, project_id, name):
+        return self._worlds.get(name)
+
+    async def search_text_chunks(self, project_id, query, limit=50):
+        return list(self._chunks)[:limit]
+
+
 class _KeywordEmbedder:
     """确定性嵌入：按关键词把文本投到 3 维语义空间（恐惧/中性/天气）；无网络、无模型。"""
 
@@ -200,6 +226,56 @@ def test_lexical_only_drops_zero_overlap_fact():
     assert "F3" in ids  # 含『恐惧』，词法命中
     assert "F1" not in ids  # 字面零重叠，词法模式丢弃
     assert "F2" not in ids
+
+
+def test_retrieval_excludes_future_canon_when_current_chapter_is_known():
+    facts = [
+        Fact(id="past", statement="铜钥匙此前一直由管家保管", source="V1C002", introduced_in="V1C002"),
+        Fact(id="current", statement="铜钥匙当前留在仓库门边", source="V1C003", introduced_in="V1C003"),
+        Fact(id="future", statement="铜钥匙后来被访客带走", source="V1C004", introduced_in="V1C004"),
+    ]
+    engine = ContextSelectEngine()
+
+    results = asyncio.run(
+        engine.retrieval_select(
+            project_id="p",
+            query="铜钥匙",
+            item_types=["fact"],
+            storage=_FakeFactStorage(facts),
+            top_k=5,
+            current_chapter="V1C003",
+        )
+    )
+    trace = engine.get_last_ranking_trace()
+
+    assert {row.id for row in results} == {"past", "current"}
+    assert trace["signals"]["temporal_scope"] is True
+    assert trace["filters"]["future_facts_excluded"] == 1
+
+
+def test_retrieval_excludes_future_prose_chunks_when_current_chapter_is_known():
+    storage = _MixedStorage(
+        chunks=[
+            {"chapter": "V1C002", "text": "林舟在旧仓库发现一条钥匙线索。"},
+            {"chapter": "V1C004", "text": "林舟后来确认钥匙已经被人带走。"},
+        ]
+    )
+    engine = ContextSelectEngine()
+
+    results = asyncio.run(
+        engine.retrieval_select(
+            project_id="p",
+            query="钥匙线索",
+            item_types=["text_chunk"],
+            storage=storage,
+            top_k=5,
+            current_chapter="V1C003",
+        )
+    )
+    trace = engine.get_last_ranking_trace()
+
+    assert [row.metadata["chapter"] for row in results] == ["V1C002"]
+    assert trace["filters"]["future_text_chunks_excluded"] == 1
 
 
 def test_semantic_rescues_zero_overlap_fact():
@@ -364,6 +440,129 @@ def test_context_prefix_used_for_lexical_index():
     assert ids == ["P1"]  # 前缀含『迷雾森林』→ 词法命中；无前缀的 P2 被丢弃
     assert results[0].content == "他攥紧拳头不敢回头"  # 展示仍是原始 statement（不含前缀）
     assert "_index_text" not in results[0].metadata  # 内部索引文本不外泄
+
+
+def test_card_name_used_as_contextual_index_prefix():
+    """角色卡名称进入索引前缀：正文无查询词时仍可按角色名召回。"""
+    storage = _MixedStorage(
+        characters={
+            "林舟": {"appearance": "总穿灰色长衣", "personality": "沉默克制"},
+            "沈桥": {"appearance": "红衣", "personality": "张扬"},
+        }
+    )
+    engine = ContextSelectEngine()
+    results = asyncio.run(
+        engine.retrieval_select(project_id="p", query="林舟", item_types=["character"], storage=storage, top_k=5)
+    )
+    assert [r.id for r in results] == ["char_林舟"]
+    assert "_index_text" not in results[0].metadata
+
+
+def test_text_chunk_chapter_used_as_contextual_index_prefix():
+    """正文片段章节进入索引前缀：可按章节号召回具体片段。"""
+    storage = _MixedStorage(
+        chunks=[
+            {"chapter": "V1C009", "text": "他在雨夜推开旧宅木门。"},
+            {"chapter": "V1C002", "text": "清晨的集市人声鼎沸。"},
+        ]
+    )
+    engine = ContextSelectEngine()
+    results = asyncio.run(
+        engine.retrieval_select(project_id="p", query="V1C009", item_types=["text_chunk"], storage=storage, top_k=5)
+    )
+    assert results[0].metadata.get("chapter") == "V1C009"
+    assert results[0].relevance_score > results[-1].relevance_score
+
+
+def test_ranking_trace_records_signals_and_top_results():
+    facts = [
+        Fact(id="R1", statement="张三是李四的师父", source="V1C001", introduced_in="V1C001"),
+        Fact(id="R2", statement="迷雾森林夜晚会迷路", source="V1C002", introduced_in="V1C002"),
+    ]
+    engine = ContextSelectEngine()
+    storage = _FakeFactStorage(facts)
+    results = asyncio.run(
+        engine.retrieval_select(
+            project_id="p",
+            query="张三 李四",
+            item_types=["fact"],
+            storage=storage,
+            top_k=2,
+            current_chapter="V1C003",
+        )
+    )
+    assert results[0].id == "R1"
+    trace = engine.get_last_ranking_trace()
+    assert trace["fusion"] == "lexical"
+    assert trace["signals"]["bm25"] is True
+    assert trace["signals"]["chapter_distance"] is True
+    assert trace["top_results"][0]["id"] == "R1"
+
+
+def test_retrieval_policy_overrides_are_explicit_and_validated():
+    engine = ContextSelectEngine(
+        embeddings_service=_KeywordEmbedder(),
+        fusion="weighted",
+        semantic_rerank=False,
+        rerank_top_k=7,
+    )
+
+    assert engine.get_retrieval_policy() == {
+        "semantic_enabled": True,
+        "fusion": "weighted",
+        "semantic_rerank": False,
+        "reranker_available": False,
+        "reranker_backend": None,
+        "rerank_top_k": 7,
+    }
+
+    try:
+        ContextSelectEngine(fusion="not-a-fusion")
+    except ValueError as exc:
+        assert "unsupported retrieval fusion" in str(exc)
+    else:
+        raise AssertionError("invalid fusion must be rejected")
+
+
+def test_embedding_cache_dir_resolves_against_writable_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(embeddings_module, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
+    backend = create_embeddings_backend(
+        {
+            "retrieval": {
+                "embeddings": {
+                    "enabled": True,
+                    "backend": "onnx",
+                    "model": "demo-model",
+                    "cache_dir": "models",
+                }
+            }
+        }
+    )
+
+    assert backend is not None
+    assert backend.cache_dir == str((tmp_path / "models").resolve())
+
+
+def test_cross_encoder_reranker_is_explicit_and_uses_data_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(embeddings_module, "get_settings", lambda: SimpleNamespace(data_dir=str(tmp_path)))
+    assert create_reranker_backend({"retrieval": {"reranker": {"enabled": False}}}) is None
+
+    backend = create_reranker_backend(
+        {
+            "retrieval": {
+                "reranker": {
+                    "enabled": True,
+                    "backend": "onnx_cross_encoder",
+                    "model": "demo-reranker",
+                    "cache_dir": "models/reranker",
+                }
+            }
+        }
+    )
+
+    assert backend is not None
+    assert backend.model_name == "demo-reranker"
+    assert backend.cache_dir == str((tmp_path / "models" / "reranker").resolve())
 
 
 def test_canon_parser_extracts_relations_and_context(tmp_path):

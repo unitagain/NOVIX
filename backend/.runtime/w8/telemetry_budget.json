@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "healthy": true,
+  "checks": {
+    "series_cardinality": true,
+    "event_buffer": true,
+    "histogram_samples": true
+  },
+  "series": 2,
+  "series_limit": 16,
+  "event_count": 40,
+  "event_limit": 100,
+  "histogram_samples": 20,
+  "histogram_sample_limit_per_series": 20
+}

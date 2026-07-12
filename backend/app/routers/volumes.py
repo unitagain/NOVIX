@@ -14,14 +14,16 @@ License: PolyForm Noncommercial License 1.0.0
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
-from app.dependencies import get_volume_storage
+from app.dependencies import get_draft_storage, get_volume_storage
 from app.schemas.volume import Volume, VolumeCreate, VolumeSummary, VolumeStats
 from app.utils.logger import get_logger
+from app.services.volume_stats_service import VolumeStatsService
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}/volumes", tags=["volumes"])
 volume_storage = get_volume_storage()
+volume_stats_service = VolumeStatsService(volume_storage=volume_storage, draft_storage=get_draft_storage())
 
 
 @router.get("", response_model=List[Volume])
@@ -98,7 +100,7 @@ async def save_volume_summary(project_id: str, volume_id: str, summary: VolumeSu
 @router.get("/{volume_id}/stats", response_model=VolumeStats)
 async def get_volume_stats(project_id: str, volume_id: str):
     """获取分卷统计信息"""
-    stats = await volume_storage.get_volume_stats(project_id, volume_id)
+    stats = await volume_stats_service.get(project_id, volume_id)
     if not stats:
         raise HTTPException(status_code=404, detail=f"Volume {volume_id} not found")
     return stats
@@ -125,6 +127,4 @@ async def refresh_volume_summaries(project_id: str, request: RefreshSummaryReque
         raise HTTPException(status_code=400, detail="No volume IDs provided")
 
     orchestrator = get_orchestrator(project_id)
-    await orchestrator._refresh_volume_summaries(project_id, volume_ids)
-
-    return {"success": True, "refreshed": volume_ids}
+    return await orchestrator.application.volumes.refresh(project_id, volume_ids)

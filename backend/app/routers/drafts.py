@@ -141,8 +141,8 @@ async def reorder_chapters(project_id: str, body: ReorderChaptersRequest):
             chapter_order=body.chapter_order,
         )
         return {"success": True, "updated": [s.model_dump(mode="json") for s in updated]}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Draft update failed")
 
 
 @router.put("/{chapter}/content")

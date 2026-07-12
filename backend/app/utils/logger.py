@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -17,6 +18,27 @@ from app.config import get_settings
 
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+_SENSITIVE_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,;]+"),
+    re.compile(
+        r"(?i)((?:[\"']?(?:api[_-]?key|session[_-]?token|x-wenshape-session-token)[\"']?)\s*[:=]\s*[\"']?)"
+        r"[^\"'\s,;}]+"
+    ),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+)
+
+
+def redact_sensitive_text(value: object) -> str:
+    text = str(value)
+    for pattern in _SENSITIVE_PATTERNS:
+        text = pattern.sub(lambda match: f"{match.group(1)}[REDACTED]" if match.lastindex else "[REDACTED]", text)
+    return text
+
+
+class RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return redact_sensitive_text(super().format(record))
 
 
 def _resolve_log_dir() -> Path:
@@ -36,7 +58,7 @@ def _build_handlers(debug_enabled: bool) -> list[logging.Handler]:
 
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
-    console_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
+    console_handler.setFormatter(RedactingFormatter(LOG_FORMAT, DATE_FORMAT))
 
     file_handler = RotatingFileHandler(
         log_dir / "wenshape.log",
@@ -45,7 +67,7 @@ def _build_handlers(debug_enabled: bool) -> list[logging.Handler]:
         encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
+    file_handler.setFormatter(RedactingFormatter(LOG_FORMAT, DATE_FORMAT))
     return [console_handler, file_handler]
 
 

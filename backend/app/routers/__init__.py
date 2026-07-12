@@ -14,6 +14,8 @@ from .text_chunks import router as text_chunks_router
 from .evidence import router as evidence_router
 from .bindings import router as bindings_router
 from .memory_pack import router as memory_pack_router
+from .memory import router as memory_router
+from .actions import router as actions_router
 from .export import router as export_router
 
 __all__ = [
@@ -29,5 +31,7 @@ __all__ = [
     "evidence_router",
     "bindings_router",
     "memory_pack_router",
+    "memory_router",
+    "actions_router",
     "export_router",
 ]

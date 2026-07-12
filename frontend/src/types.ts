@@ -151,7 +151,10 @@ export interface EditSuggestResult {
 export interface LLMProfile {
   id: string; // 配置文件 ID
   provider: string; // 提供商名称
-  api_key?: string; // API Key
+  api_key?: string; // 仅写入；后端不会回传明文
+  has_api_key?: boolean;
+  api_key_mask?: string;
+  clear_api_key?: boolean;
   base_url?: string; // 自定义 Base URL
   deployed_models?: string[]; // Persisted deployed-model snapshot
   model: string; // 模型名称

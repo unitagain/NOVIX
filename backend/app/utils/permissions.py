@@ -29,13 +29,18 @@ PERMISSION_POLICY = {
     "edit_chapter": "ask",
     "add_fact": "ask",
     "confirm_facts": "ask",
+    "reject_facts": "ask",
     "update_card": "ask",
     "save_draft": "ask",
     "write_memory": "ask",
+    "confirm_memory": "ask",
+    "reject_memory": "ask",
+    "supersede_memory": "ask",
     # 删除 / 覆盖：高危 AI 自主操作默认阻断；显式人工流程应走单独 API/确认闸。
     "delete_project": "deny",
     "delete_chapter": "deny",
     "delete_fact": "deny",
+    "delete_memory": "deny",
     "overwrite_canon": "deny",
     "bulk_update_canon": "deny",
 }

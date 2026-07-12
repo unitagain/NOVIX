@@ -27,6 +27,8 @@ from app.storage.drafts import DraftStorage
 from app.storage.evidence_index import EvidenceIndexStorage
 from app.storage.bindings import ChapterBindingStorage
 from app.storage.memory_pack import MemoryPackStorage
+from app.storage.creative_memory import CreativeMemoryStorage
+from app.storage.pending_actions import PendingActionStorage
 from app.storage.volumes import VolumeStorage
 
 
@@ -106,6 +108,22 @@ def get_memory_pack_storage() -> MemoryPackStorage:
         MemoryPackStorage实例 / MemoryPackStorage instance
     """
     return MemoryPackStorage()
+
+
+@lru_cache(maxsize=1)
+def get_creative_memory_storage() -> CreativeMemoryStorage:
+    """
+    获取或创建CreativeMemoryStorage的单例实例
+
+    Get or create singleton CreativeMemoryStorage instance.
+    """
+    return CreativeMemoryStorage()
+
+
+@lru_cache(maxsize=1)
+def get_pending_action_storage() -> PendingActionStorage:
+    """获取或创建PendingActionStorage单例实例。"""
+    return PendingActionStorage()
 
 
 @lru_cache(maxsize=1)

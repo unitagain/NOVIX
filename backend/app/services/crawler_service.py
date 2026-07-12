@@ -23,6 +23,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from app.utils.logger import get_logger
+from app.error_contract import safe_error_code
 from .crawler_moegirl_helpers import (
     build_moegirl_page_url,
     build_moegirl_raw_url,
@@ -119,7 +120,7 @@ class CrawlerService:
         except Exception as exc:
             return {
                 "success": False,
-                "error": str(exc),
+                "error": safe_error_code(exc),
                 "url": url,
                 "content": "",
                 "links": [],
@@ -809,7 +810,7 @@ class CrawlerService:
         except Exception as exc:
             return {
                 "success": False,
-                "error": f"Failed to load page: {exc}",
+                "error": f"page_load_failed:{safe_error_code(exc)}",
                 "url": url,
                 "content": "",
                 "links": [],
@@ -1061,7 +1062,7 @@ class CrawlerService:
                 "error": result.get("error"),
             }
         except Exception as exc:
-            return {"success": False, "url": url, "error": str(exc)}
+            return {"success": False, "url": url, "error": safe_error_code(exc)}
 
     async def _scrape_single_async(
         self, session: aiohttp.ClientSession, url: str, semaphore: asyncio.Semaphore
@@ -1130,7 +1131,7 @@ class CrawlerService:
 
             except Exception as exc:
                 logger.error("Concurrent scraper failed %s: %s", url, exc)
-                return {"success": False, "url": url, "error": str(exc)}
+                return {"success": False, "url": url, "error": safe_error_code(exc)}
 
 
 crawler_service = CrawlerService()

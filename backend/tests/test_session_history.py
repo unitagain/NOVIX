@@ -88,18 +88,20 @@ def test_compact_folds_old_keeps_recent(tmp_path):
     assert [m["content"] for m in items[1:]] == [f"m{i}" for i in range(20, 30)]
 
 
-def test_compact_does_not_recompress_existing_summary(tmp_path):
+def test_compact_advances_epoch_and_replaces_runtime_projection(tmp_path):
     s = _store(tmp_path)
     for i in range(30):
         asyncio.run(s.append("p1", {"role": "user", "content": f"m{i}"}))
     asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=10, trigger_at=20))
-    # 再加 20 条触发二次压缩；已有 summary 应保留在头部、不被重复压
+    # 再加 20 条触发二次压缩；运行时只保留新 epoch 的投影，旧 artifact 仍可恢复。
     for i in range(30, 50):
         asyncio.run(s.append("p1", {"role": "user", "content": f"m{i}"}))
     asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=10, trigger_at=20))
     items = asyncio.run(s.load("p1"))
     summaries = [m for m in items if m.get("type") == "summary"]
-    assert len(summaries) == 2  # 头部既有摘要 + 新摘要，二者并存
+    assert len(summaries) == 1
+    assert summaries[0]["context_epoch"] == 2
+    assert summaries[0]["parent_epoch"] == 1
     assert [m["content"] for m in items if m.get("type") != "summary"][-3:] == ["m47", "m48", "m49"]
 
 

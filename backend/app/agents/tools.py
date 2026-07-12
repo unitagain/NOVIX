@@ -18,7 +18,9 @@ import asyncio
 import json
 from typing import Any, Dict, List
 
+from app.utils.chapter_id import ChapterIDValidator
 from app.utils.logger import get_logger
+from app.error_contract import safe_error_code, tool_error_text
 
 logger = get_logger(__name__)
 
@@ -41,7 +43,7 @@ def _format_card(card: Any) -> str:
             data = card.model_dump(exclude_none=True)
             if isinstance(data, dict):
                 return "\n".join(f"{k}: {v}" for k, v in data.items() if v)
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             pass
     if isinstance(card, dict):
         return "\n".join(f"{k}: {v}" for k, v in card.items() if v)
@@ -154,25 +156,44 @@ class WriterToolset:
     async def execute(self, name: str, arguments: Any) -> str:
         """根据工具名分发执行；任何异常都转为可读的工具结果文本，避免中断 agentic 循环。"""
         args = self._parse_args(arguments)
+        self._ensure_source_snapshot()
+        result = f"[未知工具：{name}]"
         try:
             if name == "lookup_card":
-                return await self._lookup_card(str(args.get("name") or "").strip())
-            if name == "query_canon":
-                return await self._query_canon(str(args.get("query") or "").strip(), self._as_int(args.get("top_k"), 8))
-            if name == "query_relations":
-                return await self._query_relations(
+                result = await self._lookup_card(str(args.get("name") or "").strip())
+            elif name == "query_canon":
+                result = await self._query_canon(
+                    str(args.get("query") or "").strip(), self._as_int(args.get("top_k"), 8)
+                )
+            elif name == "query_relations":
+                result = await self._query_relations(
                     str(args.get("entity") or "").strip(), str(args.get("other") or "").strip()
                 )
-            if name == "read_chapter":
-                return await self._read_chapter(str(args.get("chapter_id") or "").strip())
-            if name == "search_prose":
-                return await self._search_prose(
+            elif name == "read_chapter":
+                result = await self._read_chapter(str(args.get("chapter_id") or "").strip())
+            elif name == "search_prose":
+                result = await self._search_prose(
                     str(args.get("query") or "").strip(), self._as_int(args.get("top_k"), 5)
                 )
         except Exception as exc:
             logger.warning("Tool %s failed: %s", name, exc)
-            return f"[工具 {name} 执行出错：{exc}]"
-        return f"[未知工具：{name}]"
+            result = tool_error_text(name, exc)
+        self._ensure_source_snapshot()
+        return result
+
+    @staticmethod
+    def _ensure_source_snapshot() -> None:
+        from app.context_engine.turn_scope import current_turn_scope
+
+        scope = current_turn_scope()
+        plan = scope.active_plan if scope is not None else None
+        if plan is None or not hasattr(plan, "verify_sources"):
+            return
+        verification = plan.verify_sources()
+        if verification.get("valid") is True:
+            return
+        failure = (verification.get("failures") or [{}])[0]
+        raise RuntimeError(f"context_source_revision_unavailable:{failure.get('path') or failure.get('reason')}")
 
     @staticmethod
     def _parse_args(arguments: Any) -> Dict[str, Any]:
@@ -181,7 +202,7 @@ class WriterToolset:
         try:
             data = json.loads(arguments or "{}")
             return data if isinstance(data, dict) else {}
-        except Exception:
+        except (json.JSONDecodeError, TypeError):
             return {}
 
     @staticmethod
@@ -239,14 +260,25 @@ class WriterToolset:
             path = get_path(self.project_id)
             # 关系图为小文件、纯本地读取；放线程池避免阻塞事件循环。
             graph = await asyncio.to_thread(RelationGraph.load, path)
+            if self.current_chapter:
+                graph = RelationGraph(
+                    [
+                        relation
+                        for relation in graph.relations
+                        if not relation.chapter
+                        or not ChapterIDValidator.is_after(relation.chapter, self.current_chapter)
+                    ]
+                )
         except Exception as exc:
             logger.warning("query_relations load failed: %s", exc)
-            return f"[关系图加载失败：{exc}]"
+            return f"[relation_graph_error code={safe_error_code(exc)}]"
         return _truncate(graph.describe(entity, other or None))
 
     async def _read_chapter(self, chapter_id: str) -> str:
         if not chapter_id:
             return "[read_chapter 需要 chapter_id 参数]"
+        if self.current_chapter and ChapterIDValidator.is_after(chapter_id, self.current_chapter):
+            return f"章节『{chapter_id}』位于当前写作章节『{self.current_chapter}』之后，已按时间边界拒绝读取。"
         draft = getattr(self.adapter, "draft", None)
         content = None
         if draft is not None:
@@ -273,7 +305,17 @@ class WriterToolset:
         if not query:
             return "[search_prose 需要 query 参数]"
         top_k = max(1, min(top_k, 10))
-        chunks = await self.adapter.search_text_chunks(self.project_id, query, limit=top_k) or []
+        fetch_limit = min(50, max(top_k, top_k * 4))
+        chunks = await self.adapter.search_text_chunks(self.project_id, query, limit=fetch_limit) or []
+        if self.current_chapter:
+            chunks = [
+                chunk
+                for chunk in chunks
+                if not isinstance(chunk, dict)
+                or not chunk.get("chapter")
+                or not ChapterIDValidator.is_after(str(chunk.get("chapter") or ""), self.current_chapter)
+            ]
+        chunks = chunks[:top_k]
         if not chunks:
             return f"未在已写正文中检索到与『{query}』相关的片段。"
         lines = [f"【正文检索：『{query}』】"]

@@ -8,10 +8,16 @@ from .base import BaseAgent
 from .archivist import ArchivistAgent
 from .writer import WriterAgent
 from .editor import EditorAgent
+from .agent_task import AgentTask, AgentTaskKind, AgentTaskRunner, AgentTaskStatus, MergePolicy
 
 __all__ = [
     "BaseAgent",
     "ArchivistAgent",
     "WriterAgent",
     "EditorAgent",
+    "AgentTask",
+    "AgentTaskKind",
+    "AgentTaskRunner",
+    "AgentTaskStatus",
+    "MergePolicy",
 ]

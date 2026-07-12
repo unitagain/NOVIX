@@ -34,7 +34,7 @@ def test_execute_plan_runs_steps_in_order(tmp_path):
         calls.append(step["id"])
         return f"ran {step['id']}"
 
-    result = asyncio.run(orch.execute_plan("proj", "p1", step_runner=runner))
+    result = asyncio.run(orch.application.plans.execute_plan("proj", "p1", step_runner=runner))
     assert result["success"]
     assert calls == [1, 2]  # 串行顺序（红线 1）
     assert result["plan"]["status"] == "done"
@@ -48,7 +48,7 @@ def test_execute_plan_persists_progress(tmp_path):
     async def runner(pid, step):
         return "ok"
 
-    asyncio.run(orch.execute_plan("proj", "p1", step_runner=runner))
+    asyncio.run(orch.application.plans.execute_plan("proj", "p1", step_runner=runner))
     reloaded = asyncio.run(orch.plan_store.read_plan("proj", "p1"))  # 从文件重读
     assert reloaded["status"] == "done"
     assert reloaded["steps"][0]["status"] == "done"
@@ -71,7 +71,7 @@ def test_execute_plan_resumes_skipping_done(tmp_path):
         calls.append(step["id"])
         return "ok"
 
-    asyncio.run(orch.execute_plan("proj", "p1", step_runner=runner))
+    asyncio.run(orch.application.plans.execute_plan("proj", "p1", step_runner=runner))
     assert calls == [2]  # 断点续传：跳过已完成的 step 1
 
 
@@ -86,10 +86,10 @@ def test_execute_plan_interrupt(tmp_path):
     )
 
     async def runner(pid, step):
-        orch._cancelled = True  # 第一步后用户打断
+        orch.cancel_session()
         return "ok"
 
-    result = asyncio.run(orch.execute_plan("proj", "p1", step_runner=runner))
+    result = asyncio.run(orch.application.plans.execute_plan("proj", "p1", step_runner=runner))
     assert result["plan"]["status"] == "interrupted"
     assert result["plan"]["steps"][0]["status"] == "done"  # 已完成的保留
 
@@ -101,7 +101,7 @@ def test_execute_plan_step_failure_recorded(tmp_path):
     async def runner(pid, step):
         raise ValueError("boom")
 
-    result = asyncio.run(orch.execute_plan("proj", "p1", step_runner=runner))
+    result = asyncio.run(orch.application.plans.execute_plan("proj", "p1", step_runner=runner))
     assert result["plan"]["steps"][0]["status"] == "failed"
     assert "boom" in result["plan"]["steps"][0]["error"]
 
@@ -124,7 +124,7 @@ def test_execute_plan_stops_on_failure(tmp_path):
             raise ValueError("boom")
         return "ok"
 
-    result = asyncio.run(orch.execute_plan("proj", "p1", step_runner=runner))
+    result = asyncio.run(orch.application.plans.execute_plan("proj", "p1", step_runner=runner))
     assert calls == [1]  # 第 2 步未执行（不在坏状态上盲跑）
     assert result["success"] is False
     assert result["plan"]["status"] == "failed"
@@ -133,5 +133,5 @@ def test_execute_plan_stops_on_failure(tmp_path):
 
 
 def test_execute_plan_not_found(tmp_path):
-    result = asyncio.run(_orch(tmp_path).execute_plan("proj", "nope"))
+    result = asyncio.run(_orch(tmp_path).application.plans.execute_plan("proj", "nope"))
     assert not result["success"]

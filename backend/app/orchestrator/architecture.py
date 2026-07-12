@@ -35,6 +35,17 @@ class RuntimeStage(str, Enum):
     FALLBACK_WORKFLOW = "fallback_workflow"
 
 
+class RuntimeService(str, Enum):
+    """P11 service owners for the main turn path."""
+
+    TURN_RUNTIME = "TurnRuntime"
+    CONTEXT_PLANNING = "ContextPlanningService"
+    CONTEXT_ASSEMBLY = "ContextAssemblyService"
+    WRITING = "WritingService"
+    COMMIT = "CommitCoordinator"
+    POST_TURN = "PostTurnService"
+
+
 RUNTIME_MAIN_PATH: Tuple[Dict[str, str], ...] = (
     {
         "stage": RuntimeStage.INTENT_ROUTING.value,
@@ -44,7 +55,7 @@ RUNTIME_MAIN_PATH: Tuple[Dict[str, str], ...] = (
     {
         "stage": RuntimeStage.CONTEXT_PLAN.value,
         "owner": ControlOwner.WORKFLOW.value,
-        "responsibility": "select context sources, budget, degradation, and trace references",
+        "responsibility": "select fresh context sources, tool/skill loadout, trust labels, budget, degradation, and trace references",
     },
     {
         "stage": RuntimeStage.WRITER_AGENT.value,
@@ -76,28 +87,112 @@ RUNTIME_MAIN_PATH: Tuple[Dict[str, str], ...] = (
 
 SERVICE_BOUNDARIES: Tuple[Dict[str, str], ...] = (
     {
+        "name": "turn_runtime",
+        "current": "TurnRuntime explicit state machine",
+        "target": "TurnRuntime explicit state machine",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
         "name": "context_preparation",
-        "current": "ContextMixin._prepare_writer_context + Writer.gather_context_via_tools",
-        "target": "ContextPlan service",
+        "current": "ContextPlanningService + ContextAssemblyService",
+        "target": "ContextPlanningService + ContextAssemblyService",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "writing_execution",
+        "current": "WritingService",
+        "target": "WritingService",
+        "owner": ControlOwner.AGENT.value,
+    },
+    {
+        "name": "commit_coordination",
+        "current": "CommitCoordinator for orchestrated draft write-back",
+        "target": "CommitCoordinator",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "post_turn",
+        "current": "PostTurnService",
+        "target": "PostTurnService",
+        "owner": ControlOwner.WORKER.value,
+    },
+    {
+        "name": "compact_lifecycle",
+        "current": "CompactArtifactV2 deterministic/semantic verification + recoverable epochs",
+        "target": "Verified and recoverable context projection",
+        "owner": ControlOwner.WORKER.value,
+    },
+    {
+        "name": "memory_lifecycle",
+        "current": "MemoryLifecycleService + MemoryRecordV2",
+        "target": "Governed lifecycle and conflict-isolated recall",
         "owner": ControlOwner.WORKFLOW.value,
     },
     {
         "name": "plan_execution",
-        "current": "Orchestrator.create_plan / execute_plan / _run_plan_step",
-        "target": "Plan application service",
+        "current": "PlanExecutionService",
+        "target": "PlanExecutionService",
         "owner": ControlOwner.WORKFLOW.value,
     },
     {
         "name": "finalize_analysis",
-        "current": "AnalysisMixin._analyze_content and canon persistence helpers",
-        "target": "Finalize pipeline",
+        "current": "FinalizePipeline delegates analysis to AnalysisMixin",
+        "target": "FinalizePipeline + incremental AnalysisMixin extraction",
         "owner": ControlOwner.WORKFLOW.value,
     },
     {
         "name": "isolated_tasks",
-        "current": "tool loop, plan research, compact, creative memory extraction",
-        "target": "AgentTask worker boundary",
+        "current": "WorkerTaskService + AgentTaskRunner; plan research, session agent-task, and untrusted content review use worker boundary",
+        "target": "WorkerTaskService for retrieve/review/summarize/memory_extract/untrusted content",
         "owner": ControlOwner.WORKER.value,
+    },
+    {
+        "name": "retrieval_pipeline",
+        "current": "ContextSelectEngine facade over candidate/filter/index/vector/fusion/trace components",
+        "target": "Composable retrieval pipeline",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "benchmark_pipeline",
+        "current": "Harness facade over artifacts/models/statistics/report and P12 context A/B modules",
+        "target": "Composable benchmark pipeline",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "eval_campaign",
+        "current": "CampaignRunner + CampaignStore + release quality manifest",
+        "target": "Resumable budgeted cross-provider evidence campaign",
+        "owner": ControlOwner.WORKER.value,
+    },
+    {
+        "name": "provider_reliability",
+        "current": "Gateway reliability controller + total deadline + SQLite idempotency + content-free egress ledger",
+        "target": "Timeout/retry/rate-limit/circuit/idempotency/capability control",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "durable_jobs",
+        "current": "DurableTaskQueue + SQLite WAL + heartbeat/fencing/cancellation/retry/dead-letter worker",
+        "target": "Restart-safe background execution",
+        "owner": ControlOwner.WORKER.value,
+    },
+    {
+        "name": "control_plane",
+        "current": "SQLiteControlStore owns schema migration, jobs, leases, idempotency and revisions",
+        "target": "Single-host transactional control plane separated from content files",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "operations",
+        "current": "Generation-consistent ProjectMaintenanceService + revision-bound ReleaseGate",
+        "target": "Verified backup/restore/migration/corruption/release controls",
+        "owner": ControlOwner.WORKFLOW.value,
+    },
+    {
+        "name": "observability",
+        "current": "OpenTelemetry SDK pipeline + privacy-safe file/OTLP exporter + windowed SLO evaluator",
+        "target": "Standard traces, low-cardinality metrics, error budgets and actionable alerts",
+        "owner": ControlOwner.WORKFLOW.value,
     },
 )
 

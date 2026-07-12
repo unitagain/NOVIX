@@ -13,6 +13,8 @@ License: PolyForm Noncommercial License 1.0.0
 
 from typing import Tuple
 
+from app.error_contract import DomainError, ErrorCategory, normalize_error_code
+
 # Error message patterns for classification
 # 用于分类的错误消息模式
 
@@ -207,7 +209,7 @@ def get_retry_delay(attempt: int, base_delays: list = None, max_delay: float = 6
     return delay + jitter
 
 
-class LLMError(Exception):
+class LLMError(DomainError):
     """
     结构化 LLM 错误，携带提供商/分类信息以便精准报告
     Structured LLM error carrying provider/classification info for precise error reporting.
@@ -223,7 +225,25 @@ class LLMError(Exception):
         is_retryable: bool = False,
         original: Exception | None = None,
     ):
-        super().__init__(message)
+        normalized_reason = normalize_error_code(reason, "provider_error")
+        if "auth" in normalized_reason or "api_key" in normalized_reason:
+            category = ErrorCategory.AUTHENTICATION
+        elif "permission" in normalized_reason or "forbidden" in normalized_reason:
+            category = ErrorCategory.PERMISSION
+        elif "rate" in normalized_reason or "429" in normalized_reason or "quota" in normalized_reason:
+            category = ErrorCategory.RATE_LIMIT
+        elif "timeout" in normalized_reason or "deadline" in normalized_reason:
+            category = ErrorCategory.TIMEOUT
+        else:
+            category = ErrorCategory.PROVIDER
+        super().__init__(
+            message,
+            code=f"llm.{normalized_reason}",
+            category=category,
+            retryable=is_retryable,
+            safe_detail="LLM provider request failed",
+            metadata={"provider": normalize_error_code(provider, "unknown")},
+        )
         self.provider = provider
         self.reason = reason
         self.status_code = status_code
@@ -231,11 +251,12 @@ class LLMError(Exception):
         self.original = original
 
     def to_dict(self) -> dict:
-        """Return a JSON-serializable dict for API responses."""
+        """Return a privacy-safe, JSON-serializable public representation."""
         return {
-            "detail": str(self),
+            "code": self.code,
+            "detail": self.safe_detail,
             "provider": self.provider,
-            "reason": self.reason,
+            "reason": normalize_error_code(self.reason, "provider_error"),
             "status_code": self.status_code,
             "is_retryable": self.is_retryable,
         }

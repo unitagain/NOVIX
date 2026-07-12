@@ -1,5 +1,4 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const process = require("node:process");
 
 function makeListenerBinder(channel) {
   return (listener) => {

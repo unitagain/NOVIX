@@ -8,6 +8,8 @@ import asyncio
 
 from app.llm_gateway.gateway import LLMGateway
 from app.llm_gateway.providers.base import BaseLLMProvider
+from app.context_engine.context_plan import ContextPlanV2
+from app.context_engine.turn_scope import bind_turn_scope, new_turn_scope
 
 
 class _FakeProvider(BaseLLMProvider):
@@ -83,3 +85,36 @@ def test_chat_backward_compatible_text_path():
     assert resp["content"] == "ok"
     # 旧路径：未传任何新参，provider 收到的应全为 None
     assert all(v is None for v in gw.providers["fake"].last_kwargs.values())
+
+
+def test_gateway_binds_request_to_active_context_plan():
+    gw = _make_gateway()
+    scope = new_turn_scope(project_id="p", turn_id="turn_gateway")
+    plan = ContextPlanV2(
+        plan_id="plan_gateway",
+        turn_id=scope.turn_id,
+        project_id="p",
+        chapter_id="V1C001",
+        intent="write",
+        route_path="agentic_writer",
+        context_epoch=scope.turn_id,
+        budget={"input_tokens": 1000, "output_reserve_tokens": 100},
+        tool_loadout=[{"name": "lookup_card"}],
+    )
+    scope.activate_plan(plan)
+    tools = [{"type": "function", "function": {"name": "lookup_card", "parameters": {}}}]
+
+    async def scenario():
+        with bind_turn_scope(scope):
+            return await gw.chat(
+                [{"role": "user", "content": "hi"}],
+                provider="fake",
+                max_tokens=50,
+                tools=tools,
+            )
+
+    asyncio.run(scenario())
+    assert len(scope.model_requests) == 1
+    assert scope.model_requests[0]["plan_id"] == "plan_gateway"
+    assert scope.model_requests[0]["planned"] is True
+    assert scope.model_requests[0]["request_fingerprint"]

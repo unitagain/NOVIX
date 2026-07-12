@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from app.schemas.volume import Volume, VolumeCreate, VolumeStats, VolumeSummary
+from app.schemas.volume import Volume, VolumeCreate, VolumeSummary
 from app.storage.base import BaseStorage
 from app.storage.file_lock import get_file_lock
 
@@ -110,36 +110,6 @@ class VolumeStorage(BaseStorage):
 
         data = await self.read_yaml(file_path)
         return VolumeSummary(**data)
-
-    async def get_volume_stats(self, project_id: str, volume_id: str) -> Optional[VolumeStats]:
-        """Get volume stats derived from drafts."""
-        volume = await self.get_volume(project_id, volume_id)
-        if not volume:
-            return None
-
-        from app.storage.drafts import DraftStorage
-
-        draft_storage = DraftStorage(self.data_dir.as_posix())
-        chapters = await draft_storage.list_chapters(project_id)
-        volume_chapters = [ch for ch in chapters if ch.startswith(volume_id)]
-
-        total_words = 0
-        for chapter in volume_chapters:
-            try:
-                draft = await draft_storage.get_latest_draft(project_id, chapter)
-                if draft:
-                    total_words += draft.word_count
-            except Exception:
-                pass
-
-        return VolumeStats(
-            volume_id=volume_id,
-            title=volume.title,
-            chapter_count=len(volume_chapters),
-            total_words=total_words,
-            created_at=volume.created_at,
-            updated_at=volume.updated_at,
-        )
 
     def _get_volume_file_path(self, project_id: str, volume_id: str) -> Path:
         """Get volume metadata file path."""

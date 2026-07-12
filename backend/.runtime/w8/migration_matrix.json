@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "checks": {
+    "legacy_to_current": true,
+    "idempotent_reapply": true,
+    "failed_upgrade_preserves_source": true,
+    "post_failure_scan": true
+  },
+  "source_fingerprint": "d3a352eaf4614676caff9537671c3f8ffd90a80f0343083f1ea247b9387bc236"
+}

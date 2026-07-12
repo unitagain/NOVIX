@@ -16,14 +16,17 @@ from typing import Dict, List, Optional, Literal
 import time
 from collections import OrderedDict
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from app.orchestrator import Orchestrator, SessionStatus
+from app.error_contract import error_envelope
+from app.agents.agent_task import MergePolicy
 from app.routers.websocket import broadcast_progress
 from app.schemas.draft import ChapterSummary
 from app.utils.language import normalize_language
 from app.utils.text import normalize_for_compare
+from app.jobs.runtime import enqueue_session_compact
 
 router = APIRouter(tags=["session"])
 
@@ -93,13 +96,13 @@ def get_orchestrator(project_id: str, request_language: Optional[str] = None) ->
             if project_yaml.exists():
                 data = yaml.safe_load(project_yaml.read_text(encoding="utf-8")) or {}
                 language = normalize_language(data.get("language"), default="zh")
-        except Exception:
+        except (OSError, UnicodeError, TypeError, ValueError):
             pass
         if explicit:
             language = explicit
         _orchestrators[project_id] = Orchestrator(progress_callback=_progress_callback, language=language)
     else:
-        _orchestrators[project_id].progress_callback = _progress_callback
+        _orchestrators[project_id].set_progress_callback(_progress_callback)
         if explicit:
             _orchestrators[project_id].set_language(explicit)
         _orchestrators.move_to_end(project_id)
@@ -251,6 +254,19 @@ _HISTORY_COMPACT_TRIGGER = 120
 _HISTORY_KEEP_RECENT = 40
 
 
+async def _compact_with_plan(orchestrator: Orchestrator, project_id: str) -> dict:
+    return await orchestrator.application.commands.run(
+        project_id=project_id,
+        chapter="",
+        intent="compact",
+        route_path="compress",
+        target_word_count=512,
+        operation=lambda: orchestrator.application.conversation.compact(
+            project_id, keep_recent=_HISTORY_KEEP_RECENT, trigger_at=_HISTORY_COMPACT_TRIGGER
+        ),
+    )
+
+
 class ReviewRequest(BaseModel):
     """Request for on-demand consistency review (Phase 6 · Evaluator)。
 
@@ -261,17 +277,36 @@ class ReviewRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=500000, description="Draft content to review")
 
 
+class AgentTaskRequest(BaseModel):
+    """Request for a P4 isolated worker task."""
+
+    task_id: Optional[str] = Field(None, max_length=80, description="Optional client task id")
+    kind: str = Field(..., description="retrieve | review | memory_extract | summarize | consistency_check")
+    input: Dict[str, object] = Field(default_factory=dict, description="Task input payload")
+    permissions: List[str] = Field(default_factory=list, description="Operations requested by the worker")
+    budget: Dict[str, object] = Field(default_factory=dict, description="Token/time/result budget metadata")
+    output_schema: Dict[str, object] = Field(default_factory=dict, description="Expected structured output shape")
+    merge_policy: str = Field(MergePolicy.NO_MERGE.value, description="auto | user_confirm | no_merge")
+
+
 @router.post("/projects/{project_id}/session/start")
 async def start_session(project_id: str, request: StartSessionRequest):
     """Start a new writing session."""
     orchestrator = get_orchestrator(project_id, request.language)
-    return await orchestrator.start_session(
+    return await orchestrator.application.commands.run(
         project_id=project_id,
         chapter=request.chapter,
-        chapter_title=request.chapter_title,
-        chapter_goal=request.chapter_goal,
+        intent="write",
+        route_path="fallback_workflow",
         target_word_count=request.target_word_count,
-        character_names=request.character_names,
+        operation=lambda: orchestrator.start_session(
+            project_id=project_id,
+            chapter=request.chapter,
+            chapter_title=request.chapter_title,
+            chapter_goal=request.chapter_goal,
+            target_word_count=request.target_word_count,
+            character_names=request.character_names,
+        ),
     )
 
 
@@ -291,12 +326,18 @@ async def get_session_status(project_id: str):
 async def submit_feedback(project_id: str, request: FeedbackRequest):
     """Submit user feedback."""
     orchestrator = get_orchestrator(project_id)
-    return await orchestrator.process_feedback(
+    return await orchestrator.application.commands.run(
         project_id=project_id,
         chapter=request.chapter,
-        feedback=request.feedback,
-        action=request.action,
-        rejected_entities=request.rejected_entities,
+        intent="edit",
+        route_path="fallback_workflow",
+        operation=lambda: orchestrator.process_feedback(
+            project_id=project_id,
+            chapter=request.chapter,
+            feedback=request.feedback,
+            action=request.action,
+            rejected_entities=request.rejected_entities,
+        ),
     )
 
 
@@ -309,7 +350,7 @@ async def suggest_edit(project_id: str, request: EditSuggestRequest):
         if request.chapter:
             mode = str(request.context_mode or "quick").strip().lower()
             force_refresh = mode == "full"
-            memory_pack_payload = await orchestrator.ensure_memory_pack(
+            memory_pack_payload = await orchestrator.application.context.ensure_memory_pack(
                 project_id=project_id,
                 chapter=request.chapter,
                 chapter_goal="",
@@ -359,7 +400,7 @@ async def suggest_edit(project_id: str, request: EditSuggestRequest):
         return {"success": True, "revised_content": revised, "word_count": len(revised)}
     except ValueError as exc:
         # Expected: patch ops could not be applied, surface as user-facing error (no 500).
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": error_envelope(exc).to_dict()}
 
 
 @router.post("/projects/{project_id}/session/classify-intent")
@@ -387,7 +428,11 @@ async def create_plan(project_id: str, request: PlanRequest):
     无可拆步骤则 success=False，前端回退普通撰写/编辑。生成事件经 WS 透明展示。
     """
     orchestrator = get_orchestrator(project_id)
-    plan = await orchestrator.create_plan(project_id, goal=request.goal, context_hint=request.context_hint)
+    plan = await orchestrator.application.plans.create_plan(
+        project_id,
+        goal=request.goal,
+        context_hint=request.context_hint,
+    )
     if not plan:
         return {"success": False, "error": "no_plan", "message": "指令未能拆出可执行步骤，请直接撰写或编辑。"}
     return {"success": True, "plan": plan}
@@ -397,7 +442,7 @@ async def create_plan(project_id: str, request: PlanRequest):
 async def execute_plan(project_id: str, plan_id: str):
     """Phase 11：串行执行已生成的 plan（正文主线单线程；每步透明事件 + 可打断 + 断点续传）。"""
     orchestrator = get_orchestrator(project_id)
-    return await orchestrator.execute_plan(project_id, plan_id)
+    return await orchestrator.application.plans.execute_plan(project_id, plan_id)
 
 
 @router.post("/projects/{project_id}/session/chat")
@@ -424,37 +469,37 @@ async def chat_turn(project_id: str, request: ChatTurnRequest):
 async def get_session_history(project_id: str, limit: int = 0):
     """读取项目的持久化对话历史（Git-Native）。前端开项目时加载，取代脆弱的 localStorage 单点。"""
     orchestrator = get_orchestrator(project_id)
-    messages = await orchestrator.load_conversation(project_id, limit=max(0, int(limit or 0)))
+    messages = await orchestrator.application.conversation.load(project_id, limit=max(0, int(limit or 0)))
     return {"success": True, "messages": messages}
 
 
 @router.post("/projects/{project_id}/session/history")
-async def append_session_history(project_id: str, request: AppendMessageRequest, background: BackgroundTasks):
+async def append_session_history(project_id: str, request: AppendMessageRequest):
     """追加一条对话消息到持久历史；过长时后台 compact（压缩早期轮次 + 提炼作者偏好）。"""
     orchestrator = get_orchestrator(project_id)
-    item = await orchestrator.append_conversation(
+    item = await orchestrator.application.conversation.append(
         project_id,
         {"role": request.role, "content": request.content, "type": request.type, "ts": request.ts},
     )
     count = await orchestrator.session_history.count(project_id)
     should_compact = count > _HISTORY_COMPACT_TRIGGER
+    queued_job = None
     if should_compact:
-        background.add_task(
-            orchestrator.compact_conversation,
-            project_id,
-            keep_recent=_HISTORY_KEEP_RECENT,
-            trigger_at=_HISTORY_COMPACT_TRIGGER,
-        )
-    return {"success": True, "item": item, "count": count, "compacting": should_compact}
+        queued_job = await enqueue_session_compact(project_id, history_count=count)
+    return {
+        "success": True,
+        "item": item,
+        "count": count,
+        "compacting": should_compact,
+        "compact_job_id": (queued_job or {}).get("id"),
+    }
 
 
 @router.post("/projects/{project_id}/session/history/compact")
 async def compact_session_history(project_id: str):
     """显式触发对话压缩 + 偏好提炼（前端可在一轮结束后调用）。"""
     orchestrator = get_orchestrator(project_id)
-    result = await orchestrator.compact_conversation(
-        project_id, keep_recent=_HISTORY_KEEP_RECENT, trigger_at=_HISTORY_COMPACT_TRIGGER
-    )
+    result = await _compact_with_plan(orchestrator, project_id)
     return {"success": True, **result}
 
 
@@ -473,19 +518,70 @@ async def review_consistency(project_id: str, request: ReviewRequest):
     return {"success": True, **result}
 
 
+@router.get("/projects/{project_id}/session/history/compact/state")
+async def compact_session_state(project_id: str):
+    """Return the active context epoch without exposing conversation text."""
+    orchestrator = get_orchestrator(project_id)
+    return {"success": True, "context_epoch": await orchestrator.session_history.current_context_epoch(project_id)}
+
+
+@router.get("/projects/{project_id}/session/history/compact/{artifact_id}")
+async def get_compact_artifact(project_id: str, artifact_id: str):
+    orchestrator = get_orchestrator(project_id)
+    artifact = await orchestrator.session_history.read_compact_artifact(project_id, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Compact artifact not found")
+    return {"success": True, "artifact": artifact}
+
+
+@router.get("/projects/{project_id}/session/history/compact/{artifact_id}/recover")
+async def recover_compact_sources(project_id: str, artifact_id: str):
+    """Recover source events referenced by one compact artifact."""
+    orchestrator = get_orchestrator(project_id)
+    artifact = await orchestrator.session_history.read_compact_artifact(project_id, artifact_id)
+    if artifact is None:
+        raise HTTPException(status_code=404, detail="Compact artifact not found")
+    items = await orchestrator.session_history.recover_compact_sources(project_id, artifact_id)
+    return {"success": True, "items": items, "count": len(items)}
+
+
+@router.post("/projects/{project_id}/session/agent-task")
+async def run_agent_task(project_id: str, request: AgentTaskRequest):
+    """Run an isolated worker task without mutating the main Writer state."""
+    orchestrator = get_orchestrator(project_id)
+    result = await orchestrator.worker_task_service.run_task(
+        project_id=project_id,
+        task_id=request.task_id,
+        kind=request.kind,
+        input=request.input or {},
+        permissions=request.permissions,
+        budget=request.budget,
+        output_schema=request.output_schema,
+        merge_policy=request.merge_policy,
+    )
+    return {"success": result.status == "completed", "task": result.to_dict()}
+
+
 @router.post("/projects/{project_id}/session/answer-questions")
 async def answer_questions(project_id: str, request: AnswerQuestionsRequest):
     """Continue session after answering pre-writing questions."""
     orchestrator = get_orchestrator(project_id, request.language)
     answers = [item.model_dump() for item in request.answers]
-    return await orchestrator.answer_questions(
+    return await orchestrator.application.commands.run(
         project_id=project_id,
         chapter=request.chapter,
-        chapter_title=request.chapter_title,
-        chapter_goal=request.chapter_goal,
+        intent="continue",
+        route_path="fallback_workflow",
         target_word_count=request.target_word_count,
-        answers=answers,
-        character_names=request.character_names,
+        operation=lambda: orchestrator.answer_questions(
+            project_id=project_id,
+            chapter=request.chapter,
+            chapter_title=request.chapter_title,
+            chapter_goal=request.chapter_goal,
+            target_word_count=request.target_word_count,
+            answers=answers,
+            character_names=request.character_names,
+        ),
     )
 
 
@@ -496,17 +592,7 @@ async def cancel_session(project_id: str):
 
     # 设置通用取消标志，让所有阶段的下一个检查点能感知到取消
     # Set cancel flag so every stage checkpoint can detect it
-    orchestrator._cancelled = True
-
-    # 同时取消正在进行的流任务（流式写作阶段）
-    # Also cancel the active stream task if writing is in progress
-    if orchestrator._stream_task:
-        orchestrator._stream_task.cancel()
-        orchestrator._stream_task = None
-
-    orchestrator.current_status = SessionStatus.IDLE
-    orchestrator.current_project_id = None
-    orchestrator.current_chapter = None
+    orchestrator.cancel_session()
 
     await broadcast_progress(
         project_id,
@@ -584,7 +670,7 @@ class SaveAnalysisBatchRequest(BaseModel):
 async def analyze_chapter(project_id: str, request: AnalyzeRequest):
     """Analyze chapter content manually."""
     orchestrator = get_orchestrator(project_id, request.language)
-    return await orchestrator.analyze_chapter(
+    return await orchestrator.application.analysis.analyze_chapter(
         project_id=project_id,
         chapter=request.chapter,
         content=request.content,
@@ -596,7 +682,7 @@ async def analyze_chapter(project_id: str, request: AnalyzeRequest):
 async def save_analysis(project_id: str, request: SaveAnalysisRequest):
     """Persist analysis output (summary, facts, cards)."""
     orchestrator = get_orchestrator(project_id, request.language)
-    return await orchestrator.save_analysis(
+    return await orchestrator.application.analysis.save_analysis(
         project_id=project_id,
         chapter=request.chapter,
         analysis=request.analysis.model_dump(),
@@ -608,14 +694,14 @@ async def save_analysis(project_id: str, request: SaveAnalysisRequest):
 async def analyze_sync(project_id: str, request: AnalyzeSyncRequest):
     """Batch analyze and overwrite summaries/facts/cards for selected chapters."""
     orchestrator = get_orchestrator(project_id, request.language)
-    return await orchestrator.analyze_sync(project_id, request.chapters)
+    return await orchestrator.application.analysis.analyze_sync(project_id, request.chapters)
 
 
 @router.post("/projects/{project_id}/session/analyze-batch")
 async def analyze_batch(project_id: str, request: AnalyzeBatchRequest):
     """Batch analyze chapters and return analysis payload."""
     orchestrator = get_orchestrator(project_id, request.language)
-    return await orchestrator.analyze_batch(project_id, request.chapters)
+    return await orchestrator.application.analysis.analyze_batch(project_id, request.chapters)
 
 
 @router.post("/projects/{project_id}/session/save-analysis-batch")
@@ -623,7 +709,7 @@ async def save_analysis_batch(project_id: str, request: SaveAnalysisBatchRequest
     """Persist analysis payload batch."""
     orchestrator = get_orchestrator(project_id, request.language)
     items = [{"chapter": item.chapter, "analysis": item.analysis.model_dump()} for item in request.items]
-    return await orchestrator.save_analysis_batch(
+    return await orchestrator.application.analysis.save_analysis_batch(
         project_id=project_id,
         items=items,
         overwrite=request.overwrite,

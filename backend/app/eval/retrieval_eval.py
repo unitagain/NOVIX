@@ -15,7 +15,25 @@ License: PolyForm Noncommercial License 1.0.0
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List
+
+
+def _distribution(values: List[float]) -> Dict[str, float]:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return {"mean": 0.0, "p50": 0.0, "p95": 0.0, "max": 0.0}
+
+    def nearest_rank(fraction: float) -> float:
+        index = max(0, min(len(ordered) - 1, int((len(ordered) * fraction) + 0.999999) - 1))
+        return ordered[index]
+
+    return {
+        "mean": sum(ordered) / len(ordered),
+        "p50": nearest_rank(0.50),
+        "p95": nearest_rank(0.95),
+        "max": ordered[-1],
+    }
 
 
 async def evaluate_retrieval_recall(
@@ -26,6 +44,7 @@ async def evaluate_retrieval_recall(
     project_id: str = "eval",
     item_types: List[str] | None = None,
     top_k: int = 5,
+    total_chapters: int = 0,
 ) -> Dict[str, Any]:
     """评测检索召回。
 
@@ -45,10 +64,17 @@ async def evaluate_retrieval_recall(
     expected_total = 0
     cases_hit = 0
     details: List[Dict[str, Any]] = []
+    latencies_ms: List[float] = []
+    selected_chars: List[float] = []
+    semantic_used_cases = 0
+    semantic_degraded_cases = 0
+    reranker_used_cases = 0
+    reranker_degraded_cases = 0
 
     for case in cases or []:
         query = str(case.get("query") or "").strip()
         expected = {str(x) for x in (case.get("expect") or []) if str(x).strip()}
+        started = time.perf_counter()
         items = (
             await select_engine.retrieval_select(
                 project_id=project_id,
@@ -56,9 +82,25 @@ async def evaluate_retrieval_recall(
                 item_types=item_types,
                 storage=storage,
                 top_k=top_k,
+                current_chapter=str(case.get("current_chapter") or case.get("chapter_id") or ""),
+                total_chapters=int(case.get("total_chapters") or total_chapters or 0),
             )
             or []
         )
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        trace_getter = getattr(select_engine, "get_last_ranking_trace", None)
+        ranking_trace = trace_getter() if callable(trace_getter) else {}
+        selected_text_chars = sum(len(str(getattr(item, "content", "") or "")) for item in items)
+        latencies_ms.append(elapsed_ms)
+        selected_chars.append(float(selected_text_chars))
+        if ranking_trace.get("semantic_used"):
+            semantic_used_cases += 1
+        if ranking_trace.get("semantic_degraded"):
+            semantic_degraded_cases += 1
+        if ranking_trace.get("reranker_used"):
+            reranker_used_cases += 1
+        if ranking_trace.get("reranker_degraded"):
+            reranker_degraded_cases += 1
         got_ids = {str(getattr(it, "id", "")) for it in items}
         matched = expected & got_ids
         matched_total += len(matched)
@@ -72,6 +114,9 @@ async def evaluate_retrieval_recall(
                 "retrieved": [str(getattr(it, "id", "")) for it in items],
                 "matched": sorted(matched),
                 "recall": (len(matched) / len(expected)) if expected else 0.0,
+                "latency_ms": elapsed_ms,
+                "selected_chars": selected_text_chars,
+                "ranking_trace": ranking_trace,
             }
         )
 
@@ -82,4 +127,10 @@ async def evaluate_retrieval_recall(
         "cases": details,
         "top_k": top_k,
         "num_cases": n,
+        "latency_ms": _distribution(latencies_ms),
+        "selected_chars": _distribution(selected_chars),
+        "semantic_used_cases": semantic_used_cases,
+        "semantic_degraded_cases": semantic_degraded_cases,
+        "reranker_used_cases": reranker_used_cases,
+        "reranker_degraded_cases": reranker_degraded_cases,
     }

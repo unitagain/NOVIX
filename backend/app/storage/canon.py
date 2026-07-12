@@ -10,6 +10,7 @@ import re
 from app.storage.base import BaseStorage
 from app.storage.indexed_cache import get_index_cache
 from app.utils.chapter_id import parse_chapter_number, ChapterIDValidator
+from app.utils.trust import trust_metadata
 from app.schemas.canon import Fact, TimelineEvent, CharacterState
 
 
@@ -79,6 +80,8 @@ class CanonStorage(BaseStorage):
             "confidence": confidence,
             "status": item.get("status") or "confirmed",
             "context_prefix": item.get("context_prefix") or item.get("context") or "",
+            "source_type": item.get("source_type") or "internal",
+            "trust_label": item.get("trust_label") or "trusted",
             "title": title,
             "content": content,
             "summary_ref": item.get("summary_ref"),
@@ -137,6 +140,7 @@ class CanonStorage(BaseStorage):
         """
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         fact_data = fact.model_dump()
+        fact_data = self._enforce_fact_trust_policy(fact_data)
         await self.append_jsonl(file_path, fact_data)
         # Incremental index update; invalidate on failure so next access rebuilds
         try:
@@ -148,6 +152,7 @@ class CanonStorage(BaseStorage):
         """Update an existing fact by ID."""
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         items = await self.read_jsonl(file_path)
+        fact_data = self._enforce_fact_trust_policy(fact_data)
         updated = False
         for idx, item in enumerate(items):
             if item.get("id") == fact_data.get("id"):
@@ -161,20 +166,50 @@ class CanonStorage(BaseStorage):
         await get_index_cache().invalidate(project_id)
         return True
 
+    def _enforce_fact_trust_policy(self, fact_data: Dict[str, Any]) -> Dict[str, Any]:
+        """External/untrusted facts always enter review, never confirmed automatically."""
+        item = dict(fact_data or {})
+        trust = trust_metadata(
+            source=item.get("source"),
+            source_type=item.get("source_type"),
+            trust_label=item.get("trust_label"),
+        )
+        item["source_type"] = trust["source_type"]
+        item["trust_label"] = trust["trust_label"]
+        if trust["trust_label"] == "untrusted":
+            item["status"] = "needs_review"
+        return item
+
     async def confirm_facts(self, project_id: str, fact_ids) -> int:
         """Phase 14：把指定事实标为 confirmed（作者审核后）；返回确认条数。"""
+        return await self.set_fact_status(project_id, fact_ids, "confirmed")
+
+    async def reject_facts(self, project_id: str, fact_ids) -> int:
+        """把指定待审事实标为 rejected，保留来源链但不进入高信任 canon。"""
+        return await self.set_fact_status(project_id, fact_ids, "rejected")
+
+    async def set_fact_status(self, project_id: str, fact_ids, status: str) -> int:
+        """批量更新事实状态；返回变更条数。"""
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         items = await self.read_jsonl(file_path)
         ids = {str(i) for i in (fact_ids or [])}
         changed = 0
         for item in items:
-            if str(item.get("id")) in ids and item.get("status") != "confirmed":
-                item["status"] = "confirmed"
+            if str(item.get("id")) in ids and item.get("status") != status:
+                item["status"] = status
                 changed += 1
         if changed:
             await self.write_jsonl(file_path, items)
             await get_index_cache().invalidate(project_id)
         return changed
+
+    async def list_facts_by_status(self, project_id: str, statuses) -> List[Dict[str, Any]]:
+        """按状态列出事实原始记录，供审核队列使用。"""
+        wanted = {str(s) for s in (statuses or []) if str(s)}
+        if not wanted:
+            return []
+        items = await self.get_all_facts_raw(project_id)
+        return [item for item in items if str(item.get("status") or "confirmed") in wanted]
 
     async def delete_fact(self, project_id: str, fact_id: str) -> bool:
         """Delete a fact by ID."""

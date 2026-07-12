@@ -188,6 +188,14 @@ def _fallback_config() -> Dict[str, Any]:
         "context_budget": {
             "total_tokens": 128000,
         },
+        "governance": {
+            "memory_auto_active": {
+                "enabled": True,
+                "min_confidence": 0.85,
+                "allowed_types": ["preference", "progress"],
+                "allowed_scopes": ["project", "chapter"],
+            }
+        },
     }
 
 

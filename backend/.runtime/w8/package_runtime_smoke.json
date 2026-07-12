@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "checks": {
+    "process_ready": true,
+    "unauthorized_blocked": true,
+    "authorized_http": true,
+    "spa_served": true,
+    "csp_present": true,
+    "websocket_authenticated": true
+  },
+  "status": {
+    "unauthorized": 401,
+    "authorized": 200
+  }
+}

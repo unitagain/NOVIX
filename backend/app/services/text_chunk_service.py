@@ -264,7 +264,7 @@ class TextChunkIndexService:
                 try:
                     data = json.loads(text[start:])
                     break
-                except Exception:
+                except json.JSONDecodeError:
                     continue
         if data is None:
             return {}
@@ -278,14 +278,14 @@ class TextChunkIndexService:
                     continue
                 try:
                     score = float(item.get("score"))
-                except Exception:
+                except (TypeError, ValueError):
                     score = 0.0
                 scores[item_id] = score
         elif isinstance(data, dict):
             for item_id, score in data.items():
                 try:
                     scores[str(item_id)] = float(score)
-                except Exception:
+                except (TypeError, ValueError):
                     continue
         return scores
 
@@ -310,7 +310,7 @@ class TextChunkIndexService:
             latest_mtime = max(latest_mtime, draft_path.stat().st_mtime)
             try:
                 text = await self.draft_storage.read_text(draft_path)
-            except Exception:
+            except (OSError, UnicodeError):
                 continue
             chunks = self.split_text_to_chunks(text)
             rel_path = draft_path.relative_to(self.draft_storage.get_project_path(project_id)).as_posix()

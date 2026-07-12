@@ -23,6 +23,7 @@ from app.orchestrator.orchestrator_helpers import full_canon_eligible
 from app.schemas.draft import SceneBrief
 from app.utils.text import normalize_newlines
 from app.utils.logger import get_logger
+from app.error_contract import record_degradation
 
 logger = get_logger(__name__)
 
@@ -725,8 +726,8 @@ class ContextMixin:
                                 "result": str(ev.get("result") or "")[:800],
                             }
                         )
-                except Exception:
-                    pass  # 透明化事件不得影响主流程
+                except Exception as exc:
+                    record_degradation("context_transparency_event", exc)
 
             if not inject_full_canon:
                 gathered = await self.writer.gather_context_via_tools(

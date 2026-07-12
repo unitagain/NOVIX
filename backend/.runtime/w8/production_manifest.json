@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "code_revision": "b6e858509eec01cbee2b919ad4a72647c2ac1f36",
+  "dirty_worktree": true,
+  "created_at": 1783845257.9269316,
+  "expires_at": 1786437257.9269316,
+  "checks": {
+    "soak": {
+      "success": true,
+      "classification": "synthetic",
+      "elapsed_seconds": 1835.4533922672272,
+      "cycles": 23,
+      "sessions": 2,
+      "requests": 56,
+      "tokens": 5211,
+      "compacts": 10,
+      "backups": 8,
+      "memory_growth_bytes": 591746,
+      "slo_calibration": {
+        "observed_cycle_p95_ms": 5642.213399998582,
+        "observed_request_failure_rate": 0.0,
+        "recommended_writer_turn_p95_ms": 8463.320099997873,
+        "recommended_error_rate_budget": 0.01
+      },
+      "runtime_smoke": {
+        "success": true,
+        "action": "agentic_write",
+        "runtime_state": "completed",
+        "route": "agentic_writer",
+        "plan_version": 2,
+        "llm_requests": 3
+      }
+    },
+    "crash_matrix": {
+      "success": true,
+      "boundaries": 7
+    },
+    "migration_matrix": {
+      "success": true,
+      "checks": {
+        "legacy_to_current": true,
+        "idempotent_reapply": true,
+        "failed_upgrade_preserves_source": true,
+        "post_failure_scan": true
+      }
+    },
+    "telemetry_budget": {
+      "success": true,
+      "healthy": true,
+      "checks": {
+        "series_cardinality": true,
+        "event_buffer": true,
+        "histogram_samples": true
+      },
+      "series": 2,
+      "series_limit": 16,
+      "event_count": 40,
+      "event_limit": 100,
+      "histogram_samples": 20,
+      "histogram_sample_limit_per_series": 20
+    },
+    "package_security": {
+      "success": true,
+      "sbom_components": 918,
+      "secret_findings": 0,
+      "files_scanned": 453,
+      "dependency_audit_success": true,
+      "package_file_count": 453,
+      "package_total_bytes": 528824075,
+      "package_tree_fingerprint": "8d3da71213e5b699d257dd90c6ed93382fa4704022c3eb8a11a83c3cf1ce1935",
+      "authenticode": {
+        "success": true,
+        "policy": "record_only",
+        "launchers": [
+          {
+            "path": "F:\\Github-WenShape\\WenShape-main\\desktop\\out\\wenshape-desktop-shell-win32-x64\\WenShape.exe",
+            "status": "NotSigned",
+            "signer_subject": "",
+            "signer_thumbprint": "",
+            "probe_success": true,
+            "probe_error": ""
+          }
+        ]
+      },
+      "release_channel": "development",
+      "runtime_smoke": {
+        "success": true,
+        "checks": {
+          "process_ready": true,
+          "unauthorized_blocked": true,
+          "authorized_http": true,
+          "spa_served": true,
+          "csp_present": true,
+          "websocket_authenticated": true
+        },
+        "status": {
+          "unauthorized": 401,
+          "authorized": 200
+        }
+      }
+    }
+  },
+  "required_checks": [
+    "crash_matrix",
+    "migration_matrix",
+    "package_security",
+    "soak",
+    "telemetry_budget"
+  ],
+  "missing_checks": [],
+  "artifacts": {
+    "soak.json": "c1ea2381d79a0cee1a26c987bd68fd1774e246c9ec029701afcdcfb21d7026ef",
+    "crash_matrix.json": "f4fde1c6281aba3cd1ebadb333740dd5dd3c60f3be5d4a72666893865e193bd6",
+    "migration_matrix.json": "e2d7c32b86c28106136c41cd7480719c4fc9a3978674f796438d555fd7e4883a",
+    "telemetry_budget.json": "425a24a46dc57a2994315ec493cca86b5ebb2107d7b5bbb757e3a8014bddf69f",
+    "package_security.json": "586687321a2d10ed9bfbf686625ca9bab833dd33d735fd0f64306b6b54678170",
+    "runtime_smoke.json": "cca09eb0f23bf191c1148a7ecd3907d72857d12411cf29ef071d37a41b88847b",
+    "sbom.cyclonedx.json": "6d0d0f2e935d568a70194836f9b295bee74a1c65d2dc28623d82f0316b944db1",
+    "package-tree.json": "a1a18a197abe9f5da5e7af05ff8bf701b41e9156e36977e31b2c8bffe0ab8eba",
+    "package_runtime_smoke.json": "2be980633e811f7ceeecf84e42eb0ca180469226e89e2d8f45aa7841d31aaf9f"
+  },
+  "success": true,
+  "fingerprint": "fffa52c9bfd3b2accb1f0f6f497842855421a5347c2821b99490f369f53bef03"
+}

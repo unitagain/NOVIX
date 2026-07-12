@@ -14,12 +14,18 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 from typing import List, Optional, Dict, Any
-import hashlib
+from contextvars import ContextVar
 import math
 from .models import ContextItem, ContextPriority, ContextType
 from .text_tokenizer import calculate_overlap_score, calculate_bm25_score, build_idf_table
-from .embeddings import cosine_similarity
-from .vector_store import VectorStore
+from .retrieval_pipeline import (
+    ContextualIndexBuilder,
+    RankingTraceRenderer,
+    ScoreFusion,
+    StorageCandidateSource,
+    TemporalScopeFilter,
+    VectorIndexAdapter,
+)
 from app.config import config
 from app.utils.chapter_id import ChapterIDValidator
 from app.utils.logger import get_logger
@@ -48,7 +54,15 @@ class ContextSelectEngine:
         MAX_CANDIDATES_PER_TYPE (int): 每种类型最大候选数量 / Max candidates per item type.
     """
 
-    def __init__(self, embeddings_service=None):
+    def __init__(
+        self,
+        embeddings_service=None,
+        *,
+        reranker_service=None,
+        fusion: Optional[str] = None,
+        semantic_rerank: Optional[bool] = None,
+        rerank_top_k: Optional[int] = None,
+    ):
         """
         初始化上下文选择引擎 / Initialize the context selection engine.
 
@@ -56,28 +70,78 @@ class ContextSelectEngine:
             embeddings_service: 可选的嵌入服务 / Optional embeddings service for semantic similarity.
                 需实现 ``async embed(texts) -> List[List[float]]``（见 context_engine.embeddings）。
                 为 None 时退化为纯词法（BM25 + 词重叠），行为与历史版本一致。
+            fusion: 可选融合策略覆盖（``rrf`` / ``weighted``），用于可重复 A/B。
+            reranker_service: 可选 cross-encoder 重排服务，需实现 ``async rerank(query, documents)``。
+            semantic_rerank: 兼容旧参数；现在表示是否请求真实 reranker，不再按 embedding cosine 重排。
+            rerank_top_k: 可选重排头部窗口覆盖。
         """
         self.embeddings = embeddings_service
+        self.reranker = reranker_service
         self._distance_alpha: float = float(config.get("context_budget", {}).get("fact_distance_alpha", 0.3))
         retrieval_cfg = config.get("retrieval", {}) or {}
         hybrid_cfg = retrieval_cfg.get("hybrid", {}) or {}
-        self._fusion: str = str(hybrid_cfg.get("fusion", "rrf")).lower()
+        configured_fusion = str(fusion if fusion is not None else hybrid_cfg.get("fusion", "rrf")).lower()
+        if configured_fusion not in {"rrf", "weighted"}:
+            raise ValueError(f"unsupported retrieval fusion: {configured_fusion}")
+        self._fusion: str = configured_fusion
         self._bm25_weight: float = float(hybrid_cfg.get("bm25_weight", 0.5))
         self._vector_weight: float = float(hybrid_cfg.get("vector_weight", 0.5))
-        self._semantic_rerank: bool = bool(retrieval_cfg.get("semantic_rerank", True))
-        self._rerank_top_k: int = int(retrieval_cfg.get("rerank_top_k", 16))
+        reranker_cfg = retrieval_cfg.get("reranker", {}) or {}
+        self._rerank_requested: bool = bool(
+            semantic_rerank if semantic_rerank is not None else reranker_cfg.get("enabled", False)
+        )
+        configured_rerank_top_k = rerank_top_k if rerank_top_k is not None else retrieval_cfg.get("rerank_top_k", 16)
+        self._rerank_top_k: int = max(1, int(configured_rerank_top_k))
         # 内容寻址的语义向量缓存（embed-once）：每个项目一个 VectorStore，按文本 sha1 存向量，
         # 落 canon/embeddings_cache.jsonl 跨查询复用，避免每次检索重嵌入全部候选。
         # Content-addressed embedding cache (embed-once), one VectorStore per project,
         # persisted to disk so each fact/card/chunk is embedded once and reused.
-        self._vec_stores: Dict[str, VectorStore] = {}
-        self._vec_paths: Dict[str, Any] = {}
+        self.candidate_source = StorageCandidateSource()
+        self.temporal_filter = TemporalScopeFilter()
+        self.index_builder = ContextualIndexBuilder()
+        self.vector_index = VectorIndexAdapter(self.embeddings) if self.embeddings is not None else None
+        self.score_fusion = ScoreFusion(
+            strategy=self._fusion,
+            bm25_weight=self._bm25_weight,
+            vector_weight=self._vector_weight,
+        )
+        self.trace_renderer = RankingTraceRenderer()
         # Phase 7 降级可见：语义检索是否已降级为纯词法（首次降级时 WARNING 一次并置此标志，供运行时查询）。
         self._semantic_degraded: bool = False
+        self._reranker_degraded: bool = False
+        self._ranking_trace_var: ContextVar[Dict[str, Any]] = ContextVar(
+            f"context_select_trace_{id(self)}", default={}
+        )
+        self._last_ranking_trace: Dict[str, Any] = {}
 
     def _semantic_enabled(self) -> bool:
         """是否启用语义打分（注入了嵌入后端即启用）。"""
         return self.embeddings is not None
+
+    def reset_ranking_trace(self) -> None:
+        """清空最近一次检索 ranking trace。"""
+        self._ranking_trace_var.set({})
+        self._last_ranking_trace = {}
+
+    def get_last_ranking_trace(self) -> Dict[str, Any]:
+        """返回最近一次 retrieval_select 的 ranking trace（JSON-safe）。"""
+        return dict(self._ranking_trace_var.get() or self._last_ranking_trace or {})
+
+    def _set_ranking_trace(self, value: Dict[str, Any]) -> None:
+        trace = dict(value or {})
+        self._ranking_trace_var.set(trace)
+        self._last_ranking_trace = trace
+
+    def get_retrieval_policy(self) -> Dict[str, Any]:
+        """返回当前检索策略，供 trace、benchmark 与运行时诊断使用。"""
+        return {
+            "semantic_enabled": self._semantic_enabled(),
+            "fusion": self._fusion,
+            "semantic_rerank": self._rerank_requested,
+            "reranker_available": self.reranker is not None,
+            "reranker_backend": type(self.reranker).__name__ if self.reranker is not None else None,
+            "rerank_top_k": self._rerank_top_k,
+        }
 
     # ========================================================================
     # 确定性选择：必须加载的关键项 / Deterministic Selection: Critical items
@@ -154,7 +218,7 @@ class ContextSelectEngine:
                 payload = card.model_dump(exclude_none=True)
                 if isinstance(payload, dict):
                     return "\n".join(f"{k}: {v}" for k, v in payload.items() if v)
-            except Exception:
+            except (AttributeError, TypeError, ValueError):
                 pass
         if isinstance(card, dict):
             return "\n".join(f"{k}: {v}" for k, v in card.items() if v)
@@ -172,14 +236,14 @@ class ContextSelectEngine:
         """
         根据总章节数动态计算候选上限 / Dynamically compute candidate limit based on chapter count.
 
-        Formula: min(max(50, total_chapters * 3), 500)
+        Formula: min(max(80, total_chapters * 8), 1000)
 
         | total_chapters | limit | note                          |
         |----------------|-------|-------------------------------|
-        | 1-16           | 50    | short work, keep default      |
-        | 50             | 150   | medium, wider coverage        |
-        | 100            | 300   | long, cover major facts       |
-        | 200+           | 500   | capped to avoid perf issues   |
+        | 1-16           | 80    | short work, avoid early fact truncation |
+        | 50             | 400   | medium, wider coverage        |
+        | 100            | 800   | long, cover major facts       |
+        | 200+           | 1000  | capped to avoid perf issues   |
 
         Args:
             total_chapters: 项目总章节数 / Total number of chapters in the project.
@@ -189,7 +253,7 @@ class ContextSelectEngine:
         """
         if total_chapters <= 0:
             return self.MAX_CANDIDATES_PER_TYPE
-        return min(max(50, total_chapters * 3), 500)
+        return min(max(80, total_chapters * 8), 1000)
 
     async def retrieval_select(
         self,
@@ -227,17 +291,26 @@ class ContextSelectEngine:
         """
         query = str(query or "").strip()
         if not query:
+            self.reset_ranking_trace()
             return []
 
         top_k = max(int(top_k or 0), 0)
         if top_k <= 0:
+            self.reset_ranking_trace()
             return []
 
         item_types = [str(t or "").strip().lower() for t in (item_types or []) if str(t or "").strip()]
         if not item_types:
+            self.reset_ranking_trace()
             return []
 
         candidates: List[ContextItem] = []
+        filter_trace = {
+            "future_fact_filter_active": bool(current_chapter and "fact" in item_types),
+            "future_facts_excluded": 0,
+            "future_text_chunk_filter_active": bool(current_chapter and "text_chunk" in item_types),
+            "future_text_chunks_excluded": 0,
+        }
         candidate_limit = self._get_candidate_limit(total_chapters)
         query_lower = query.lower()
         # 语义启用时不按"词法零分"丢弃候选——让语义召回有机会救回字面无重叠但语义相关的条目。
@@ -250,7 +323,7 @@ class ContextSelectEngine:
         fact_list = []
         if "fact" in item_types:
             try:
-                fact_list = await storage.get_all_facts(project_id) or []
+                fact_list = await self.candidate_source.facts(storage, project_id)
             except Exception as exc:
                 logger.warning("Failed to load facts: %s", exc)
                 fact_list = []
@@ -281,7 +354,7 @@ class ContextSelectEngine:
         # Character cards / 角色卡
         if "character" in item_types:
             try:
-                names = await storage.list_character_cards(project_id)
+                names = await self.candidate_source.character_names(storage, project_id)
             except Exception as exc:
                 logger.warning("Failed to list character cards: %s", exc)
                 names = []
@@ -293,15 +366,20 @@ class ContextSelectEngine:
             )
             for name in names[:candidate_limit]:
                 try:
-                    card = await storage.get_character_card(project_id, name)
+                    card = await self.candidate_source.character(storage, project_id, name)
                 except Exception:
                     card = None
                 if not card:
                     continue
                 content = self._format_card(card)
-                s = score_text(content)
+                metadata = {"name": name, "source_type": "character_card"}
+                index_text = self._contextual_index_text(content, metadata)
+                s = score_text(index_text)
                 if s <= 0 and not semantic:
                     continue
+                if index_text != content:
+                    metadata["_index_text"] = index_text
+                metadata["_lex"] = s
                 candidates.append(
                     ContextItem(
                         id=f"char_{name}",
@@ -309,14 +387,14 @@ class ContextSelectEngine:
                         content=content,
                         priority=ContextPriority.MEDIUM,
                         relevance_score=s,
-                        metadata={"name": name},
+                        metadata=metadata,
                     )
                 )
 
         # World cards / 世界观卡
         if "world" in item_types:
             try:
-                names = await storage.list_world_cards(project_id)
+                names = await self.candidate_source.world_names(storage, project_id)
             except Exception as exc:
                 logger.warning("Failed to list world cards: %s", exc)
                 names = []
@@ -327,15 +405,20 @@ class ContextSelectEngine:
             )
             for name in names[:candidate_limit]:
                 try:
-                    card = await storage.get_world_card(project_id, name)
+                    card = await self.candidate_source.world(storage, project_id, name)
                 except Exception:
                     card = None
                 if not card:
                     continue
                 content = self._format_card(card)
-                s = score_text(content)
+                metadata = {"name": name, "source_type": "world_card"}
+                index_text = self._contextual_index_text(content, metadata)
+                s = score_text(index_text)
                 if s <= 0 and not semantic:
                     continue
+                if index_text != content:
+                    metadata["_index_text"] = index_text
+                metadata["_lex"] = s
                 candidates.append(
                     ContextItem(
                         id=f"world_{name}",
@@ -343,7 +426,7 @@ class ContextSelectEngine:
                         content=content,
                         priority=ContextPriority.MEDIUM,
                         relevance_score=s,
-                        metadata={"name": name},
+                        metadata=metadata,
                     )
                 )
 
@@ -353,23 +436,43 @@ class ContextSelectEngine:
             # Sort by introduced_in descending so truncation keeps newest facts.
             sorted_facts = sorted(
                 fact_list,
-                key=lambda f: getattr(f, "introduced_in", "") or "",
+                key=lambda f: (
+                    ChapterIDValidator.calculate_weight(str(getattr(f, "introduced_in", "") or "")),
+                    str(getattr(f, "introduced_in", "") or ""),
+                ),
                 reverse=True,
             )
-            for idx, fact in enumerate(sorted_facts[:candidate_limit]):
+            eligible_facts = []
+            for fact in sorted_facts:
+                introduced_in = str(getattr(fact, "introduced_in", "") or "").strip()
+                if self.temporal_filter.is_future(introduced_in, current_chapter):
+                    filter_trace["future_facts_excluded"] += 1
+                    continue
+                eligible_facts.append(fact)
+
+            for idx, fact in enumerate(eligible_facts[:candidate_limit]):
                 try:
                     statement = str(getattr(fact, "statement", "") or "").strip()
                     fact_id = str(getattr(fact, "id", "") or "").strip() or f"F{idx + 1:04d}"
                     introduced_in = str(getattr(fact, "introduced_in", "") or "").strip()
                     context_prefix = str(getattr(fact, "context_prefix", "") or "").strip()
                     status = str(getattr(fact, "status", "confirmed") or "confirmed")
-                except Exception:
+                except (AttributeError, TypeError, ValueError):
                     continue
                 if not statement:
                     continue
                 # Contextual Retrieval：用「情境前缀 + 事实」作为检索索引文本（词法+语义都打它），
                 # 但展示/返回仍是原始 statement。前缀缺省时退化为纯 statement，行为不变。
-                index_text = f"{context_prefix} {statement}".strip() if context_prefix else statement
+                base_meta: Dict[str, Any] = {
+                    "source_type": "fact",
+                    "fact_id": fact_id,
+                    "introduced_in": introduced_in,
+                    "chapter": introduced_in,
+                    "status": status,
+                }
+                if context_prefix:
+                    base_meta["context_prefix"] = context_prefix
+                index_text = self._contextual_index_text(statement, base_meta)
                 s = score_text(index_text)
                 if s <= 0 and not semantic:
                     continue
@@ -382,8 +485,8 @@ class ContextSelectEngine:
                 # 避免未经作者确认的抽取事实污染检索 / 写作（"不污染主 canon" 的检索层落地）。
                 if status == "needs_review":
                     decay *= 0.6
-                fact_meta: Dict[str, Any] = {"introduced_in": introduced_in, "_decay": decay}
-                if context_prefix:
+                fact_meta: Dict[str, Any] = {**base_meta, "_decay": decay, "_lex": s}
+                if index_text != statement:
                     fact_meta["_index_text"] = index_text  # 供语义嵌入使用；返回前清理
                 candidates.append(
                     ContextItem(
@@ -399,7 +502,7 @@ class ContextSelectEngine:
         # Text chunks / 正文片段
         if "text_chunk" in item_types:
             try:
-                chunks = await storage.search_text_chunks(project_id, query, limit=candidate_limit)
+                chunks = await self.candidate_source.text_chunks(storage, project_id, query, limit=candidate_limit)
             except Exception as exc:
                 logger.warning("Failed to search text chunks: %s", exc)
                 chunks = []
@@ -409,9 +512,22 @@ class ContextSelectEngine:
                 text = str(chunk.get("text") or "").strip()
                 if not text:
                     continue
-                s = score_text(text)
+                chunk_chapter = str(chunk.get("chapter") or "").strip()
+                if self.temporal_filter.is_future(chunk_chapter, current_chapter):
+                    filter_trace["future_text_chunks_excluded"] += 1
+                    continue
+                metadata = {
+                    "source": chunk.get("source") or {},
+                    "chapter": chunk.get("chapter"),
+                    "source_type": "text_chunk",
+                }
+                index_text = self._contextual_index_text(text, metadata)
+                s = score_text(index_text)
                 if s <= 0 and not semantic:
                     continue
+                if index_text != text:
+                    metadata["_index_text"] = index_text
+                metadata["_lex"] = s
                 candidates.append(
                     ContextItem(
                         id=f"text_{idx}",
@@ -419,14 +535,34 @@ class ContextSelectEngine:
                         content=text,
                         priority=ContextPriority.LOW,
                         relevance_score=s,
-                        metadata={"source": chunk.get("source") or {}, "chapter": chunk.get("chapter")},
+                        metadata=metadata,
                     )
                 )
 
         if not candidates:
+            self._set_ranking_trace({
+                "query": query,
+                "item_types": item_types,
+                "candidate_count": 0,
+                "returned": 0,
+                "semantic_enabled": semantic,
+                "semantic_degraded": self._semantic_degraded,
+                "filters": filter_trace,
+            })
             return []
 
-        return await self._fuse_and_rank(candidates, query, top_k, project_id, storage)
+        return await self._fuse_and_rank(
+            candidates,
+            query,
+            top_k,
+            project_id,
+            storage,
+            filter_trace=filter_trace,
+        )
+
+    def _contextual_index_text(self, content: str, metadata: Dict[str, Any]) -> str:
+        """Build contextual retrieval text while preserving original display content."""
+        return self.index_builder.build(content, metadata)
 
     # ========================================================================
     # 距离衰减 / Distance Decay
@@ -471,7 +607,14 @@ class ContextSelectEngine:
     # ========================================================================
 
     async def _fuse_and_rank(
-        self, candidates: List[ContextItem], query: str, top_k: int, project_id: str = "", storage: Any = None
+        self,
+        candidates: List[ContextItem],
+        query: str,
+        top_k: int,
+        project_id: str = "",
+        storage: Any = None,
+        *,
+        filter_trace: Optional[Dict[str, Any]] = None,
     ) -> List[ContextItem]:
         """对候选施加（可选）语义融合 + 距离衰减 + 重排，返回 top_k。
 
@@ -486,9 +629,11 @@ class ContextSelectEngine:
             return []
 
         sem_scores: Optional[List[float]] = None
+        semantic_used = False
         if self._semantic_enabled():
             try:
                 sem_scores = await self._semantic_scores(query, candidates, project_id, storage)
+                semantic_used = True
                 self._semantic_degraded = False
             except Exception as exc:
                 # Phase 7 降级可见：仅首次降级 WARNING（避免每次检索刷屏），并置可查状态标志。
@@ -513,21 +658,89 @@ class ContextSelectEngine:
             candidates = kept
 
         if not candidates:
+            self._set_ranking_trace({
+                "query": query,
+                "candidate_count": 0,
+                "returned": 0,
+                "semantic_enabled": self._semantic_enabled(),
+                "semantic_used": semantic_used,
+                "semantic_degraded": self._semantic_degraded,
+                "fusion": self._fusion,
+                "rerank": False,
+                "reranker_requested": self._rerank_requested,
+                "reranker_degraded": self._reranker_degraded,
+                "filters": dict(filter_trace or {}),
+            })
             return []
 
         candidates.sort(key=lambda it: float(it.relevance_score or 0.0), reverse=True)
 
-        # 轻量 rerank：仅语义模式下，对头部按纯语义分重排。
-        if sem_scores is not None and self._semantic_rerank and self._rerank_top_k > 1:
-            head = candidates[: self._rerank_top_k]
-            head.sort(key=lambda it: float(it.metadata.get("_sem", 0.0)), reverse=True)
-            candidates = head + candidates[self._rerank_top_k :]
+        rerank_applied = False
+        if self._rerank_requested and self._rerank_top_k > 1:
+            if self.reranker is None:
+                self._reranker_degraded = True
+            else:
+                head = candidates[: self._rerank_top_k]
+                documents = [str(item.metadata.get("_index_text") or item.content or "") for item in head]
+                try:
+                    rerank_scores = await self.reranker.rerank(query, documents)
+                    if len(rerank_scores) != len(head):
+                        raise ValueError("reranker backend returned mismatched score count")
+                    for item, score in zip(head, rerank_scores):
+                        item.metadata["_rerank"] = float(score)
+                    head.sort(key=lambda item: float(item.metadata.get("_rerank", 0.0)), reverse=True)
+                    candidates = head + candidates[self._rerank_top_k :]
+                    rerank_applied = True
+                    self._reranker_degraded = False
+                except Exception as exc:
+                    if not self._reranker_degraded:
+                        logger.warning("Cross-encoder reranker degraded; preserving fused ranking: %s", exc)
+                    self._reranker_degraded = True
+
+        returned = candidates[:top_k]
+        self._set_ranking_trace(self._build_ranking_trace(
+            query=query,
+            candidates=candidates,
+            returned=returned,
+            semantic_used=semantic_used,
+            rerank_applied=rerank_applied,
+            reranker_degraded=self._reranker_degraded,
+            filter_trace=filter_trace,
+        ))
 
         for item in candidates:
             item.metadata.pop("_sem", None)  # 清理临时元数据
             item.metadata.pop("_index_text", None)
+            item.metadata.pop("_lex", None)
+            item.metadata.pop("_rerank", None)
 
-        return candidates[:top_k]
+        return returned
+
+    def _build_ranking_trace(
+        self,
+        *,
+        query: str,
+        candidates: List[ContextItem],
+        returned: List[ContextItem],
+        semantic_used: bool,
+        rerank_applied: bool,
+        reranker_degraded: bool,
+        filter_trace: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a compact JSON-safe trace of the last ranking decision."""
+        return self.trace_renderer.render(
+            query=query,
+            candidates=candidates,
+            returned=returned,
+            fusion=self._fusion,
+            semantic_enabled=self._semantic_enabled(),
+            semantic_used=semantic_used,
+            semantic_degraded=self._semantic_degraded,
+            reranker_requested=self._rerank_requested,
+            rerank_applied=rerank_applied,
+            reranker_degraded=reranker_degraded,
+            filters=filter_trace,
+        )
 
     async def _semantic_scores(
         self, query: str, candidates: List[ContextItem], project_id: str = "", storage: Any = None
@@ -540,98 +753,20 @@ class ContextSelectEngine:
         texts are embedded (plus the query each call). This wires VectorStore into the
         live path so each fact/card/chunk is embedded exactly once.
         """
-        texts = [str(it.metadata.get("_index_text") or getattr(it, "content", "") or "") for it in candidates]
-        store = self._get_vector_store(project_id, storage)
-        hashes = [self._text_hash(t) for t in texts]
-
-        # 收集缓存未命中的文本（去重）/ collect cache-miss texts (deduped)
-        misses: Dict[str, str] = {}
-        for h, t in zip(hashes, texts):
-            if t and not store.has(h):
-                misses.setdefault(h, t)
-
-        miss_items = list(misses.items())  # [(hash, text)]
-        to_embed = [query] + [t for _, t in miss_items]
-        vectors = await self.embeddings.embed(to_embed)
-        if not vectors or len(vectors) != len(to_embed):
-            raise ValueError("embeddings backend returned mismatched vector count")
-
-        query_vec = vectors[0]
-        for (h, t), vec in zip(miss_items, vectors[1:]):
-            store.upsert(h, vec, text="")  # 不存正文，省空间；命中靠哈希
-        if miss_items:
-            self._persist_vector_store(project_id)
-
-        scores: List[float] = []
-        for h, t in zip(hashes, texts):
-            if not t:
-                scores.append(0.0)
-                continue
-            cached = store.get(h)
-            scores.append(cosine_similarity(query_vec, cached["vector"]) if cached else 0.0)
-        return scores
-
-    @staticmethod
-    def _text_hash(text: str) -> str:
-        return hashlib.sha1(text.encode("utf-8")).hexdigest()
-
-    def _get_vector_store(self, project_id: str, storage: Any) -> VectorStore:
-        """惰性获取 per-project 向量缓存；首次从磁盘加载（若 storage 提供路径）。"""
-        key = project_id or "_default"
-        store = self._vec_stores.get(key)
-        if store is not None:
-            return store
-        path = None
-        getter = getattr(storage, "get_embeddings_cache_path", None)
-        if getter is not None and project_id:
-            try:
-                path = getter(project_id)
-            except Exception:
-                path = None
-        store = VectorStore.load(path) if path else VectorStore()
-        self._vec_stores[key] = store
-        if path:
-            self._vec_paths[key] = path
-        return store
-
-    def _persist_vector_store(self, project_id: str) -> None:
-        """把更新后的向量缓存落盘（无路径则跳过，纯内存复用）。"""
-        key = project_id or "_default"
-        path = self._vec_paths.get(key)
-        store = self._vec_stores.get(key)
-        if not path or store is None:
-            return
-        try:
-            store.save(path)
-        except Exception as exc:
-            logger.warning("Failed to persist embedding cache (%s): %s", path, exc)
+        if self.vector_index is None:
+            return [0.0 for _ in candidates]
+        return await self.vector_index.scores(query, candidates, project_id=project_id, storage=storage)
 
     def _fuse_scores(self, candidates: List[ContextItem], sem_scores: List[float]) -> Dict[int, float]:
         """融合词法名次与语义名次，返回 ``{idx: fused_score}``。"""
-        n = len(candidates)
-        lex = [float(it.relevance_score or 0.0) for it in candidates]
-        if self._fusion == "weighted":
-            lw = self._normalize(lex)
-            sw = self._normalize(sem_scores)
-            return {i: self._bm25_weight * lw[i] + self._vector_weight * sw[i] for i in range(n)}
-        # 默认 RRF：对名次（而非原始分）求 1/(k+rank) 之和，量纲无关、稳健。
-        lex_rank = self._ranks(lex)
-        sem_rank = self._ranks(sem_scores)
-        return {i: 1.0 / (_RRF_K + lex_rank[i]) + 1.0 / (_RRF_K + sem_rank[i]) for i in range(n)}
+        return self.score_fusion.fuse(candidates, sem_scores)
 
     @staticmethod
     def _ranks(scores: List[float]) -> Dict[int, int]:
         """返回每个下标的名次（1 = 最高分）；并列按下标稳定。"""
-        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-        return {idx: position + 1 for position, idx in enumerate(order)}
+        return ScoreFusion.ranks(scores)
 
     @staticmethod
     def _normalize(scores: List[float]) -> List[float]:
         """min-max 归一到 [0, 1]；全相等则全 0。"""
-        if not scores:
-            return []
-        lo, hi = min(scores), max(scores)
-        if hi <= lo:
-            return [0.0 for _ in scores]
-        span = hi - lo
-        return [(s - lo) / span for s in scores]
+        return ScoreFusion.normalize(scores)

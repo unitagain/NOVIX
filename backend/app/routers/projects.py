@@ -84,8 +84,8 @@ async def create_project(project: ProjectCreate):
     # Generate project ID from name / 从名称生成项目ID
     try:
         project_id = sanitize_id(project.name.lower())
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid project name: {e}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid project name")
 
     data_dir = Path(card_storage.data_dir)
     project_dir = data_dir / project_id

@@ -60,19 +60,19 @@ class MemoryPackStorage(BaseStorage):
         """
         path = self.get_pack_path(project_id, chapter)
         self.ensure_dir(path.parent)
+        async with self.content_transaction(project_id):
+            # Rotate existing pack into history before overwriting.
+            if path.exists():
+                self._rotate_history(path)
 
-        # Rotate existing pack into history before overwriting.
-        if path.exists():
-            self._rotate_history(path)
-
-        canonical = self._canonicalize_chapter_id(chapter)
-        pack = dict(pack or {})
-        if canonical:
-            pack["chapter"] = canonical
-        if not pack.get("built_at"):
-            pack["built_at"] = datetime.now(timezone.utc).isoformat()
-        payload = json.dumps(pack, ensure_ascii=False, indent=2, default=str)
-        await self._atomic_write(path, payload)
+            canonical = self._canonicalize_chapter_id(chapter)
+            pack = dict(pack or {})
+            if canonical:
+                pack["chapter"] = canonical
+            if not pack.get("built_at"):
+                pack["built_at"] = datetime.now(timezone.utc).isoformat()
+            payload = json.dumps(pack, ensure_ascii=False, indent=2, default=str)
+            await self._atomic_write(path, payload)
 
     # ------------------------------------------------------------------
     # History rotation helpers

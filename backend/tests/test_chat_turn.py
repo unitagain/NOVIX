@@ -44,10 +44,37 @@ def test_chat_turn_agent_is_default_path(tmp_path):
         return {"success": True, "action": "agentic_write", "changed": True}
 
     orch.decide_writing_action = fake_decide
-    orch.run_writing_agent = fake_agent
+    orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "写个新场景"))
     assert r["action"] == "agentic_write" and r["success"]
     assert r["route_contract"]["path"] == "agentic_writer"
+    assert r["context_plan"]["route_path"] == "agentic_writer"
+    assert any(t["name"] == "write_content" for t in r["context_plan"]["tool_loadout"])
+    assert "latency_ms" in r["context_plan"]["budget"]
+    assert "tool_calls" in r["context_plan"]["budget"]
+    assert "llm_requests" in r["context_plan"]["budget"]
+    assert (tmp_path / "p" / r["trace_ref"]).exists()
+
+
+def test_chat_turn_passes_only_writing_service_contract_arguments(tmp_path):
+    orch = _orch(tmp_path)
+
+    async def fake_decide(*_args, **_kwargs):
+        return {"action": "continue"}
+
+    async def exact_service(pid, chapter, message, *, has_selection=False, thinking=False, target_word_count=3000):
+        assert (pid, chapter, message) == ("p", "V1C001", "continue")
+        assert has_selection is False
+        assert thinking is False
+        assert target_word_count == 180
+        return {"success": True, "action": "agentic_write"}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = exact_service
+    result = asyncio.run(
+        orch.run_chat_turn("p", "V1C001", "continue", has_draft=True, target_word_count=180)
+    )
+    assert result["success"] is True
 
 
 def test_chat_turn_fallback_signals_write(tmp_path):
@@ -61,10 +88,31 @@ def test_chat_turn_fallback_signals_write(tmp_path):
         return {"success": False, "fallback": True, "reason": "no_tool_calls"}
 
     orch.decide_writing_action = fake_decide
-    orch.run_writing_agent = fake_agent
+    orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "写个新场景"))
     assert r.get("fallback") is True and r["action"] == "write"
     assert r["route_contract"]["path"] == "fallback_workflow"
+    assert r["context_plan"]["degradation"][0]["status"] == "fallback"
+
+
+def test_chat_turn_context_plan_includes_actual_ranking_trace(tmp_path):
+    orch = _orch(tmp_path)
+
+    async def fake_decide(*a, **k):
+        return {"action": "write"}
+
+    async def fake_agent(pid, ch, msg, **k):
+        orch.select_engine._last_ranking_trace = {
+            "query": "张三 李四",
+            "fusion": "lexical",
+            "top_results": [{"id": "F1", "score": 1.0}],
+        }
+        return {"success": True, "action": "agentic_write", "changed": True}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = fake_agent
+    r = asyncio.run(orch.run_chat_turn("p", "V1C001", "写个新场景"))
+    assert r["context_plan"]["ranking"]["actual"]["top_results"][0]["id"] == "F1"
 
 
 def test_chat_turn_fallback_signals_edit(tmp_path):
@@ -78,7 +126,7 @@ def test_chat_turn_fallback_signals_edit(tmp_path):
         return {"fallback": True}
 
     orch.decide_writing_action = fake_decide
-    orch.run_writing_agent = fake_agent
+    orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "改下措辞", has_draft=True))
     assert r.get("fallback") is True and r["action"] == "edit"
     assert r["route_contract"]["fallback"] is True
@@ -95,7 +143,7 @@ def test_chat_turn_fallback_signals_continue(tmp_path):
         return {"fallback": True}
 
     orch.decide_writing_action = fake_decide
-    orch.run_writing_agent = fake_agent
+    orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "接着写", has_draft=True))
     assert r.get("fallback") is True and r["action"] == "continue"
 
@@ -111,10 +159,11 @@ def test_chat_turn_routes_plan(tmp_path):
         return {"id": "p1", "steps": []}
 
     orch.decide_writing_action = fake_decide
-    orch.create_plan = fake_create
+    orch.application.plans.create_plan = fake_create
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "在6-8章回收伏笔"))
     assert r["action"] == "plan" and r["plan"]["id"] == "p1"
     assert r["route_contract"]["path"] == "plan_workflow"
+    assert r["context_plan"]["route_path"] == "plan_workflow"
 
 
 def test_chat_turn_plan_unsplittable_then_fallback_signal(tmp_path):
@@ -131,8 +180,8 @@ def test_chat_turn_plan_unsplittable_then_fallback_signal(tmp_path):
         return {"fallback": True}
 
     orch.decide_writing_action = fake_decide
-    orch.create_plan = fake_create
-    orch.run_writing_agent = fake_agent
+    orch.application.plans.create_plan = fake_create
+    orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "随便写点"))
     assert r.get("fallback") is True and r["action"] == "write"
 
@@ -209,11 +258,11 @@ def test_run_writing_agent_writes_and_streams(tmp_path):
     async def _no_proposals(pid, text):
         return []
 
-    orch.gateway = _AgentGateway()
-    orch.draft_storage = _EmptyDraft()
-    orch.progress_callback = _cb
-    orch._detect_proposals = _no_proposals
-    r = asyncio.run(orch.run_writing_agent("p", "V1C001", "写第一章"))
+    orch.writing_service.gateway = _AgentGateway()
+    orch.writing_service.draft_storage = _EmptyDraft()
+    orch.writing_service.progress_callback = _cb
+    orch.writing_service.detect_proposals = _no_proposals
+    r = asyncio.run(orch.writing_service.run("p", "V1C001", "写第一章"))
     assert r["success"] and r["action"] == "agentic_write" and r["changed"] is True
     assert "stream_start" in events and "stream_end" in events  # WS 流式 diff 已推送
 
@@ -221,7 +270,7 @@ def test_run_writing_agent_writes_and_streams(tmp_path):
 def test_run_writing_agent_fallback_when_no_tool_calls(tmp_path):
     """provider 未调工具（不支持）→ fallback，供 run_chat_turn 回退预判路由。"""
     orch = _orch(tmp_path)
-    orch.gateway = _NoToolGateway()
-    orch.draft_storage = _EmptyDraft()
-    r = asyncio.run(orch.run_writing_agent("p", "V1C001", "写第一章"))
+    orch.writing_service.gateway = _NoToolGateway()
+    orch.writing_service.draft_storage = _EmptyDraft()
+    r = asyncio.run(orch.writing_service.run("p", "V1C001", "写第一章"))
     assert r.get("fallback") is True

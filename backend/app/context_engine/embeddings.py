@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import math
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import List, Optional
 
+from app.config import get_settings
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -87,6 +89,15 @@ class OnnxEmbedder(EmbeddingsBackend):
         return await asyncio.to_thread(_run)
 
 
+def resolve_model_cache_dir(value: Optional[str]) -> str:
+    """Resolve model cache paths against the writable WenShape DATA_DIR."""
+    raw = str(value or "models").strip() or "models"
+    path = Path(raw).expanduser()
+    if path.is_absolute():
+        return str(path.resolve())
+    return str((Path(get_settings().data_dir) / path).resolve())
+
+
 def create_embeddings_backend(config) -> Optional[EmbeddingsBackend]:
     """按配置创建嵌入后端；未启用或初始化失败 → 返回 None（调用方降级为纯词法）。
 
@@ -100,7 +111,7 @@ def create_embeddings_backend(config) -> Optional[EmbeddingsBackend]:
         if backend == "onnx":
             return OnnxEmbedder(
                 model_name=str(cfg.get("model", "BAAI/bge-small-zh-v1.5")),
-                cache_dir=cfg.get("cache_dir"),
+                cache_dir=resolve_model_cache_dir(cfg.get("cache_dir")),
             )
         # backend == "api" 由 Phase 4b 接入（走 LLM 网关的 embeddings 端点）
         logger.info("Embeddings backend '%s' not yet wired; semantic disabled.", backend)

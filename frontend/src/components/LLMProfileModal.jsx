@@ -71,6 +71,9 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
     temperature: 0.7,
     max_tokens: 8000,
     max_context_tokens: '',
+    has_api_key: false,
+    api_key_mask: '',
+    clear_api_key: false,
   });
 
   useEffect(() => {
@@ -94,6 +97,9 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
           temperature: profile.temperature || 0.7,
           max_tokens: profile.max_tokens || 8000,
           max_context_tokens: profile.max_context_tokens || '',
+          has_api_key: Boolean(profile.has_api_key),
+          api_key_mask: profile.api_key_mask || '',
+          clear_api_key: false,
         });
       } else {
         setFormData({
@@ -106,6 +112,9 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
           temperature: 0.7,
           max_tokens: 8000,
           max_context_tokens: '',
+          has_api_key: false,
+          api_key_mask: '',
+          clear_api_key: false,
         });
       }
     }
@@ -215,7 +224,8 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
   ];
 
   const handleFetchModels = async () => {
-    if (!formData.api_key) {
+    const canUseCredential = Boolean(formData.api_key || (formData.id && formData.has_api_key && !formData.clear_api_key));
+    if (!canUseCredential) {
       showFeedback('error', t('llmModal.pleaseEnterKey'));
       return;
     }
@@ -229,7 +239,8 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
     try {
       const res = await configAPI.fetchModels({
         provider: formData.provider,
-        api_key: formData.api_key,
+        api_key: formData.api_key || undefined,
+        profile_id: formData.id || undefined,
         base_url: formData.base_url,
       });
       if (res.data && res.data.models) {
@@ -258,7 +269,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
 
   const canTestModel = Boolean(
     String(formData.provider || '').trim() &&
-    String(formData.api_key || '').trim() &&
+    (String(formData.api_key || '').trim() || (formData.id && formData.has_api_key && !formData.clear_api_key)) &&
     String(formData.model || '').trim() &&
     String(formData.base_url || '').trim(),
   );
@@ -274,7 +285,8 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
     try {
       const res = await configAPI.testModel({
         provider: formData.provider,
-        api_key: formData.api_key,
+        api_key: formData.api_key || undefined,
+        profile_id: formData.id || undefined,
         base_url: formData.base_url,
         model: formData.model,
       });
@@ -303,6 +315,8 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
 
   const handleSave = () => {
     const payload = { ...formData };
+    delete payload.has_api_key;
+    delete payload.api_key_mask;
     // 空字符串转 null，后端 Optional[int] 需要 null 而非空串
     if (!payload.max_context_tokens) {
       payload.max_context_tokens = null;
@@ -463,11 +477,22 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                 <Input
                   type="password"
                   value={formData.api_key}
-                  onChange={(e) => setFormData({ ...formData, api_key: e.target.value })}
-                  placeholder="sk-..."
+                  onChange={(e) => setFormData({ ...formData, api_key: e.target.value, clear_api_key: false })}
+                  placeholder={formData.has_api_key ? formData.api_key_mask : 'sk-...'}
+                  disabled={formData.clear_api_key}
                   className="bg-[var(--vscode-input-bg)] border-[var(--vscode-input-border)] text-[var(--vscode-fg)] focus-visible:border-[var(--vscode-focus-border)] focus-visible:ring-[var(--vscode-focus-border)]"
                 />
                 <p className="text-xs text-[var(--vscode-fg-subtle)]">{t('llmModal.apiKeyNote')}</p>
+                {formData.has_api_key ? (
+                  <label className="flex items-center gap-2 text-xs text-[var(--vscode-fg-subtle)]">
+                    <input
+                      type="checkbox"
+                      checked={formData.clear_api_key}
+                      onChange={(e) => setFormData({ ...formData, clear_api_key: e.target.checked, api_key: '' })}
+                    />
+                    {t('llmModal.clearApiKey')}
+                  </label>
+                ) : null}
               </motion.div>
             </AnimatePresence>
 
@@ -516,7 +541,11 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                     size="sm"
                     className="h-6 px-2 text-[10px] text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] border border-[var(--vscode-input-border)] shadow-none"
                     onClick={handleFetchModels}
-                    disabled={fetchingModels || !formData.api_key || !formData.base_url}
+                    disabled={
+                      fetchingModels ||
+                      !(formData.api_key || (formData.id && formData.has_api_key && !formData.clear_api_key)) ||
+                      !formData.base_url
+                    }
                   >
                     {fetchingModels ? (
                       <RefreshCw size={10} className="animate-spin mr-1" />

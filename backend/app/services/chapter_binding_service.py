@@ -18,6 +18,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.storage.cards import CardStorage
+from app.error_contract import safe_error_code
 from app.storage.drafts import DraftStorage
 from app.storage.bindings import ChapterBindingStorage
 from app.services.evidence_service import evidence_service
@@ -205,7 +206,7 @@ class ChapterBindingService:
                 binding = await self.build_bindings(project_id, chapter, force=force)
                 results.append({"chapter": chapter, "success": True, "binding": binding})
             except Exception as exc:
-                results.append({"chapter": chapter, "success": False, "error": str(exc)})
+                results.append({"chapter": chapter, "success": False, "error": safe_error_code(exc)})
         return results
 
     async def read_bindings(self, project_id: str, chapter: str) -> Optional[Dict[str, Any]]:

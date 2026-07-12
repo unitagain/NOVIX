@@ -21,7 +21,10 @@ class Fact(BaseModel):
     confidence: float = Field(1.0, ge=0.0, le=1.0, description="Confidence score")
     status: str = Field(
         "confirmed",
-        description="Phase 14 风险等级：confirmed（作者确认 / 旧数据兼容）| needs_review（AI 抽取待确认）| inferred。",
+        description=(
+            "Fact lifecycle status: confirmed（作者确认 / 旧数据兼容）| needs_review（AI 抽取待确认）"
+            "| inferred | rejected。"
+        ),
     )
     context_prefix: str = Field(
         "",
@@ -30,6 +33,8 @@ class Fact(BaseModel):
             "（与 statement 拼接后参与词法+语义打分），不用于展示。"
         ),
     )
+    source_type: str = Field("internal", description="Source class: internal | external | crawler | search")
+    trust_label: str = Field("trusted", description="Trust label: trusted | untrusted")
 
     model_config = ConfigDict(
         json_schema_extra={

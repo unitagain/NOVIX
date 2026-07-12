@@ -11,10 +11,21 @@ from typing import Dict, Set
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.utils.logger import get_logger
+from app.error_contract import error_envelope, safe_error_code
 
 logger = get_logger(__name__)
 
 router = APIRouter(tags=["websocket"])
+
+
+async def _send_error(websocket: WebSocket, exc: BaseException) -> None:
+    envelope = error_envelope(exc)
+    try:
+        await websocket.send_json({"type": "error", "error": envelope.to_dict()})
+        await websocket.close(code=1011)
+    except (RuntimeError, WebSocketDisconnect):
+        # The connection can already be closed when the transport reports the original failure.
+        return
 
 
 class ConnectionManager:
@@ -135,7 +146,8 @@ async def trace_websocket_endpoint(websocket: WebSocket):
         trace_manager.disconnect(websocket)
         trace_collector.unsubscribe(on_trace_event)
     except Exception as exc:
-        logger.error("Trace WebSocket error: %s", exc, exc_info=True)
+        logger.error("Trace WebSocket error: %s", safe_error_code(exc), exc_info=True)
+        await _send_error(websocket, exc)
         trace_manager.disconnect(websocket)
         trace_collector.unsubscribe(on_trace_event)
 
@@ -166,7 +178,8 @@ async def websocket_endpoint(websocket: WebSocket, project_id: str):
     except WebSocketDisconnect:
         manager.disconnect(websocket, project_id)
     except Exception as exc:
-        logger.error("WebSocket error: %s", exc, exc_info=True)
+        logger.error("WebSocket error: %s", safe_error_code(exc), exc_info=True)
+        await _send_error(websocket, exc)
         manager.disconnect(websocket, project_id)
 
 

@@ -4,6 +4,7 @@ import pytest
 from bs4 import BeautifulSoup
 from app.utils.text import normalize_for_compare, normalize_newlines, normalize_prose_paragraphs
 from app.utils.path_safety import sanitize_id, validate_path_within
+from app.utils.chapter_id import ChapterIDValidator
 from app.services.wiki_parser import WikiStructuredParser
 
 # --- stopwords unification (Phase 4 dedup) ---
@@ -78,6 +79,18 @@ class TestNormalizeProseParagraphs:
         result = normalize_prose_paragraphs(text, language="zh")
         assert "“你走吧。”" in result
         assert "“我不走。”" in result
+
+
+class TestChapterOrdering:
+    def test_compare_supports_volume_and_legacy_ids(self):
+        assert ChapterIDValidator.compare("V1C003", "V1C002") == 1
+        assert ChapterIDValidator.compare("C003", "V1C003") == 0
+        assert ChapterIDValidator.compare("V1C003E1", "V1C003") == 1
+        assert ChapterIDValidator.compare("invalid", "V1C003") is None
+
+    def test_is_after_identifies_future_chapters(self):
+        assert ChapterIDValidator.is_after("V2C001", "V1C020") is True
+        assert ChapterIDValidator.is_after("V1C002", "V1C003") is False
 
 
 # --- sanitize_id ---

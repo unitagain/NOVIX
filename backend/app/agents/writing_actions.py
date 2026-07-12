@@ -22,9 +22,10 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from app.utils.logger import get_logger
+from app.error_contract import safe_error_code, tool_error_text
 
 logger = get_logger(__name__)
 
@@ -110,7 +111,7 @@ class WritingActionToolset:
             try:
                 tools.extend(self.retrieval.schemas())
             except Exception as exc:  # 检索工具异常不应阻断写作能力
-                logger.warning("retrieval toolset schemas() failed: %s", exc)
+                logger.warning("retrieval toolset schemas() failed: %s", safe_error_code(exc), exc_info=True)
         tools.extend(writing_action_schemas())
         return tools
 
@@ -123,11 +124,15 @@ class WritingActionToolset:
             if name == "edit_lines":
                 return self._edit_lines(str(args.get("old_text") or ""), str(args.get("new_text") or ""))
         except Exception as exc:
-            logger.warning("Writing action %s failed: %s", name, exc)
-            return f"[写作工具 {name} 执行出错：{exc}]"
+            logger.warning("Writing action %s failed: %s", name, safe_error_code(exc), exc_info=True)
+            return tool_error_text(name, exc)
 
         if self.retrieval is not None:
-            return await self.retrieval.execute(name, arguments)
+            try:
+                return await self.retrieval.execute(name, arguments)
+            except Exception as exc:
+                logger.warning("Retrieval tool %s failed: %s", name, safe_error_code(exc), exc_info=True)
+                return tool_error_text(name, exc)
         return f"[未知工具：{name}]"
 
     def _write_content(self, content: str, mode: str) -> str:

@@ -42,7 +42,7 @@ function buildPyInstallerSpec({ backendStaticDir, buildRoot, platform, arch }) {
   }
 
   const specText = `# -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 backend_root = r"${normalizeForPython(backendRoot)}"
 main_py = r"${normalizeForPython(mainPy)}"
@@ -57,26 +57,42 @@ datas = [
 ]
 datas += collect_data_files("tiktoken_ext.openai_public")
 datas += collect_data_files("tiktoken_ext")
+fastembed_datas, fastembed_binaries, fastembed_hiddenimports = collect_all("fastembed")
+datas += fastembed_datas
+keyring_datas, keyring_binaries, keyring_hiddenimports = collect_all("keyring")
+datas += keyring_datas
+
+binaries = list(fastembed_binaries)
+binaries += keyring_binaries
+hiddenimports = [
+    "uvicorn.logging",
+    "uvicorn.loops",
+    "uvicorn.loops.auto",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.lifespan",
+    "uvicorn.lifespan.on",
+    "tiktoken",
+    "tiktoken_ext.openai_public",
+    "tiktoken_ext",
+    "aiohttp",
+    "opentelemetry.api",
+    "opentelemetry.propagate",
+    "opentelemetry.sdk.resources",
+    "opentelemetry.sdk.trace",
+    "opentelemetry.sdk.trace.export",
+    "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
+]
+hiddenimports += fastembed_hiddenimports
+hiddenimports += keyring_hiddenimports
 
 a = Analysis(
     [main_py],
     pathex=[backend_root],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=[
-        "uvicorn.logging",
-        "uvicorn.loops",
-        "uvicorn.loops.auto",
-        "uvicorn.protocols",
-        "uvicorn.protocols.http",
-        "uvicorn.protocols.http.auto",
-        "uvicorn.lifespan",
-        "uvicorn.lifespan.on",
-        "tiktoken",
-        "tiktoken_ext.openai_public",
-        "tiktoken_ext",
-        "aiohttp",
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -94,7 +110,6 @@ a = Analysis(
         "distributed",
         "docutils",
         "flask",
-        "huggingface_hub",
         "imagecodecs",
         "isort",
         "jedi",
@@ -167,10 +182,13 @@ async function ensureIsolatedPython(target) {
   }
 
   console.log("[desktop-build] installing runtime dependencies into isolated venv");
-  await runCommand(pythonPath, ["-m", "pip", "install", "--upgrade", "pip"], {
+  const indexArgs = process.env.WENSHAPE_PYPI_INDEX_URL
+    ? ["--index-url", process.env.WENSHAPE_PYPI_INDEX_URL]
+    : [];
+  await runCommand(pythonPath, ["-m", "pip", "install", ...indexArgs, "--upgrade", "pip"], {
     cwd: backendRoot
   });
-  await runCommand(pythonPath, ["-m", "pip", "install", "-r", "requirements.runtime.txt", "pyinstaller"], {
+  await runCommand(pythonPath, ["-m", "pip", "install", ...indexArgs, "-r", "requirements.runtime.txt", "pyinstaller"], {
     cwd: backendRoot
   });
 

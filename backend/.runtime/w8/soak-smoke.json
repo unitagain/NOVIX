@@ -1,0 +1,56 @@
+{
+  "success": true,
+  "classification": "synthetic",
+  "profile": "59a1bd30-9c88-4ef1-8a24-2772d73c6e85",
+  "started_at": 1783839711.4175022,
+  "elapsed_seconds": 18.945250272750854,
+  "cycles": 3,
+  "sessions": 2,
+  "requests": 8,
+  "tokens": 722,
+  "compacts": 2,
+  "backups": 2,
+  "memory_growth_bytes": 150405,
+  "checks": {
+    "target_duration": true,
+    "minimum_cycles": true,
+    "provider_failures": true,
+    "compact_recovery": true,
+    "backup_completed": true,
+    "memory_growth": true,
+    "thread_growth": true
+  },
+  "failures": [],
+  "slo_calibration": {
+    "observed_cycle_p95_ms": 5116.959200000565,
+    "observed_request_failure_rate": 0.0,
+    "recommended_writer_turn_p95_ms": 7675.438800000848,
+    "recommended_error_rate_budget": 0.01
+  },
+  "samples": [
+    {
+      "timestamp": 1783839720.737446,
+      "python_bytes": 3508781,
+      "python_peak_bytes": 3592239,
+      "threads": 3,
+      "data_bytes": 125587,
+      "cycle_latency_ms": 5116.959200000565
+    },
+    {
+      "timestamp": 1783839726.2588391,
+      "python_bytes": 3605739,
+      "python_peak_bytes": 3949910,
+      "threads": 3,
+      "data_bytes": 142196,
+      "cycle_latency_ms": 5525.03969999816
+    },
+    {
+      "timestamp": 1783839730.334706,
+      "python_bytes": 3659186,
+      "python_peak_bytes": 3949910,
+      "threads": 3,
+      "data_bytes": 144686,
+      "cycle_latency_ms": 4079.4108000009146
+    }
+  ]
+}

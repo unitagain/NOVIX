@@ -29,6 +29,7 @@ from app.services.text_chunk_service import (
     _estimate_doc_len,
     _extract_terms,
     _count_term,
+    text_chunk_service,
 )
 
 
@@ -333,7 +334,7 @@ class EvidenceIndexService:
         if include_text_chunks and "text_chunk" in types:
             # Text chunks are scored by their own index to avoid scanning the full corpus.
             query_text = " ".join(cleaned_queries)
-            text_chunk_hits = await self.draft_storage.search_text_chunks(
+            text_chunk_hits = await text_chunk_service.search(
                 project_id=project_id,
                 query=query_text,
                 limit=quotas.get("text_chunk", {}).get("max", 8),

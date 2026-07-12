@@ -20,6 +20,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 import json
 
 from app.utils.logger import get_logger
+from app.error_contract import record_degradation
 
 logger = get_logger(__name__)
 
@@ -33,7 +34,7 @@ def _parse_tool_args(arguments: Any) -> Dict[str, Any]:
     try:
         data = json.loads(arguments or "{}")
         return data if isinstance(data, dict) else {}
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         return {}
 
 
@@ -42,8 +43,8 @@ async def _emit(on_event: OnEvent, event: Dict[str, Any]) -> None:
         return
     try:
         await on_event(event)
-    except Exception:
-        pass
+    except Exception as exc:
+        record_degradation("agentic_event_callback", exc)
 
 
 # Phase 8 代谢：agentic 多轮循环里工具结果会无限累积膨胀上下文；保留最近的、折叠更早的。

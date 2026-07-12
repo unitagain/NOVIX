@@ -16,6 +16,7 @@ import json
 from typing import List, Dict, Any, Optional
 from app.llm_gateway.providers.base import BaseLLMProvider
 from app.utils.anthropic_client import create_async_anthropic_client
+from app.error_contract import record_degradation
 
 
 def _prompt_caching_enabled() -> bool:
@@ -141,8 +142,8 @@ class AnthropicProvider(BaseLLMProvider):
             from app.utils.cache_metrics import record_cache
 
             record_cache(cache_read, cache_creation, int(response.usage.input_tokens or 0))
-        except Exception:
-            pass
+        except Exception as exc:
+            record_degradation("anthropic_cache_metrics", exc)
 
         return {
             "content": "".join(text_parts),

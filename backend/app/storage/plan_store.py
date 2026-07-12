@@ -67,7 +67,7 @@ class PlanStore(BaseStorage):
         for path in sorted(directory.glob("*.json")):
             try:
                 data = json.loads(await self.read_text(path))
-            except Exception:
+            except (OSError, UnicodeError, json.JSONDecodeError):
                 continue
             out.append(
                 {

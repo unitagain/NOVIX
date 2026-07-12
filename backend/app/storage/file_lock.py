@@ -19,8 +19,12 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 import asyncio
+import hashlib
+import os
+import tempfile
+import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import BinaryIO, Dict, Optional
 from contextlib import asynccontextmanager
 from app.utils.logger import get_logger
 
@@ -87,19 +91,76 @@ class AsyncFileLock:
             ...     # Protected write operation
             ...     await write_file(...)
         """
-        path_str = str(file_path.resolve())
+        path = file_path.resolve()
+        path_str = str(path)
         lock = await self._get_lock(path_str)
+        acquired = False
+        process_handle: Optional[BinaryIO] = None
 
         try:
             if timeout is not None:
                 await asyncio.wait_for(lock.acquire(), timeout=timeout)
             else:
                 await lock.acquire()
+            acquired = True
+
+            process_handle = await asyncio.to_thread(self._acquire_process_lock, path, timeout)
 
             yield
         finally:
-            if lock.locked():
+            if process_handle is not None:
+                await asyncio.to_thread(self._release_process_lock, process_handle)
+            if acquired:
                 lock.release()
+
+    @staticmethod
+    def _lock_path(target: Path) -> Path:
+        digest = hashlib.sha256(str(target).casefold().encode("utf-8")).hexdigest()
+        return Path(tempfile.gettempdir()) / "wenshape-file-locks" / f"{digest}.lock"
+
+    @classmethod
+    def _acquire_process_lock(cls, target: Path, timeout: Optional[float]) -> BinaryIO:
+        """Acquire a cross-process advisory lock on a stable companion file."""
+
+        lock_path = cls._lock_path(target)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a+b")
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        while True:
+            try:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except (BlockingIOError, OSError):
+                if deadline is not None and time.monotonic() >= deadline:
+                    handle.close()
+                    raise TimeoutError(f"file_lock_timeout:{target}")
+                time.sleep(0.025)
+
+    @staticmethod
+    def _release_process_lock(handle: BinaryIO) -> None:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
 
     async def cleanup_unused(self, max_locks: int = 1000) -> int:
         """

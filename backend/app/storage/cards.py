@@ -40,7 +40,7 @@ class CardStorage(BaseStorage):
                     if "stars" not in existing:
                         existing["stars"] = self._normalize_stars(None)
                     payload = existing
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 pass
         if "stars" not in payload:
             payload["stars"] = self._normalize_stars(None)
@@ -85,7 +85,7 @@ class CardStorage(BaseStorage):
                     if "stars" not in existing:
                         existing["stars"] = self._normalize_stars(None)
                     payload = existing
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 pass
         if "stars" not in payload:
             payload["stars"] = self._normalize_stars(None)
@@ -209,7 +209,7 @@ class CardStorage(BaseStorage):
     def _normalize_stars(self, value: Any) -> int:
         try:
             stars = int(value)
-        except Exception:
+        except (TypeError, ValueError):
             return 1
         return max(1, min(stars, 3))
 

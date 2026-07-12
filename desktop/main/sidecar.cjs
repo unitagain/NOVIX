@@ -121,7 +121,7 @@ function resolvePackagedSidecarExecutable(paths) {
   return found;
 }
 
-function createDesktopEnv({ port, token, paths }) {
+function createDesktopEnv({ port, token, paths, allowedOrigins = [], allowedHosts = [] }) {
   return {
     ...process.env,
     HOST: "127.0.0.1",
@@ -130,6 +130,9 @@ function createDesktopEnv({ port, token, paths }) {
     WENSHAPE_BACKEND_PORT: String(port),
     WENSHAPE_AUTO_PORT: "0",
     WENSHAPE_DESKTOP_SESSION_TOKEN: token,
+    WENSHAPE_REQUIRE_LOCAL_AUTH: "1",
+    WENSHAPE_DESKTOP_ALLOWED_ORIGINS: allowedOrigins.join(","),
+    WENSHAPE_DESKTOP_ALLOWED_HOSTS: allowedHosts.join(","),
     WENSHAPE_DESKTOP_SHELL: "electron",
     WENSHAPE_DESKTOP_LOG_DIR: paths?.logsDir || "",
     // Tell the sidecar where to look for a user-provided .env file
@@ -193,9 +196,19 @@ async function startSidecar(options = {}) {
     cwd = path.join(metadata.repoRoot, "backend");
   }
 
+  const frontendOrigin = (() => {
+    try {
+      return options.frontendDevUrl ? new URL(options.frontendDevUrl).origin : "";
+    } catch (_error) {
+      return "";
+    }
+  })();
+  const allowedOrigins = [baseUrl, frontendOrigin].filter(Boolean);
+  const allowedHosts = allowedOrigins.map((value) => new URL(value).host);
+
   const child = spawn(command, args, {
     cwd,
-    env: createDesktopEnv({ port, token, paths: options.paths }),
+    env: createDesktopEnv({ port, token, paths: options.paths, allowedOrigins, allowedHosts }),
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true
   });

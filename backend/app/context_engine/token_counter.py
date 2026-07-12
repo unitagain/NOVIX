@@ -74,6 +74,22 @@ def count_tokens(text: str, use_cache: bool = True) -> int:
     return _estimate_tokens_mixed(text)
 
 
+def count_tokens_for_model(text: str, model_name: str) -> tuple[int, str, bool]:
+    """Count with a model-specific tokenizer when one is locally available."""
+
+    if not text:
+        return 0, "empty", True
+    if _tiktoken_available:
+        try:
+            encoding = tiktoken.encoding_for_model(str(model_name or ""))
+            return len(encoding.encode(text)), f"tiktoken:{encoding.name}", True
+        except (KeyError, ValueError):
+            pass
+        except Exception as exc:
+            logger.debug("model tokenizer failed for %s: %s", model_name, exc)
+    return _estimate_tokens_mixed(text), "mixed_language_estimator_v1", False
+
+
 def _estimate_tokens_mixed(text: str) -> int:
     """
     混合语言的token估算

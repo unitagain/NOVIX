@@ -242,6 +242,6 @@ class DynamicContextRetriever:
             try:
                 if ChapterIDValidator.calculate_weight(chapter_id) < current_weight:
                     previous.append(chapter_id)
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         return previous

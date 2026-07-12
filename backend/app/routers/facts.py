@@ -152,7 +152,7 @@ async def _load_legacy_summaries(
             continue
         try:
             data = await draft_storage.read_yaml(file_path)
-        except Exception:
+        except (OSError, UnicodeError, TypeError, ValueError):
             continue
 
         chapter = data.get("chapter") or chapter_id

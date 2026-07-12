@@ -36,7 +36,7 @@ def _extract_json_obj(text: str) -> Optional[Dict[str, Any]]:
             end = s.find("```", newline + 1)
             if newline != -1 and end != -1:
                 s = s[newline + 1 : end].strip()
-        except Exception:
+        except (AttributeError, TypeError):
             pass
     left, right = s.find("{"), s.rfind("}")
     if left != -1 and right != -1 and right > left:
@@ -44,7 +44,7 @@ def _extract_json_obj(text: str) -> Optional[Dict[str, Any]]:
     try:
         data = json.loads(s)
         return data if isinstance(data, dict) else None
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         return None
 
 

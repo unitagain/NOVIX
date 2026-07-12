@@ -19,7 +19,14 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import app.config as app_config
+from app.security.credential_vault import (
+    CredentialVault,
+    SystemCredentialVault,
+    masked_secret,
+    profile_secret_reference,
+)
 from app.utils.logger import get_logger
+from app.error_contract import record_degradation
 
 logger = get_logger(__name__)
 
@@ -38,12 +45,14 @@ class LLMConfigService:
         assignments_path: 分配文件路径 / Path to agent_assignments.json
     """
 
-    def __init__(self, data_dir: Optional[str] = None) -> None:
+    def __init__(self, data_dir: Optional[str] = None, credential_vault: Optional[CredentialVault] = None) -> None:
         self.data_dir = self._resolve_data_dir(data_dir)
         self.profiles_path = self.data_dir / "llm_profiles.json"
         self.assignments_path = self.data_dir / "agent_assignments.json"
+        self.credential_vault = credential_vault or SystemCredentialVault()
         self._ensure_data_dir()
         self._migrate_legacy_config()
+        self._migrate_plaintext_secrets()
 
     def _resolve_data_dir(self, data_dir: Optional[str]) -> Path:
         """Resolve data directory with backward-compatible fallback."""
@@ -127,8 +136,45 @@ class LLMConfigService:
             try:
                 if tmp_path.exists() and tmp_path != path:
                     tmp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                record_degradation("llm_config_temp_cleanup", exc)
+
+    def _profile_records(self) -> List[Dict[str, Any]]:
+        rows = self._load_json(self.profiles_path, [])
+        return [dict(item) for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
+
+    def _migrate_plaintext_secrets(self) -> None:
+        records = self._profile_records()
+        pending = [row for row in records if str(row.get("api_key") or "").strip()]
+        if not pending:
+            return
+
+        previous_secrets: Dict[str, Optional[str]] = {}
+        updated: List[Dict[str, Any]] = []
+        try:
+            for row in records:
+                item = dict(row)
+                secret = str(item.pop("api_key", "") or "").strip()
+                if secret:
+                    profile_id = str(item.get("id") or "").strip()
+                    if not profile_id:
+                        raise ValueError("profile_id_required_for_secret_migration")
+                    reference = str(item.get("secret_ref") or profile_secret_reference(profile_id))
+                    previous_secrets.setdefault(reference, self.credential_vault.get(reference))
+                    self.credential_vault.set(reference, secret)
+                    item["secret_ref"] = reference
+                updated.append(item)
+            self._save_json(self.profiles_path, updated)
+        except Exception:
+            for reference, previous in previous_secrets.items():
+                try:
+                    if previous is None:
+                        self.credential_vault.delete(reference)
+                    else:
+                        self.credential_vault.set(reference, previous)
+                except Exception:
+                    logger.exception("Failed to roll back migrated credential reference %s", reference)
+            raise
 
     def get_profiles(self) -> List[Dict[str, Any]]:
         """
@@ -139,9 +185,8 @@ class LLMConfigService:
         Returns:
             配置文件列表 / List of profile dictionaries.
         """
-        profiles = self._load_json(self.profiles_path, [])
-        if not isinstance(profiles, list):
-            profiles = []
+        self._migrate_plaintext_secrets()
+        profiles = self._profile_records()
 
         cleaned: List[Dict[str, Any]] = []
         now_ts = int(datetime.now().timestamp())
@@ -168,6 +213,13 @@ class LLMConfigService:
             if "created_at" not in profile:
                 profile["created_at"] = now_ts
 
+            reference = str(profile.get("secret_ref") or "").strip()
+            if reference:
+                secret = self.credential_vault.get(reference)
+                if not secret:
+                    raise RuntimeError(f"credential_missing:{profile_id}")
+                profile["api_key"] = secret
+
             # 暴露「是否支持参数级 thinking 切换」给前端，用于对话栏「深度思考」按钮显隐（能力降级，异常默认 False）。
             try:
                 from app.llm_gateway.thinking import supports_thinking
@@ -179,6 +231,17 @@ class LLMConfigService:
             cleaned.append(profile)
 
         return cleaned
+
+    def get_public_profiles(self) -> List[Dict[str, Any]]:
+        public: List[Dict[str, Any]] = []
+        for profile in self.get_profiles():
+            item = dict(profile)
+            secret = str(item.pop("api_key", "") or "")
+            item.pop("secret_ref", None)
+            item["has_api_key"] = bool(secret)
+            item["api_key_mask"] = masked_secret(secret)
+            public.append(item)
+        return public
 
     def get_assignments(self) -> Dict[str, str]:
         """
@@ -194,7 +257,7 @@ class LLMConfigService:
         if not isinstance(assignments, dict):
             assignments = {}
 
-        profile_ids = {p.get("id") for p in self.get_profiles() if isinstance(p, dict) and p.get("id")}
+        profile_ids = {p.get("id") for p in self._profile_records() if p.get("id")}
         cleaned: Dict[str, str] = {}
         for agent in allowed:
             raw = str(assignments.get(agent) or "").strip()
@@ -216,11 +279,12 @@ class LLMConfigService:
         Returns:
             保存后的配置文件（包含 id 和 created_at） / Profile with id and timestamp.
         """
-        profiles = self.get_profiles()
-        if not isinstance(profiles, list):
-            profiles = []
+        self._migrate_plaintext_secrets()
+        profiles = self._profile_records()
 
         incoming = dict(profile or {})
+        supplied_secret = str(incoming.pop("api_key", "") or "").strip()
+        clear_secret = bool(incoming.pop("clear_api_key", False))
         incoming_id = str(incoming.get("id") or "").strip()
         if not incoming_id:
             incoming_id = str(uuid.uuid4())
@@ -237,22 +301,56 @@ class LLMConfigService:
             incoming["name"] = f"{provider}:{incoming_id[:8]}"
 
         replaced = False
+        existing_record: Dict[str, Any] = {}
         for i, existing in enumerate(profiles):
             if isinstance(existing, dict) and str(existing.get("id") or "").strip() == incoming_id:
-                profiles[i] = {**existing, **incoming}
+                existing_record = dict(existing)
+                profiles[i] = {**existing_record, **incoming}
                 replaced = True
                 break
 
         if not replaced:
             profiles.append(incoming)
 
-        self._save_json(self.profiles_path, profiles)
-        return incoming
+        target = next(item for item in profiles if str(item.get("id") or "") == incoming_id)
+        previous_reference = str(existing_record.get("secret_ref") or "")
+        written_reference = ""
+        previous_secret: Optional[str] = None
+        if clear_secret:
+            target.pop("secret_ref", None)
+        elif supplied_secret:
+            reference = previous_reference or profile_secret_reference(incoming_id)
+            previous_secret = self.credential_vault.get(reference)
+            self.credential_vault.set(reference, supplied_secret)
+            target["secret_ref"] = reference
+            written_reference = reference
+
+        try:
+            self._save_json(self.profiles_path, profiles)
+        except Exception:
+            if written_reference:
+                if previous_secret is None:
+                    self.credential_vault.delete(written_reference)
+                else:
+                    self.credential_vault.set(written_reference, previous_secret)
+            raise
+        if clear_secret and previous_reference:
+            self.credential_vault.delete(previous_reference)
+        saved = self.get_profile_by_id(incoming_id) or target
+        secret = str(saved.pop("api_key", "") or "")
+        saved.pop("secret_ref", None)
+        saved["has_api_key"] = bool(secret)
+        saved["api_key_mask"] = masked_secret(secret)
+        return saved
 
     def delete_profile(self, profile_id: str):
-        profiles = self.get_profiles()
+        self._migrate_plaintext_secrets()
+        profiles = self._profile_records()
+        removed = next((p for p in profiles if p.get("id") == profile_id), None)
         profiles = [p for p in profiles if p["id"] != profile_id]
         self._save_json(self.profiles_path, profiles)
+        if removed and removed.get("secret_ref"):
+            self.credential_vault.delete(str(removed["secret_ref"]))
 
         # Also clean up assignments
         assignments = self.get_assignments()
@@ -280,7 +378,7 @@ class LLMConfigService:
 
     def _migrate_legacy_config(self):
         """Migrate .env settings to profiles if profiles.json is empty."""
-        profiles = self.get_profiles()
+        profiles = self._profile_records()
         if profiles:
             return  # Already has profiles, skip migration
 
@@ -363,11 +461,30 @@ class LLMConfigService:
             )
 
         if new_profiles:
-            self._save_json(self.profiles_path, new_profiles)
+            previous_secrets: Dict[str, Optional[str]] = {}
+            secured_profiles: List[Dict[str, Any]] = []
+            try:
+                for profile in new_profiles:
+                    item = dict(profile)
+                    secret = str(item.pop("api_key", "") or "").strip()
+                    if secret:
+                        reference = profile_secret_reference(str(item["id"]))
+                        previous_secrets[reference] = self.credential_vault.get(reference)
+                        self.credential_vault.set(reference, secret)
+                        item["secret_ref"] = reference
+                    secured_profiles.append(item)
+                self._save_json(self.profiles_path, secured_profiles)
+            except Exception:
+                for reference, previous in previous_secrets.items():
+                    if previous is None:
+                        self.credential_vault.delete(reference)
+                    else:
+                        self.credential_vault.set(reference, previous)
+                raise
 
             # Setup default assignments
             # Assume the first valid profile is the default
-            default_id = new_profiles[0]["id"]
+            default_id = secured_profiles[0]["id"]
             assignments = {"archivist": default_id, "writer": default_id, "editor": default_id}
             self._save_json(self.assignments_path, assignments)
             logger.info("Migrated %s profiles", len(new_profiles))

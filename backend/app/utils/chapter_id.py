@@ -92,7 +92,7 @@ def parse_chapter_number(chapter: str) -> Optional[int]:
 
 
 class ChapterIDValidator:
-    """
+    r"""
     章节ID校验器 - 验证、解析和排序章节ID
 
     Chapter ID Validator - Validates, parses, and sorts chapter identifiers.
@@ -313,6 +313,36 @@ class ChapterIDValidator:
         volume_distance = abs(current_vol - target_vol)
         chapter_offset = min(current_ch, target_ch)
         return volume_distance * avg_chapters_per_volume + chapter_offset
+
+    @staticmethod
+    def compare(left_chapter: str, right_chapter: str) -> Optional[int]:
+        """Compare narrative order, treating an omitted volume as the peer's volume."""
+
+        left = ChapterIDValidator.parse(left_chapter)
+        right = ChapterIDValidator.parse(right_chapter)
+        if not left or not right:
+            return None
+
+        left_volume = left["volume"] or right["volume"] or 1
+        right_volume = right["volume"] or left["volume"] or 1
+
+        def order_key(parsed: Dict[str, int], volume: int) -> tuple[int, int, int, int]:
+            type_order = 0 if not parsed["type"] else 1
+            return volume, parsed["chapter"], type_order, parsed["seq"]
+
+        left_key = order_key(left, left_volume)
+        right_key = order_key(right, right_volume)
+        if left_key < right_key:
+            return -1
+        if left_key > right_key:
+            return 1
+        return 0
+
+    @staticmethod
+    def is_after(candidate_chapter: str, reference_chapter: str) -> bool:
+        """Return whether *candidate_chapter* is narratively after *reference_chapter*."""
+
+        return ChapterIDValidator.compare(candidate_chapter, reference_chapter) == 1
 
     @staticmethod
     def extract_volume_id(chapter_id: str) -> Optional[str]:

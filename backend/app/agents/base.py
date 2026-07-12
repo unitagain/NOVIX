@@ -21,6 +21,7 @@ from app.prompts import base_agent_system_prompt, format_context_message
 from app.utils.llm_output import parse_json_payload
 from app.utils.json_metrics import record_json_result
 from app.utils.logger import get_logger
+from app.error_contract import record_degradation
 
 logger = get_logger(__name__)
 
@@ -223,8 +224,8 @@ class BaseAgent(ABC):
         data, err = parse_json_payload(raw_text, expected_type=expected_type)
         try:
             record_json_result(config_agent or self.get_agent_name(), success=not err)
-        except Exception:
-            pass
+        except Exception as exc:
+            record_degradation("agent_json_metrics", exc)
         if err:
             logger.warning("JSON 结构化解析失败 [%s]: %s", self.get_agent_name(), err)
         return data, err, raw_text

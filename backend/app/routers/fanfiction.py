@@ -158,8 +158,8 @@ async def preview_page(request: PreviewRequest):
             links=result["links"],
             is_list_page=result["is_list_page"],
         )
-    except Exception as e:
-        return PreviewResponse(success=False, error=str(e))
+    except Exception:
+        return PreviewResponse(success=False, error="Preview request failed")
 
 
 @router.post("/extract", response_model=ExtractResponse)
@@ -200,7 +200,7 @@ async def extract_cards(request: ExtractRequest):
         }
     except Exception as e:
         logger.error("Extraction failed: %s", e, exc_info=True)
-        return {"success": False, "error": str(e), "proposals": []}
+        return {"success": False, "error": "Extraction request failed", "proposals": []}
 
 
 @router.post("/extract/batch", response_model=ExtractResponse)
@@ -252,4 +252,4 @@ async def batch_extract_cards(request: BatchExtractRequest):
 
     except Exception as e:
         logger.error("Batch extraction failed: %s", e, exc_info=True)
-        return {"success": False, "error": str(e), "proposals": []}
+        return {"success": False, "error": "Batch extraction request failed", "proposals": []}

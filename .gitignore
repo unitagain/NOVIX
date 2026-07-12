@@ -76,6 +76,18 @@ data/agent_assignments.json
 backend/data/llm_profiles.json
 backend/data/agent_assignments.json
 
+# Longform benchmark private data
+benchmarks/
+benchmarks/**/corpus/
+benchmarks/**/generated/
+benchmarks/**/gold/
+benchmarks/**/runs/
+backend/benchmarks/
+backend/benchmarks/**/corpus/
+backend/benchmarks/**/generated/
+backend/benchmarks/**/gold/
+backend/benchmarks/**/runs/
+
 # Logs
 *.log
 logs/

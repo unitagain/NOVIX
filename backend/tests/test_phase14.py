@@ -47,6 +47,20 @@ def test_confirm_facts_missing_id_noop(tmp_path):
     assert asyncio.run(s.confirm_facts("p1", ["NOPE"])) == 0
 
 
+def test_reject_facts_keeps_source_chain(tmp_path):
+    s = CanonStorage(str(tmp_path))
+    asyncio.run(
+        s.add_fact(
+            "p1",
+            Fact(id="F1", statement="AI 抽错的事实", source="V1C001", introduced_in="V1C001", status="needs_review"),
+        )
+    )
+    assert asyncio.run(s.reject_facts("p1", ["F1"])) == 1
+    assert asyncio.run(s.list_facts_by_status("p1", ["needs_review"])) == []
+    rejected = asyncio.run(s.list_facts_by_status("p1", ["rejected"]))
+    assert rejected[0]["source"] == "V1C001"
+
+
 # ---------- 动作④ 权限分级 ----------
 
 
@@ -61,12 +75,15 @@ def test_permission_write_ask():
     assert permission_for("edit_chapter") == "ask"
     assert not is_allowed("add_fact")
     assert requires_confirmation("add_fact")
+    assert requires_confirmation("confirm_memory")
+    assert requires_confirmation("reject_facts")
     assert not is_denied("add_fact")
 
 
 def test_permission_delete_deny():
     assert permission_for("delete_chapter") == "deny"
     assert is_denied("delete_fact")
+    assert is_denied("delete_memory")
     assert not requires_confirmation("delete_fact")
 
 

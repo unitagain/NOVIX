@@ -47,8 +47,18 @@ def test_route_contract_distinguishes_agent_plan_and_fallback():
 
 def test_service_and_memory_boundaries_are_explicit():
     services = {item["name"]: item for item in service_boundaries()}
-    assert {"context_preparation", "plan_execution", "finalize_analysis", "isolated_tasks"} <= set(services)
-    assert services["context_preparation"]["target"] == "ContextPlan service"
+    assert {
+        "context_preparation",
+        "plan_execution",
+        "finalize_analysis",
+        "isolated_tasks",
+        "control_plane",
+    } <= set(services)
+    assert "ContextPlanningService" in services["context_preparation"]["target"]
+    assert services["plan_execution"]["current"] == "PlanExecutionService"
+    assert "FinalizePipeline" in services["finalize_analysis"]["current"]
+    assert "WorkerTaskService" in services["isolated_tasks"]["current"]
+    assert "SQLite" in services["control_plane"]["current"]
 
     memory = memory_asset_boundaries()
     assert set(memory) == {"canon", "memory", "memory_pack"}

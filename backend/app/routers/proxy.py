@@ -11,6 +11,7 @@ from typing import Optional, List
 from app.utils.logger import get_logger
 from app.utils.openai_client import create_async_openai_client
 from app.utils.anthropic_client import create_async_anthropic_client
+from app.services.llm_config_service import llm_config_service
 
 logger = get_logger(__name__)
 
@@ -19,13 +20,15 @@ router = APIRouter(prefix="/proxy", tags=["proxy"])
 
 class FetchModelsRequest(BaseModel):
     provider: str
-    api_key: str
+    api_key: Optional[str] = None
+    profile_id: Optional[str] = None
     base_url: Optional[str] = None
 
 
 class TestModelRequest(BaseModel):
     provider: str
-    api_key: str
+    api_key: Optional[str] = None
+    profile_id: Optional[str] = None
     model: str
     base_url: Optional[str] = None
 
@@ -77,6 +80,18 @@ GENERIC_FALLBACK_MODELS = {
 }
 
 
+def _resolve_api_key(api_key: Optional[str], profile_id: Optional[str]) -> str:
+    supplied = str(api_key or "").strip()
+    if supplied:
+        return supplied
+    if profile_id:
+        profile = llm_config_service.get_profile_by_id(profile_id)
+        stored = str((profile or {}).get("api_key") or "").strip()
+        if stored:
+            return stored
+    raise HTTPException(status_code=400, detail="API key is required")
+
+
 def _fallback_models_for_provider(provider: str) -> List[str]:
     normalized = str(provider or "").strip().lower()
     if normalized == "anthropic":
@@ -92,13 +107,14 @@ async def fetch_models(request: FetchModelsRequest):
     try:
         provider = str(request.provider or "").strip().lower()
         base_url = (request.base_url or "").strip() or None
+        api_key = _resolve_api_key(request.api_key, request.profile_id)
 
         # Anthropic: use official SDK Models API (not OpenAI-compatible /v1/models).
         # Always return from this branch to avoid fallthrough to OpenAI client.
         if provider == "anthropic":
             try:
                 logger.debug("Fetch Models Debug: Provider=anthropic, BaseURL=%s", base_url or "(default)")
-                client = create_async_anthropic_client(api_key=request.api_key, base_url=base_url)
+                client = create_async_anthropic_client(api_key=api_key, base_url=base_url)
 
                 paginator = client.models.list(limit=200)
                 model_ids: List[str] = []
@@ -122,7 +138,7 @@ async def fetch_models(request: FetchModelsRequest):
                 logger.warning("Fetch Models Error (anthropic): %s", str(e))
                 return {
                     "models": ANTHROPIC_FALLBACK_MODELS,
-                    "warning": f"Anthropic model list fetch failed, returning built-in fallback. Reason: {str(e)}",
+                    "warning": "Anthropic model list fetch failed; using the built-in fallback list.",
                 }
 
         # Determine base URL based on provider if not provided
@@ -134,7 +150,7 @@ async def fetch_models(request: FetchModelsRequest):
         logger.debug("Fetch Models Debug: Provider=%s, BaseURL=%s", provider, base_url)
 
         client = create_async_openai_client(
-            api_key=request.api_key,
+            api_key=api_key,
             base_url=base_url,
         )
 
@@ -151,11 +167,10 @@ async def fetch_models(request: FetchModelsRequest):
         if fallback_models:
             return {
                 "models": fallback_models,
-                "warning": f"Model list fetch failed, returning built-in fallback. Reason: {str(e)}",
+                "warning": "Model list fetch failed; using the built-in fallback list.",
             }
-        detail = str(e)
         status_code = getattr(e, "status_code", None) or 400
-        raise HTTPException(status_code=status_code, detail=detail)
+        raise HTTPException(status_code=status_code, detail="Provider model list request failed")
 
 
 @router.post("/test-model")
@@ -170,9 +185,10 @@ async def test_model(request: TestModelRequest):
             raise HTTPException(status_code=400, detail="Model is required.")
 
         base_url = (request.base_url or "").strip() or _default_base_url_for_provider(provider)
+        api_key = _resolve_api_key(request.api_key, request.profile_id)
 
         if provider == "anthropic":
-            client = create_async_anthropic_client(api_key=request.api_key, base_url=base_url)
+            client = create_async_anthropic_client(api_key=api_key, base_url=base_url)
             response = await client.messages.create(
                 model=model,
                 max_tokens=16,
@@ -185,7 +201,7 @@ async def test_model(request: TestModelRequest):
                 content = getattr(first, "text", "") or ""
             return {"success": True, "provider": provider, "model": model, "message": content or "OK"}
 
-        client = create_async_openai_client(api_key=request.api_key, base_url=base_url)
+        client = create_async_openai_client(api_key=api_key, base_url=base_url)
         try:
             response = await client.chat.completions.create(
                 model=model,
@@ -215,4 +231,4 @@ async def test_model(request: TestModelRequest):
     except Exception as e:
         logger.warning("Test Model Error: %s", str(e))
         status_code = getattr(e, "status_code", None) or 400
-        raise HTTPException(status_code=status_code, detail=str(e))
+        raise HTTPException(status_code=status_code, detail="Provider model test failed")

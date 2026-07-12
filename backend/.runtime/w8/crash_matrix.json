@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "cases": [
+    {
+      "boundary": "file_staging",
+      "success": true
+    },
+    {
+      "boundary": "file_replace",
+      "success": true
+    },
+    {
+      "boundary": "generation_begin_end",
+      "success": true
+    },
+    {
+      "boundary": "sqlite_commit",
+      "success": true
+    },
+    {
+      "boundary": "provider_completion",
+      "success": true
+    },
+    {
+      "boundary": "job_completion",
+      "success": true
+    },
+    {
+      "boundary": "restore_switch",
+      "success": true
+    }
+  ],
+  "boundaries": 7
+}

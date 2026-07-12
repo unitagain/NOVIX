@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "action": "agentic_write",
+  "fallback": false,
+  "runtime_state": "completed",
+  "route": "agentic_writer",
+  "plan_version": 2,
+  "assembly_fingerprint": "3678217b163529352d34b1cdd4882f52a06dadb3f3314610a36062bdd5e36d20",
+  "llm_requests": 3
+}

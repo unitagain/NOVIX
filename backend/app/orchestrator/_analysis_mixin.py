@@ -21,8 +21,9 @@ from app.schemas.draft import ChapterSummary
 from app.schemas.card import StyleCard
 from app.schemas.evidence import EvidenceItem
 from app.utils.chapter_id import ChapterIDValidator
+from app.error_contract import safe_error_code
 from app.utils.logger import get_logger
-from app.orchestrator._types import SessionStatus
+from app.orchestrator.contracts import SessionStatus
 
 logger = get_logger(__name__)
 
@@ -61,33 +62,6 @@ class AnalysisMixin:
                     return volume_id
         normalized = self._normalize_chapter_id(chapter)
         return ChapterIDValidator.extract_volume_id(normalized) or "V1"
-
-    async def _refresh_volume_summaries(self, project_id: str, volume_ids: List[str]) -> None:
-        """
-        刷新分卷摘要（每卷一次） / Rebuild volume summaries once per volume (best-effort).
-
-        Generates volume-level summaries by aggregating chapter summaries.
-        Prevents redundant processing by deduplicating volume IDs.
-
-        Args:
-            project_id: 项目ID / Project identifier.
-            volume_ids: 分卷ID列表 / List of volume IDs to refresh.
-        """
-        seen = set()
-        for volume_id in [str(v or "").strip() for v in (volume_ids or []) if str(v or "").strip()]:
-            if volume_id in seen:
-                continue
-            seen.add(volume_id)
-            try:
-                volume_summaries = await self.draft_storage.list_chapter_summaries(project_id, volume_id=volume_id)
-                volume_summary = await self.archivist.generate_volume_summary(
-                    project_id=project_id,
-                    volume_id=volume_id,
-                    chapter_summaries=volume_summaries,
-                )
-                await self.draft_storage.volume_storage.save_volume_summary(project_id, volume_summary)
-            except Exception as exc:
-                logger.warning("Failed to refresh volume summary for %s: %s", volume_id, exc)
 
     async def analyze_chapter(
         self,
@@ -138,7 +112,7 @@ class AnalysisMixin:
             await self._update_status(SessionStatus.IDLE, "Analysis completed.")
             return {"success": True, "analysis": analysis}
         except Exception as exc:
-            return await self._handle_error(f"Analysis failed: {exc}", exc=exc)
+            return await self._handle_error("Analysis failed", exc=exc)
 
     async def _build_analysis(
         self,
@@ -283,7 +257,7 @@ class AnalysisMixin:
                             limit=5,
                         )
                     except Exception as exc:
-                        bindings_result["focus_error"] = str(exc)
+                        bindings_result["focus_error"] = safe_error_code(exc)
 
                     base_binding = await chapter_binding_service.build_bindings(project_id, chapter, force=True)
                     if focus_characters:
@@ -298,15 +272,15 @@ class AnalysisMixin:
                     bindings_result["binding_method"] = base_binding.get("binding_method")
                     bindings_result["focus_characters"] = focus_characters
                 except Exception as exc:
-                    bindings_result["bindings_error"] = str(exc)
+                    bindings_result["bindings_error"] = safe_error_code(exc)
                 # 将 analysis 一并返回给前端，用于批量同步后展示/校对“事实/摘要”等分析内容。
                 # 注意：此处 analysis 已经持久化（save_analysis），前端若二次编辑可通过 save-analysis-batch 覆盖写入。
                 results.append({"chapter": chapter, "analysis": analysis, **save_result, **bindings_result})
             except Exception as exc:
-                results.append({"chapter": chapter, "success": False, "error": str(exc)})
+                results.append({"chapter": chapter, "success": False, "error": safe_error_code(exc)})
 
         await emit_progress("同步收尾：刷新分卷摘要...")
-        await self._refresh_volume_summaries(project_id, volume_ids_to_refresh)
+        await self.volume_summary_service.refresh(project_id, volume_ids_to_refresh)
         await emit_progress("同步完成")
         return {"success": True, "results": results}
 
@@ -344,7 +318,7 @@ class AnalysisMixin:
                 )
                 results.append({"chapter": chapter, "success": True, "analysis": analysis})
             except Exception as exc:
-                results.append({"chapter": chapter, "success": False, "error": str(exc)})
+                results.append({"chapter": chapter, "success": False, "error": safe_error_code(exc)})
 
         return {"success": True, "results": results}
 
@@ -389,8 +363,8 @@ class AnalysisMixin:
                 )
                 results.append({"chapter": chapter, **result})
             except Exception as exc:
-                results.append({"chapter": chapter, "success": False, "error": str(exc)})
-        await self._refresh_volume_summaries(project_id, volume_ids_to_refresh)
+                results.append({"chapter": chapter, "success": False, "error": safe_error_code(exc)})
+        await self.volume_summary_service.refresh(project_id, volume_ids_to_refresh)
         return {"success": True, "results": results}
 
     async def save_analysis(
@@ -528,7 +502,7 @@ class AnalysisMixin:
                 },
             }
         except Exception as exc:
-            return await self._handle_error(f"Analysis save failed: {exc}", exc=exc)
+            return await self._handle_error("Analysis save failed", exc=exc)
 
     async def _analyze_content(self, project_id: str, chapter: str, content: str):
         """
@@ -578,7 +552,7 @@ class AnalysisMixin:
                 # Phase 14：AI 抽取默认 needs_review，待作者确认后才进 confirmed 主 canon。
                 try:
                     fact.status = "needs_review"
-                except Exception:
+                except (AttributeError, TypeError, ValueError):
                     pass
                 await self.canon_storage.add_fact(project_id, fact)
 
@@ -656,12 +630,14 @@ class AnalysisMixin:
             if not description:
                 continue
             try:
-                await self.creative_memory_storage.write_memory(
+                await self.creative_memory_storage.write_candidate_memory(
                     project_id,
                     slug=item.get("slug") or description[:24],
                     description=description,
                     body=item.get("body", ""),
                     mem_type=item.get("type", "preference"),
+                    source=f"chapter_finalize:{chapter}",
+                    confidence=0.6,
                 )
                 written += 1
             except Exception as exc:
@@ -808,7 +784,7 @@ class AnalysisMixin:
                         meta=raw.get("meta") or {},
                     )
                 )
-            except Exception:
+            except (KeyError, TypeError, ValueError):
                 continue
 
         if items:

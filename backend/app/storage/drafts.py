@@ -6,6 +6,7 @@ Manages scene briefs, drafts, reviews, and summaries.
 """
 
 import shutil
+import hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,9 +14,12 @@ import os
 
 from app.config import config as app_cfg
 from app.context.retriever import DynamicContextRetriever
+from app.control_plane.store import RevisionConflict, SQLiteControlStore
 from app.schemas.draft import ChapterSummary, Draft, ReviewResult, SceneBrief
 from app.schemas.volume import VolumeSummary
 from app.storage.base import BaseStorage
+from app.error_contract import record_degradation
+from app.storage.file_lock import get_file_lock
 from app.storage.volumes import VolumeStorage
 from app.utils.chapter_id import ChapterIDValidator, normalize_chapter_id
 
@@ -29,6 +33,7 @@ class DraftStorage(BaseStorage):
 
     def __init__(self, data_dir: Optional[str] = None):
         super().__init__(data_dir)
+        self.control_store = SQLiteControlStore(Path(self.data_dir) / "_system" / "control.sqlite3")
         self.context_retriever = DynamicContextRetriever(self)
         self.volume_storage = VolumeStorage(data_dir)
 
@@ -125,6 +130,7 @@ class DraftStorage(BaseStorage):
         word_count: Optional[int] = None,
         pending_confirmations: Optional[List[str]] = None,
         create_prev_backup: bool = True,
+        expected_revision: Optional[int] = None,
     ) -> Draft:
         """Save the current draft (single-version) to final.md.
 
@@ -145,8 +151,55 @@ class DraftStorage(BaseStorage):
         """
         canonical = self._canonicalize_chapter_id(chapter)
         final_path, history_dir = self._final_paths(project_id, canonical)
+        file_lock = get_file_lock()
+        async with self.content_transaction(project_id):
+            async with file_lock.lock(final_path.parent / ".draft_transaction"):
+                return await self._save_current_draft_unlocked(
+                    project_id=project_id,
+                    canonical=canonical,
+                    final_path=final_path,
+                    history_dir=history_dir,
+                    content=content,
+                    word_count=word_count,
+                    pending_confirmations=pending_confirmations,
+                    create_prev_backup=create_prev_backup,
+                    expected_revision=expected_revision,
+                )
+
+    async def _save_current_draft_unlocked(
+        self,
+        *,
+        project_id: str,
+        canonical: str,
+        final_path: Path,
+        history_dir: Path,
+        content: str,
+        word_count: Optional[int],
+        pending_confirmations: Optional[List[str]],
+        create_prev_backup: bool,
+        expected_revision: Optional[int],
+    ) -> Draft:
+        """Save draft content and metadata while the chapter transaction is held."""
+
         payload = content or ""
         wc = int(word_count if word_count is not None else len(payload))
+        revision_key = f"{project_id}/{canonical}/final.md"
+        fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        revision = self.control_store.get_revision("draft", revision_key)
+        if expected_revision is not None and int(revision["revision"]) != int(expected_revision):
+            from app.observability.runtime_metrics import runtime_metrics
+
+            runtime_metrics.increment("commit.conflict")
+            raise RevisionConflict(f"revision_conflict:{revision['revision']}!={int(expected_revision)}")
+        if revision["fingerprint"] == fingerprint and final_path.exists():
+            return Draft(
+                chapter=canonical,
+                version="current",
+                content=payload,
+                word_count=wc,
+                pending_confirmations=pending_confirmations or [],
+                created_at=datetime.now(),
+            )
 
         if create_prev_backup and final_path.exists():
             self._rotate_draft_history(final_path, history_dir)
@@ -177,65 +230,16 @@ class DraftStorage(BaseStorage):
         )
         meta_path = final_path.with_suffix(".meta.yaml")
         await self.write_yaml(meta_path, draft.model_dump(mode="json"))
+        self.control_store.bump_revision(
+            "draft",
+            revision_key,
+            expected_revision=int(revision["revision"]),
+            fingerprint=fingerprint,
+        )
+        from app.observability.runtime_metrics import runtime_metrics
+
+        runtime_metrics.increment("commit.success")
         return draft
-
-    async def get_chapter_tail_chunks(
-        self,
-        project_id: str,
-        chapter: str,
-        limit: int = 2,
-    ) -> List[Dict[str, Any]]:
-        """Return tail text chunks from the latest draft of a chapter.
-
-        Args:
-            project_id: Project id.
-            chapter: Chapter id.
-            limit: Number of tail chunks to return.
-
-        Returns:
-            List of tail text chunk payloads.
-        """
-        limit = max(int(limit or 0), 0)
-        if limit <= 0:
-            return []
-
-        draft_path = self.get_latest_draft_file(project_id, chapter)
-        if not draft_path or not draft_path.exists():
-            return []
-
-        try:
-            text = await self.read_text(draft_path)
-        except Exception:
-            return []
-
-        from app.services.text_chunk_service import text_chunk_service
-
-        chunks = text_chunk_service.split_text_to_chunks(text)
-        if not chunks:
-            return []
-
-        rel_path = draft_path.relative_to(self.get_project_path(project_id)).as_posix()
-        draft_label = "final" if draft_path.name == "final.md" else draft_path.stem.replace("draft_", "")
-        tail_chunks = chunks[-limit:]
-        payloads = []
-        for chunk in tail_chunks:
-            payloads.append(
-                {
-                    "text": chunk.get("text"),
-                    "chapter": chapter,
-                    "source": {
-                        "chapter": chapter,
-                        "draft": draft_label,
-                        "path": rel_path,
-                        "paragraph": chunk.get("paragraph"),
-                        "window": chunk.get("window"),
-                        "start": chunk.get("start"),
-                        "end": chunk.get("end"),
-                        "tail": True,
-                    },
-                }
-            )
-        return payloads
 
     def _migrate_chapter_dir(self, project_id: str, chapter: str, canonical: str) -> None:
         drafts_dir = self.get_project_path(project_id) / "drafts"
@@ -313,6 +317,7 @@ class DraftStorage(BaseStorage):
         content: str,
         word_count: int,
         pending_confirmations: Optional[List[str]] = None,
+        expected_revision: Optional[int] = None,
     ) -> Draft:
         """Save a draft."""
         canonical = self._canonicalize_chapter_id(chapter)
@@ -327,10 +332,31 @@ class DraftStorage(BaseStorage):
         )
 
         file_path = self.get_project_path(project_id) / "drafts" / canonical / f"draft_{version}.md"
-        await self.write_text(file_path, content)
-
         meta_path = self.get_project_path(project_id) / "drafts" / canonical / f"draft_{version}.meta.yaml"
-        await self.write_yaml(meta_path, draft.model_dump(mode="json"))
+        file_lock = get_file_lock()
+        async with self.content_transaction(project_id):
+            async with file_lock.lock(file_path.parent / ".draft_transaction"):
+                revision_key = f"{project_id}/{canonical}/draft_{version}.md"
+                fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                revision = self.control_store.get_revision("draft", revision_key)
+                if expected_revision is not None and int(revision["revision"]) != int(expected_revision):
+                    from app.observability.runtime_metrics import runtime_metrics
+
+                    runtime_metrics.increment("commit.conflict")
+                    raise RevisionConflict(f"revision_conflict:{revision['revision']}!={int(expected_revision)}")
+                if revision["fingerprint"] == fingerprint and file_path.exists():
+                    return draft
+                await self.write_text(file_path, content)
+                await self.write_yaml(meta_path, draft.model_dump(mode="json"))
+                self.control_store.bump_revision(
+                    "draft",
+                    revision_key,
+                    expected_revision=int(revision["revision"]),
+                    fingerprint=fingerprint,
+                )
+                from app.observability.runtime_metrics import runtime_metrics
+
+                runtime_metrics.increment("commit.success")
 
         return draft
 
@@ -339,16 +365,21 @@ class DraftStorage(BaseStorage):
         resolved = self._resolve_chapter_dir_name(project_id, chapter)
         canonical = self._canonicalize_chapter_id(chapter)
         file_path = self.get_project_path(project_id) / "drafts" / resolved / f"draft_{version}.md"
-        if not file_path.exists():
-            return None
-
-        content = await self.read_text(file_path)
         meta_path = self.get_project_path(project_id) / "drafts" / resolved / f"draft_{version}.meta.yaml"
+        file_lock = get_file_lock()
+        async with file_lock.lock(file_path.parent / ".draft_transaction"):
+            if not file_path.exists():
+                return None
 
-        if meta_path.exists():
-            meta = await self.read_yaml(meta_path)
-            meta["chapter"] = canonical or meta.get("chapter") or chapter
-            return Draft(**meta)
+            content = await self.read_text(file_path)
+            if meta_path.exists():
+                meta = await self.read_yaml(meta_path)
+                meta["chapter"] = canonical or meta.get("chapter") or chapter
+                # The prose file is authoritative. This repairs a crash between
+                # content and metadata replacement instead of returning stale text.
+                meta["content"] = content
+                meta["word_count"] = len(content)
+                return Draft(**meta)
 
         return Draft(
             chapter=canonical or chapter,
@@ -396,14 +427,26 @@ class DraftStorage(BaseStorage):
         data = await self.read_yaml(file_path)
         return ReviewResult(**data)
 
-    async def save_final_draft(self, project_id: str, chapter: str, content: str) -> None:
+    async def save_final_draft(
+        self,
+        project_id: str,
+        chapter: str,
+        content: str,
+        expected_revision: Optional[int] = None,
+    ) -> None:
         """Save a final draft."""
         await self.save_current_draft(
             project_id=project_id,
             chapter=chapter,
             content=content,
             create_prev_backup=True,
+            expected_revision=expected_revision,
         )
+
+    def get_draft_revision(self, project_id: str, chapter: str, version: str = "current") -> Dict[str, Any]:
+        canonical = self._canonicalize_chapter_id(chapter)
+        name = "final.md" if version == "current" else f"draft_{version}.md"
+        return self.control_store.get_revision("draft", f"{project_id}/{canonical}/{name}")
 
     async def get_final_draft(self, project_id: str, chapter: str) -> Optional[str]:
         """Get a final draft."""
@@ -428,9 +471,9 @@ class DraftStorage(BaseStorage):
                 content=text,
                 create_prev_backup=False,
             )
-        except Exception:
+        except Exception as exc:
             # Migration is best-effort; still return the legacy content if saving failed.
-            pass
+            record_degradation("draft_legacy_migration", exc)
         return text
 
     async def save_chapter_summary(self, project_id: str, summary: ChapterSummary) -> None:
@@ -480,7 +523,7 @@ class DraftStorage(BaseStorage):
                 if chapter_id not in summaries or current_mtime > summary_mtime.get(chapter_id, 0):
                     summaries[chapter_id] = summary
                     summary_mtime[chapter_id] = current_mtime
-            except Exception:
+            except (OSError, UnicodeError, TypeError, ValueError):
                 continue
 
         def summary_sort_key(summary: ChapterSummary):
@@ -617,61 +660,6 @@ class DraftStorage(BaseStorage):
                 summaries.append(summary)
         return summaries
 
-    async def search_text_chunks(
-        self,
-        project_id: str,
-        query: str,
-        limit: int = 8,
-        queries: Optional[List[str]] = None,
-        chapters: Optional[List[str]] = None,
-        exclude_chapters: Optional[List[str]] = None,
-        rebuild: bool = False,
-        semantic_rerank: bool = False,
-        rerank_query: Optional[str] = None,
-        rerank_top_k: int = 16,
-    ) -> List[Dict[str, Any]]:
-        """Search indexed text chunks for a query.
-
-        Args:
-            project_id: Project id.
-            query: Query string.
-            limit: Max results.
-            chapters: Chapter whitelist.
-            exclude_chapters: Chapter blacklist.
-            rebuild: Force rebuild index.
-
-        Returns:
-            Ranked text chunk hits.
-        """
-        from app.services.text_chunk_service import text_chunk_service
-
-        return await text_chunk_service.search(
-            project_id=project_id,
-            query=query,
-            limit=limit,
-            queries=queries,
-            chapters=chapters,
-            exclude_chapters=exclude_chapters,
-            rebuild=rebuild,
-            semantic_rerank=semantic_rerank,
-            rerank_query=rerank_query,
-            rerank_top_k=rerank_top_k,
-        )
-
-    async def rebuild_text_chunk_index(self, project_id: str) -> Dict[str, Any]:
-        """Force rebuild of text chunk index.
-
-        Args:
-            project_id: Project id.
-
-        Returns:
-            Index metadata.
-        """
-        from app.services.text_chunk_service import text_chunk_service
-
-        meta = await text_chunk_service.build_index(project_id, force=True)
-        return meta.model_dump(mode="json")
-
     async def save_conflict_report(self, project_id: str, chapter: str, report: Dict[str, Any]) -> None:
         """Save a conflict report."""
         canonical = self._canonicalize_chapter_id(chapter)
@@ -691,7 +679,7 @@ class DraftStorage(BaseStorage):
         if raw.startswith("V"):
             try:
                 return int(raw[1:])
-            except Exception:
+            except (TypeError, ValueError):
                 return 0
         return 0
 

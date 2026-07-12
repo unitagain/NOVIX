@@ -16,10 +16,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from app.dependencies import get_draft_storage
+from app.services.text_chunk_service import text_chunk_service
 
 router = APIRouter(prefix="/projects/{project_id}/text-chunks", tags=["text_chunks"])
-draft_storage = get_draft_storage()
 
 
 class TextChunkSearchRequest(BaseModel):
@@ -45,7 +44,7 @@ async def search_text_chunks(project_id: str, request: TextChunkSearchRequest):
     Returns:
         Search results.
     """
-    results = await draft_storage.search_text_chunks(
+    results = await text_chunk_service.search(
         project_id=project_id,
         query=request.query,
         limit=request.limit,
@@ -66,5 +65,5 @@ async def rebuild_text_chunk_index(project_id: str):
     Returns:
         Rebuild metadata.
     """
-    meta = await draft_storage.rebuild_text_chunk_index(project_id)
-    return {"success": True, "meta": meta}
+    meta = await text_chunk_service.build_index(project_id, force=True)
+    return {"success": True, "meta": meta.model_dump(mode="json")}

@@ -97,6 +97,30 @@ def test_query_relations_traverses_graph(tmp_path):
     assert "敌对" in out and "V3C005" in out  # 关系 + 章节出处
 
 
+def test_query_relations_excludes_future_relationships(tmp_path):
+    import json as _json
+
+    rel_file = tmp_path / "relations.jsonl"
+    rows = [
+        {"subject": "张三", "relation": "盟友", "object": "李四", "chapter": "V1C009"},
+        {"subject": "张三", "relation": "敌对", "object": "李四", "chapter": "V1C011"},
+    ]
+    rel_file.write_text(
+        "\n".join(_json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    class _AdapterWithRelations(_FakeAdapter):
+        def get_relations_path(self, pid):
+            return rel_file
+
+    ts = WriterToolset("p1", _AdapterWithRelations(), _FakeSelect(), current_chapter="V1C010")
+    out = asyncio.run(ts.execute("query_relations", {"entity": "张三", "other": "李四"}))
+
+    assert "盟友" in out and "V1C009" in out
+    assert "敌对" not in out and "V1C011" not in out
+
+
 def test_query_relations_missing_entity_is_graceful():
     out = asyncio.run(_toolset().execute("query_relations", {}))
     assert "需要 entity" in out
@@ -107,9 +131,41 @@ def test_read_chapter_head_tail():
     assert "V1C001" in out and "张三" in out
 
 
+def test_read_chapter_rejects_future_chapter():
+    out = asyncio.run(_toolset().execute("read_chapter", {"chapter_id": "V1C011"}))
+
+    assert "拒绝读取" in out
+    assert "V1C011" in out and "V1C010" in out
+
+
 def test_search_prose_hits():
     out = asyncio.run(_toolset().execute("search_prose", {"query": "迷雾"}))
     assert "迷雾" in out
+
+
+def test_search_prose_excludes_future_chunks_and_backfills_past_results():
+    class _TemporalAdapter(_FakeAdapter):
+        def __init__(self):
+            super().__init__()
+            self.requested_limit = 0
+
+        async def search_text_chunks(self, pid, query, limit=5):
+            self.requested_limit = limit
+            rows = [
+                {"chapter": "V1C012", "text": "未来片段一"},
+                {"chapter": "V1C011", "text": "未来片段二"},
+                {"chapter": "V1C009", "text": "过去片段一"},
+                {"chapter": "V1C008", "text": "过去片段二"},
+            ]
+            return rows[:limit]
+
+    adapter = _TemporalAdapter()
+    ts = WriterToolset("p1", adapter, _FakeSelect(), current_chapter="V1C010")
+    out = asyncio.run(ts.execute("search_prose", {"query": "片段", "top_k": 2}))
+
+    assert adapter.requested_limit > 2
+    assert "过去片段一" in out and "过去片段二" in out
+    assert "未来片段" not in out
 
 
 def test_unknown_tool_is_graceful():
