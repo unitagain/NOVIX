@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 from app.llm_gateway.contracts import ProviderUsage
 
 
-CAMPAIGN_SCHEMA_VERSION = 1
+CAMPAIGN_SCHEMA_VERSION = 2
 
 
 def stable_fingerprint(value: Any) -> str:
@@ -44,6 +44,8 @@ class CampaignStopRules:
     loss_ci_upper: float = 0.45
     futility_ci_width: float = 0.08
     comparable_rate: float = 0.90
+    position_consistency: float = 0.95
+    judge_agreement: float = 0.80
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,7 @@ class EvalCampaign:
     stop: CampaignStopRules = field(default_factory=CampaignStopRules)
     privacy: CampaignPrivacy = field(default_factory=CampaignPrivacy)
     retry_provider_errors: bool = False
+    pairwise_retries: int = 2
     schema_version: int = CAMPAIGN_SCHEMA_VERSION
 
     @classmethod
@@ -93,6 +96,14 @@ class EvalCampaign:
             stop=CampaignStopRules(**dict(value.get("stop") or {})),
             privacy=CampaignPrivacy(**dict(value.get("privacy") or {})),
             retry_provider_errors=bool(value.get("retry_provider_errors", False)),
+            pairwise_retries=max(
+                0,
+                int(
+                    value.get("pairwise_retries")
+                    if value.get("pairwise_retries") is not None
+                    else (1 if value.get("retry_provider_errors", False) else 0)
+                ),
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:

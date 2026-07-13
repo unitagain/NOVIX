@@ -15,6 +15,7 @@ from app.eval.longform_benchmark import (
     LongformBenchmarkHarness,
     RetrievalStrategySpec,
     _api_safety_block_reason,
+    _candidate_semantic_completeness,
     _load_api_safety_policy,
     _paragraphs,
     _sentence_split,
@@ -22,6 +23,7 @@ from app.eval.longform_benchmark import (
     ensure_benchmark_gitignore,
     read_json,
     read_jsonl,
+    write_json,
     write_jsonl,
 )
 
@@ -287,6 +289,141 @@ def test_strategy_ab_preflight_filters_identical_contexts_without_provider_calls
     assert all("scene_id" in row and "strategies" in row for row in result["rows"])
 
 
+def test_scene_windows_keep_non_overlapping_held_out_continuation():
+    paragraphs = [f"第{index}段正文" * 30 for index in range(1, 6)]
+    windows = LongformBenchmarkHarness._chapter_scene_windows(paragraphs, [], max_windows=2)
+
+    assert windows[0]["reference_continuation"]
+    assert windows[0]["reference_continuation"] not in windows[0]["text"]
+    assert windows[0]["text"] not in windows[0]["reference_continuation"]
+
+
+def test_refresh_strategy_references_migrates_existing_candidates_without_content_loss(tmp_path):
+    harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
+    paths = harness.paths("reference-migration")
+    write_jsonl(
+        paths.generated_dir / "candidate_scene_briefs.jsonl",
+        [{"id": "scene-1", "reference_continuation": "真实后续片段"}],
+    )
+    write_jsonl(
+        paths.generated_dir / "strategy_ab_candidates.jsonl",
+        [{"id": "candidate-1", "scene_id": "scene-1", "candidate_text": "完整候选正文"}],
+    )
+
+    result = harness.refresh_strategy_references(benchmark_id="reference-migration")
+    rows = read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl")
+
+    assert result["references_attached"] == 1
+    assert rows[0]["candidate_text"] == "完整候选正文"
+    assert rows[0]["reference_excerpt"] == "真实后续片段"
+    assert rows[0]["reference_available"] is True
+    assert rows[0]["reference_sha256"]
+
+
+def test_strategy_pair_fingerprint_binds_held_out_reference():
+    first = {
+        "id": "pair-A",
+        "candidate_text": "候选 A",
+        "strategy_role": "A",
+        "retrieval_strategy": "bm25",
+        "reference_excerpt": "参考一",
+    }
+    second = {
+        "id": "pair-B",
+        "candidate_text": "候选 B",
+        "strategy_role": "B",
+        "retrieval_strategy": "jit_hybrid",
+        "reference_excerpt": "参考一",
+    }
+    original = LongformBenchmarkHarness._strategy_ab_pair_fingerprint(first, second)
+
+    changed = LongformBenchmarkHarness._strategy_ab_pair_fingerprint(
+        {**first, "reference_excerpt": "参考二"},
+        {**second, "reference_excerpt": "参考二"},
+    )
+
+    assert changed != original
+
+
+def test_strategy_human_review_pack_is_blinded_and_gold_is_content_free(tmp_path):
+    harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
+    paths = harness.paths("human-review")
+    pair_id = "pair-1"
+    common = {
+        "pair_id": pair_id,
+        "chapter_id": "c1",
+        "scene_id": "s1",
+        "prior_summary": "此前摘要",
+        "scene_brief": "继续当前场景",
+        "reference_excerpt": "原文后续",
+        "writer_provider": "writer",
+        "writer_model": "model",
+        "prompt_version": "writer-v1",
+    }
+    write_jsonl(
+        paths.generated_dir / "strategy_ab_candidates.jsonl",
+        [
+            {
+                **common,
+                "id": "pair-1-A",
+                "strategy_role": "A",
+                "retrieval_strategy": "bm25",
+                "candidate_text": "完整候选 A",
+                "retrieval_execution": {"execution_signature": "exec-a"},
+            },
+            {
+                **common,
+                "id": "pair-1-B",
+                "strategy_role": "B",
+                "retrieval_strategy": "jit_hybrid",
+                "candidate_text": "完整候选 B",
+                "retrieval_execution": {"execution_signature": "exec-b"},
+            },
+        ],
+    )
+
+    pack = harness.build_strategy_review_pack(benchmark_id="human-review", size=1)
+    reviews = read_jsonl(Path(pack["review_path"]))
+    assert reviews[0]["candidate_left"] in {"完整候选 A", "完整候选 B"}
+    assert "strategy_role" not in reviews[0]
+    harness.record_strategy_review(
+        review_path=pack["review_path"],
+        review_id=reviews[0]["review_id"],
+        winner="left",
+        reason_codes=["continuity", "continuity"],
+        reviewer="developer",
+    )
+
+    applied = harness.apply_strategy_review_pack(
+        benchmark_id="human-review",
+        review_path=pack["review_path"],
+        key_path=pack["key_path"],
+        reviewer="developer",
+    )
+
+    assert applied["success"] is True
+    gold = read_jsonl(Path(applied["gold_path"]))
+    assert gold[0]["human_winner"] in {"A", "B"}
+    assert gold[0]["reason_codes"] == ["continuity"]
+    assert "candidate_left" not in gold[0]
+    assert "candidate_text" not in gold[0]
+
+    harness.record_strategy_review(
+        review_path=pack["review_path"],
+        review_id=reviews[0]["review_id"],
+        winner="incomparable",
+        reason_codes=["both_truncated"],
+        reviewer="developer",
+    )
+    harness.apply_strategy_review_pack(
+        benchmark_id="human-review",
+        review_path=pack["review_path"],
+        key_path=pack["key_path"],
+        reviewer="developer",
+    )
+    assert read_jsonl(Path(applied["gold_path"]))[0]["human_winner"] == "incomparable"
+
+
 def test_strategy_ab_truncated_writer_attempts_are_billed_and_classified_as_data(tmp_path, monkeypatch):
     source = _write_corpus(tmp_path)
     harness = LongformBenchmarkHarness(
@@ -337,6 +474,69 @@ def test_strategy_ab_truncated_writer_attempts_are_billed_and_classified_as_data
     assert result["requests_attempted"] == 2
     assert result["usage"]["total_tokens"] == 200
     assert {row["reason"] for row in failures} == {"writer_output_truncated"}
+
+
+def test_strategy_pair_ids_are_scoped_by_writer_profile(tmp_path, monkeypatch):
+    source = _write_corpus(tmp_path)
+    harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
+    harness.import_corpus(source=source, benchmark_id="writer-scope", allow_external_api=True)
+    asyncio.run(harness.generate_candidates(benchmark_id="writer-scope", scene_windows=2))
+    scene_id = read_jsonl(harness.paths("writer-scope").generated_dir / "candidate_scene_briefs.jsonl")[0]["id"]
+
+    async def distinct_selection(**kwargs):
+        strategy = kwargs["spec"].name
+        return {
+            "requested_strategy": strategy,
+            "executed_strategy": strategy,
+            "strategy_fidelity": True,
+            "facts": [{"id": f"fact-{strategy}", "statement": f"context-{strategy}"}],
+            "latency_ms": 1.0,
+            "execution_signature": f"execution-{strategy}",
+        }
+
+    candidate_body = "她沿着昏暗的走廊缓慢向前，确认门外没有脚步声后，才把信封收进衣袋。" * 100
+
+    class SuccessfulGateway:
+        async def chat(self, _messages, *, provider, **_kwargs):
+            return {
+                "content": json.dumps(
+                    {
+                        "candidate_text": candidate_body,
+                        "self_check": {},
+                    }
+                ),
+                "provider": provider,
+                "model": f"model-{provider}",
+                "finish_reason": "stop",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            }
+
+    monkeypatch.setattr("app.eval.longform_benchmark.get_gateway", lambda: SuccessfulGateway())
+    monkeypatch.setattr(harness, "_select_writer_strategy_context", distinct_selection)
+    first = asyncio.run(
+        harness.generate_strategy_ab(
+            benchmark_id="writer-scope",
+            provider="writer-a",
+            scene_ids=[scene_id],
+        )
+    )
+    second = asyncio.run(
+        harness.generate_strategy_ab(
+            benchmark_id="writer-scope",
+            provider="writer-b",
+            scene_ids=[scene_id],
+            append=True,
+        )
+    )
+
+    assert len(first["pair_ids"]) == 1
+    assert len(second["pair_ids"]) == 1
+    assert set(first["pair_ids"]).isdisjoint(second["pair_ids"])
+    rows = read_jsonl(harness.paths("writer-scope").generated_dir / "strategy_ab_candidates.jsonl")
+    assert len(rows) == 4
+    assert all(row["candidate_text"] == candidate_body for row in rows)
+    assert all(row["candidate_char_count"] == len(candidate_body) for row in rows)
+    assert all(row["candidate_storage_complete"] is True for row in rows)
 
 
 def test_longform_benchmark_cli_help():
@@ -645,7 +845,14 @@ def test_calibration_writer_messages_have_full_and_low_context_variants():
         "prior_summary": "林舟来到孤岛，发现灯塔已经熄灭。",
         "resident_context": "此前沈砚确认铜钥匙仍由管家保管。",
     }
-    facts = [{"id": "F1", "statement": "钥匙一直在管家手里。", "context_rank_score": 0.8}]
+    facts = [
+        {
+            "id": "F1",
+            "statement": "钥匙一直在管家手里。",
+            "context_rank_score": 0.8,
+            "context_subject_entities": ["管家"],
+        }
+    ]
 
     full = LongformBenchmarkHarness._build_calibration_writer_messages(
         brief=brief,
@@ -667,6 +874,8 @@ def test_calibration_writer_messages_have_full_and_low_context_variants():
     assert "禁止把原事件或原对话重新演一遍" in full[1]["content"]
     assert "不可逆状态" in full[1]["content"]
     assert "resident_state=true" in full[1]["content"]
+    assert '"subject_entities": ["管家"]' in full[1]["content"]
+    assert "禁止把一个人物的经历" in full[1]["content"]
 
     strategy = LongformBenchmarkHarness._build_calibration_writer_messages(
         brief=brief,
@@ -679,6 +888,63 @@ def test_calibration_writer_messages_have_full_and_low_context_variants():
     assert '"variant": "retrieval_context"' in strategy[1]["content"]
     assert "strategy_bm25" not in strategy[1]["content"]
     assert "rank_score" not in strategy[1]["content"]
+
+
+def test_candidate_semantic_completeness_rejects_short_open_or_dangling_output():
+    assert _candidate_semantic_completeness("完整场景。" * 80)["complete"] is True
+    assert _candidate_semantic_completeness("他说：“事情还没有结束……")["complete"] is False
+    assert _candidate_semantic_completeness("叙述内容" * 80 + "密码")["complete"] is False
+
+
+def test_strategy_judge_skips_semantically_incomplete_candidate_pairs(tmp_path, monkeypatch):
+    import app.eval.longform_benchmark as benchmark_module
+
+    harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
+    paths = harness.paths("incomplete-pair")
+    write_json(paths.manifest, {"allow_external_api": True})
+    common = {
+        "pair_id": "pair-1",
+        "chapter_id": "C0001",
+        "scene_id": "S1",
+        "retrieval_execution": {"strategy_fidelity": True, "execution_signature": "exec"},
+        "generation_config": {"temperature": 0.7},
+        "writer_provider": "writer",
+        "writer_model": "model",
+        "prompt_version": "writer-v1",
+    }
+    write_jsonl(
+        paths.generated_dir / "strategy_ab_candidates.jsonl",
+        [
+            {
+                **common,
+                "id": "pair-1-A",
+                "strategy_role": "A",
+                "retrieval_strategy": "bm25",
+                "candidate_text": "他说：“还没有结束……",
+            },
+            {
+                **common,
+                "id": "pair-1-B",
+                "strategy_role": "B",
+                "retrieval_strategy": "jit_hybrid",
+                "candidate_text": "完整场景。" * 80,
+                "retrieval_execution": {"strategy_fidelity": True, "execution_signature": "exec-b"},
+            },
+        ],
+    )
+
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("judge must not receive semantically incomplete candidates")
+
+    monkeypatch.setattr(benchmark_module, "run_pointwise_pair_judge_eval", must_not_run)
+    result = asyncio.run(
+        harness.score_strategy_ab(benchmark_id="incomplete-pair", provider="judge", force_external=True)
+    )
+
+    assert result["requests_attempted"] == 0
+    rows = read_jsonl(Path(result["path"]))
+    assert rows[0]["skipped_reason"] == "candidate_semantically_incomplete"
+    assert result["analysis"]["candidate_validity_rate"] == 0.0
 
 
 def test_calibration_context_facts_are_ranked_by_relevance_and_quality():
@@ -815,6 +1081,8 @@ def test_strategy_writer_context_uses_real_engine_and_scene_time_boundary(tmp_pa
     assert selected["execution_signature"] == "semantic:rrf:no_rerank:top10"
     assert selected["ranking_trace"]["filters"]["future_scene_facts_excluded"] == 1
     assert selected["ranking_trace"]["filters"]["future_chapters_excluded"] == 1
+    assert selected["facts"][0]["context_temporal_relation"] == "prior_chapter"
+    assert selected["facts"][0]["context_subject_entities"]
 
 
 def test_merge_calibration_rows_replaces_scene_variant_without_duplicate_counts():
@@ -1035,7 +1303,7 @@ def test_strategy_ab_analysis_requires_output_evidence_and_can_pass_full_gate(tm
             "id": f"{pair_id}-A",
             "strategy_role": "A",
             "retrieval_strategy": "bm25",
-            "candidate_text": "候选 A" * 40,
+                "candidate_text": "候选 A 的场景继续推进。" * 40,
             "canon_refs": ["F1"],
             "retrieval_execution": {
                 "strategy_fidelity": True,
@@ -1050,7 +1318,7 @@ def test_strategy_ab_analysis_requires_output_evidence_and_can_pass_full_gate(tm
             "id": f"{pair_id}-B",
             "strategy_role": "B",
             "retrieval_strategy": "jit_hybrid",
-            "candidate_text": "候选 B" * 40,
+                "candidate_text": "候选 B 的场景继续推进。" * 40,
             "canon_refs": ["F1", "F2"],
             "retrieval_execution": {
                 "strategy_fidelity": True,
@@ -1074,7 +1342,7 @@ def test_strategy_ab_analysis_requires_output_evidence_and_can_pass_full_gate(tm
                 "judge_winner": "B",
                 "judge_provider": "deepseek",
                 "judge_model": "deepseek-chat",
-                "judge_prompt_version": "context-quality-v3",
+                "judge_prompt_version": "context-quality-v4-pointwise",
                 "attempts": [
                     {
                         "forward_provider": "deepseek",
@@ -1141,7 +1409,7 @@ def test_strategy_ab_analysis_rejects_small_or_stale_samples(tmp_path):
         "success": True,
         "position_consistent": True,
         "judge_winner": "B",
-        "judge_prompt_version": "context-quality-v3",
+        "judge_prompt_version": "context-quality-v4-pointwise",
         "pair_fingerprint": "stale",
     }
 
@@ -1156,6 +1424,83 @@ def test_strategy_ab_analysis_rejects_small_or_stale_samples(tmp_path):
     assert summary["adoption_gate_passed"] is False
     assert "sample_size_ready" in summary["gate_reasons"]
     assert "no_stale_rows" in summary["gate_reasons"]
+
+
+def test_strategy_ab_analysis_reports_raw_and_stabilized_judge_rates(tmp_path):
+    harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
+    common = {
+        "pair_id": "pair",
+        "chapter_id": "C0001",
+        "scene_id": "SB-C0001-01",
+        "trial": 1,
+        "writer_provider": "qwen",
+        "writer_model": "qwen-model",
+        "generation_config": {"temperature": 0.7, "max_tokens": 2200},
+        "prior_summary": "前文",
+        "resident_context": "近邻正文",
+        "judge_canon_summary": "评估事实",
+        "gateway_usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+    }
+    first = {
+        **common,
+        "id": "pair-A",
+        "strategy_role": "A",
+        "retrieval_strategy": "bm25",
+        "candidate_text": "候选 A",
+        "canon_summary": "事实 A",
+        "retrieval_execution": {"strategy_fidelity": True, "execution_signature": "a"},
+    }
+    second = {
+        **common,
+        "id": "pair-B",
+        "strategy_role": "B",
+        "retrieval_strategy": "jit_hybrid",
+        "candidate_text": "候选 B",
+        "canon_summary": "事实 B",
+        "retrieval_execution": {"strategy_fidelity": True, "execution_signature": "b"},
+    }
+    pairwise = {
+        "pair_id": "pair",
+        "chapter_id": "C0001",
+        "scene_id": "SB-C0001-01",
+        "position_consistent": True,
+        "judge_winner": "B",
+        "judge_provider": "deepseek",
+        "judge_model": "deepseek-model",
+        "judge_prompt_version": "context-quality-v4-pointwise",
+        "attempt_count": 2,
+        "attempts": [
+            {
+                "position_consistent": False,
+                "judge_winner": None,
+                "forward_provider": "deepseek",
+                "forward_model": "deepseek-model",
+                "swapped_provider": "deepseek",
+                "swapped_model": "deepseek-model",
+            },
+            {
+                "position_consistent": True,
+                "judge_winner": "B",
+                "forward_provider": "deepseek",
+                "forward_model": "deepseek-model",
+                "swapped_provider": "deepseek",
+                "swapped_model": "deepseek-model",
+            },
+        ],
+        "pair_fingerprint": harness.pipeline.ledger.strategy_pair_fingerprint(first, second),
+    }
+
+    summary = harness.analyze_strategy_ab(
+        benchmark_id="demo",
+        candidates=[first, second],
+        pairwise_rows=[pairwise],
+    )
+
+    assert summary["first_attempt_comparable_rate"] == 0.0
+    assert summary["first_attempt_position_consistency"] == 0.0
+    assert summary["comparable_rate"] == 1.0
+    assert summary["position_consistency"] == 1.0
+    assert summary["stabilized_pairs"] == 1
 
 
 def test_strategy_ab_cross_corpus_gate_is_provider_scoped_until_cross_provider_evidence(tmp_path):
@@ -1185,7 +1530,7 @@ def test_strategy_ab_cross_corpus_gate_is_provider_scoped_until_cross_provider_e
                 "id": f"{pair_id}-A",
                 "strategy_role": "A",
                 "retrieval_strategy": "bm25",
-                "candidate_text": "候选 A" * 40,
+                "candidate_text": "候选 A 的场景继续推进。" * 40,
                 "canon_refs": ["F1"],
                 "canon_summary": "事实一",
                 "retrieval_execution": {
@@ -1200,7 +1545,7 @@ def test_strategy_ab_cross_corpus_gate_is_provider_scoped_until_cross_provider_e
                 "id": f"{pair_id}-B",
                 "strategy_role": "B",
                 "retrieval_strategy": "jit_hybrid",
-                "candidate_text": "候选 B" * 40,
+                "candidate_text": "候选 B 的场景继续推进。" * 40,
                 "canon_refs": ["F1", "F2"],
                 "canon_summary": "事实一\n事实二",
                 "retrieval_execution": {
@@ -1224,7 +1569,7 @@ def test_strategy_ab_cross_corpus_gate_is_provider_scoped_until_cross_provider_e
                     "judge_winner": "B",
                     "judge_provider": "deepseek",
                     "judge_model": "deepseek-chat",
-                    "judge_prompt_version": "context-quality-v3",
+                    "judge_prompt_version": "context-quality-v4-pointwise",
                     "attempts": [
                         {
                             "forward_provider": "deepseek",
@@ -1360,33 +1705,26 @@ def test_pairwise_attempt_selection_uses_first_position_consistent_result():
 def test_pairwise_result_persists_selected_judge_identity(monkeypatch, tmp_path):
     import app.eval.longform_benchmark as benchmark_module
 
-    responses = iter(
-        [
-            {
-                "available": True,
-                "success": True,
-                "judge": {"winner": "B"},
-                "provider": "deepseek",
-                "model": "deepseek-chat",
-                "prompt_version": "context-quality-v3",
-                "usage": {},
-            },
-            {
-                "available": True,
-                "success": True,
-                "judge": {"winner": "A"},
-                "provider": "deepseek",
-                "model": "deepseek-chat",
-                "prompt_version": "context-quality-v3",
-                "usage": {},
-            },
-        ]
-    )
-
     async def _judge(*args, **kwargs):
-        return next(responses)
+        return {
+            "available": True,
+            "success": True,
+            "judge": {
+                "winner": "B",
+                "score_a": 2.0,
+                "score_b": 4.0,
+                "score_delta_b_minus_a": 2.0,
+            },
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "prompt_version": "context-quality-v4-pointwise",
+            "comparison_method": "independent_pointwise_weighted",
+            "order_invariant": True,
+            "usage_rows": [{}, {}],
+            "error": "",
+        }
 
-    monkeypatch.setattr(benchmark_module, "run_pairwise_judge_eval", _judge)
+    monkeypatch.setattr(benchmark_module, "run_pointwise_pair_judge_eval", _judge)
     harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
     pair = {
         "chapter_id": "C0001",
@@ -1408,7 +1746,8 @@ def test_pairwise_result_persists_selected_judge_identity(monkeypatch, tmp_path)
     assert row["success"] is True
     assert row["judge_provider"] == "deepseek"
     assert row["judge_model"] == "deepseek-chat"
-    assert row["attempts"][0]["forward_model"] == "deepseek-chat"
+    assert row["attempts"][0]["candidate_a_model"] == "deepseek-chat"
+    assert row["comparison_method"] == "independent_pointwise_weighted"
 
 
 def test_scored_calibration_targets_require_both_variants(tmp_path):
@@ -1569,7 +1908,7 @@ def test_analyze_calibration_writes_anonymized_failure_rows(tmp_path):
             "position_consistent": True,
             "forward_winner": "B",
             "swapped_winner": "A",
-            "judge_prompt_version": "context-quality-v3",
+            "judge_prompt_version": "context-quality-v4-pointwise",
             "pair_fingerprint": harness.pipeline.ledger.calibration_pair_fingerprint(pair["a"], pair["b"]),
         },
         {

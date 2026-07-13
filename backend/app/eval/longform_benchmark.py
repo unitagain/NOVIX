@@ -45,9 +45,10 @@ from app.eval.p12_context_eval import (
 from app.eval.retrieval_eval import evaluate_retrieval_recall
 from app.eval.trace_replay import replay_trace_files
 from app.eval.writing_judge import (
-    PAIRWISE_JUDGE_PROMPT_VERSION,
+    POINTWISE_PAIR_JUDGE_PROMPT_VERSION as PAIRWISE_JUDGE_PROMPT_VERSION,
     judge_extra_body,
     run_pairwise_judge_eval,
+    run_pointwise_pair_judge_eval,
     run_writing_judge_eval,
 )
 from app.llm_gateway import get_gateway
@@ -262,6 +263,22 @@ def _normalize_prose_wrapping(text: str) -> str:
 
 def _line_ends_sentence(text: str) -> bool:
     return bool(re.search(r"[。！？!?；;…](?:[”’\"'）】》]+)?$", str(text or "").strip()))
+
+
+def _candidate_semantic_completeness(text: str, *, min_chars: int = 300) -> Dict[str, Any]:
+    """Detect clearly incomplete long-form output without making a style judgment."""
+
+    value = str(text or "").strip()
+    reasons = []
+    if len(value) < max(1, int(min_chars)):
+        reasons.append("candidate_too_short")
+    if any(value.count(opening) != value.count(closing) for opening, closing in (("“", "”"), ("「", "」"), ("『", "』"))):
+        reasons.append("unbalanced_quotes")
+    if value and not re.search(r"[。！？!?；;…」』”’\"')）】》]$", value):
+        reasons.append("non_terminal_ending")
+    if re.search(r"(?:密码|如果|但是|可是|因为|所以|以及|然后|说道|问道)\s*$", value):
+        reasons.append("dangling_clause")
+    return {"complete": not reasons, "reasons": reasons, "char_count": len(value)}
 
 
 def _join_wrapped_text(left: str, right: str) -> str:
@@ -1127,6 +1144,7 @@ class LongformBenchmarkHarness:
                     "scene_index": scene_index,
                     "brief": scene_brief,
                     "prior_summary": _shorten_prose(str(window["text"]), 400),
+                    "reference_continuation": str(window.get("reference_continuation") or ""),
                     "resident_context": self._resident_context_for_scene(
                         sentences,
                         window.get("source_start_ratio"),
@@ -1270,6 +1288,11 @@ class LongformBenchmarkHarness:
                 windows.append(
                     {
                         "text": text,
+                        "reference_continuation": LongformBenchmarkHarness._reference_continuation(
+                            candidates,
+                            end + 1,
+                            limit=limit,
+                        ),
                         "source_start_ratio": LongformBenchmarkHarness._position_ratio(start, len(candidates)),
                         "source_end_ratio": LongformBenchmarkHarness._position_ratio(end, len(candidates)),
                     }
@@ -1286,6 +1309,12 @@ class LongformBenchmarkHarness:
                 windows.append(
                     {
                         "text": _shorten_prose(" ".join(sentences[idx : idx + chunk_size]), limit),
+                        "reference_continuation": LongformBenchmarkHarness._reference_continuation(
+                            sentences,
+                            end + 1,
+                            limit=limit,
+                            separator=" ",
+                        ),
                         "source_start_ratio": LongformBenchmarkHarness._position_ratio(idx, len(sentences)),
                         "source_end_ratio": LongformBenchmarkHarness._position_ratio(end, len(sentences)),
                     }
@@ -1307,11 +1336,34 @@ class LongformBenchmarkHarness:
             unique = [
                 {
                     "text": _shorten_prose(" ".join(sentences[:6]), limit),
+                    "reference_continuation": LongformBenchmarkHarness._reference_continuation(
+                        sentences,
+                        end + 1,
+                        limit=limit,
+                        separator=" ",
+                    ),
                     "source_start_ratio": 0.0,
                     "source_end_ratio": LongformBenchmarkHarness._position_ratio(end, len(sentences)),
                 }
             ]
         return [{"scene_index": idx, **window} for idx, window in enumerate(unique, 1)]
+
+    @staticmethod
+    def _reference_continuation(
+        blocks: List[str],
+        start: int,
+        *,
+        limit: int,
+        target: int = 360,
+        separator: str = "\n\n",
+    ) -> str:
+        selected: List[str] = []
+        for block in blocks[max(0, int(start)) :]:
+            if block:
+                selected.append(str(block))
+            if len(separator.join(selected)) >= target:
+                break
+        return _shorten_prose(separator.join(selected), limit) if selected else ""
 
     @staticmethod
     def _scene_window_from_anchor(paragraphs: List[str], anchor: int, *, limit: int, target: int = 360) -> str:
@@ -2381,9 +2433,11 @@ class LongformBenchmarkHarness:
                         "canon_summary": "\n".join(str(row.get("statement") or "") for row in chapter_facts),
                         "canon_refs": [row.get("id") for row in chapter_facts if row.get("id")],
                         "context_pack_stats": context_pack_stats if variant == "full_context" else {"fact_count": 0},
-                        "candidate_text": _shorten(candidate_text, 2400),
-                        "chapter_text": _shorten(candidate_text, 2400),
-                        "reference_excerpt": str(brief.get("prior_summary") or ""),
+                        "candidate_text": candidate_text,
+                        "chapter_text": candidate_text,
+                        "candidate_char_count": len(candidate_text),
+                        "candidate_storage_complete": True,
+                        "reference_excerpt": str(brief.get("reference_continuation") or ""),
                         "self_check": self_check,
                         "generation_quality": parsed.get("generation_quality"),
                         "trace_ref": "llm_writing_calibration",
@@ -2525,6 +2579,205 @@ class LongformBenchmarkHarness:
             "rows": rows,
         }
 
+    def refresh_strategy_references(self, *, benchmark_id: str) -> Dict[str, Any]:
+        """Migrate strategy artifacts to the current held-out reference contract without provider calls."""
+
+        paths = self.paths(benchmark_id)
+        candidate_path = paths.generated_dir / "strategy_ab_candidates.jsonl"
+        candidates = read_jsonl(candidate_path)
+        briefs = {
+            str(row.get("id") or ""): row
+            for row in read_jsonl(paths.generated_dir / "candidate_scene_briefs.jsonl")
+            if row.get("id")
+        }
+        updated: List[Dict[str, Any]] = []
+        references = 0
+        missing = 0
+        for row in candidates:
+            brief = briefs.get(str(row.get("scene_id") or "")) or {}
+            reference = str(brief.get("reference_continuation") or "")
+            if reference:
+                references += 1
+            else:
+                missing += 1
+            updated.append(
+                {
+                    **row,
+                    "reference_excerpt": reference,
+                    "reference_available": bool(reference),
+                    "reference_sha256": _sha256_text(reference) if reference else "",
+                }
+            )
+        if candidates:
+            write_jsonl(candidate_path, updated)
+        summary = {
+            "success": bool(candidates),
+            "benchmark_id": benchmark_id,
+            "candidates": len(candidates),
+            "references_attached": references,
+            "references_missing": missing,
+            "path": str(candidate_path),
+        }
+        self._record_manifest_event(paths, action="refresh-strategy-references", payload=summary)
+        return summary
+
+    def build_strategy_review_pack(self, *, benchmark_id: str, size: int = 20) -> Dict[str, Any]:
+        """Create a blinded full-candidate review pack and a separate mapping key."""
+
+        paths = self.paths(benchmark_id)
+        pairs = self._strategy_ab_pairs(read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl"))
+        selected = sorted(pairs, key=lambda item: item["pair_fingerprint"])[: max(1, int(size))]
+        review_rows = []
+        key_rows = []
+        for pair in selected:
+            swap = int(pair["pair_fingerprint"][:2], 16) % 2 == 1
+            left, right = (pair["b"], pair["a"]) if swap else (pair["a"], pair["b"])
+            review_id = f"HREV-{pair['pair_fingerprint'][:20]}"
+            review_rows.append(
+                {
+                    "review_version": "strategy-human-review-v1",
+                    "review_id": review_id,
+                    "pair_id": pair["pair_id"],
+                    "pair_fingerprint": pair["pair_fingerprint"],
+                    "chapter_id": pair.get("chapter_id"),
+                    "scene_id": pair.get("scene_id"),
+                    "canon_summary": left.get("judge_canon_summary") or right.get("judge_canon_summary") or "",
+                    "prior_summary": left.get("prior_summary") or right.get("prior_summary") or "",
+                    "resident_context": left.get("resident_context") or right.get("resident_context") or "",
+                    "scene_brief": left.get("scene_brief") or right.get("scene_brief") or "",
+                    "reference_excerpt": left.get("reference_excerpt") or right.get("reference_excerpt") or "",
+                    "candidate_left": left.get("candidate_text") or left.get("chapter_text") or "",
+                    "candidate_right": right.get("candidate_text") or right.get("chapter_text") or "",
+                    "human_winner": "",
+                    "reason_codes": [],
+                    "reviewer": "",
+                }
+            )
+            key_rows.append(
+                {
+                    "review_id": review_id,
+                    "pair_id": pair["pair_id"],
+                    "pair_fingerprint": pair["pair_fingerprint"],
+                    "left_role": "B" if swap else "A",
+                    "right_role": "A" if swap else "B",
+                }
+            )
+        slug = _timestamp_slug()
+        review_path = paths.generated_dir / f"strategy_human_review_{slug}.jsonl"
+        key_path = paths.generated_dir / f"strategy_human_review_key_{slug}.jsonl"
+        write_jsonl(review_path, review_rows)
+        write_jsonl(key_path, key_rows)
+        result = {
+            "success": bool(review_rows),
+            "benchmark_id": benchmark_id,
+            "pairs": len(review_rows),
+            "review_path": str(review_path),
+            "key_path": str(key_path),
+        }
+        self._record_manifest_event(paths, action="build-strategy-review-pack", payload=result)
+        return result
+
+    def apply_strategy_review_pack(
+        self,
+        *,
+        benchmark_id: str,
+        review_path: str | Path,
+        key_path: str | Path,
+        reviewer: str,
+    ) -> Dict[str, Any]:
+        """Validate blinded decisions and persist content-free human gold labels."""
+
+        paths = self.paths(benchmark_id)
+        reviews = read_jsonl(Path(review_path))
+        keys = {str(row.get("review_id") or ""): row for row in read_jsonl(Path(key_path))}
+        current_pairs = {
+            pair["pair_id"]: pair
+            for pair in self._strategy_ab_pairs(read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl"))
+        }
+        accepted = []
+        rejected = []
+        for row in reviews:
+            review_id = str(row.get("review_id") or "")
+            key = keys.get(review_id) or {}
+            pair_id = str(row.get("pair_id") or "")
+            current = current_pairs.get(pair_id) or {}
+            fingerprint = str(row.get("pair_fingerprint") or "")
+            winner = str(row.get("human_winner") or "").lower()
+            if (
+                not key
+                or fingerprint != str(key.get("pair_fingerprint") or "")
+                or fingerprint != str(current.get("pair_fingerprint") or "")
+                or winner not in {"left", "right", "tie", "incomparable"}
+            ):
+                rejected.append({"review_id": review_id, "pair_id": pair_id, "reason": "invalid_or_stale_review"})
+                continue
+            mapped = winner if winner in {"tie", "incomparable"} else str(key.get(f"{winner}_role") or "")
+            if mapped not in {"A", "B", "tie", "incomparable"}:
+                rejected.append({"review_id": review_id, "pair_id": pair_id, "reason": "invalid_blind_mapping"})
+                continue
+            accepted.append(
+                {
+                    "schema_version": 1,
+                    "pair_id": pair_id,
+                    "pair_fingerprint": fingerprint,
+                    "human_winner": mapped,
+                    "reason_codes": sorted({str(item) for item in (row.get("reason_codes") or []) if str(item)}),
+                    "reviewer": str(row.get("reviewer") or reviewer),
+                    "review_version": str(row.get("review_version") or "strategy-human-review-v1"),
+                }
+            )
+        gold_path = paths.gold_dir / "strategy_human_gold.jsonl"
+        merged = {str(row.get("pair_id") or ""): row for row in read_jsonl(gold_path) if row.get("pair_id")}
+        merged.update({row["pair_id"]: row for row in accepted})
+        write_jsonl(gold_path, [merged[key] for key in sorted(merged)])
+        result = {
+            "success": bool(accepted) and not rejected,
+            "benchmark_id": benchmark_id,
+            "accepted": len(accepted),
+            "rejected": rejected,
+            "gold_path": str(gold_path),
+        }
+        self._record_manifest_event(paths, action="apply-strategy-review-pack", payload=result)
+        return result
+
+    @staticmethod
+    def record_strategy_review(
+        *,
+        review_path: str | Path,
+        review_id: str,
+        winner: str,
+        reason_codes: List[str],
+        reviewer: str,
+    ) -> Dict[str, Any]:
+        """Record one blinded decision without exposing or modifying the mapping key."""
+
+        path = Path(review_path)
+        rows = read_jsonl(path)
+        normalized_winner = str(winner).lower()
+        if normalized_winner not in {"left", "right", "tie", "incomparable"}:
+            raise ValueError("invalid_strategy_review_winner")
+        matched = 0
+        updated = []
+        for row in rows:
+            if str(row.get("review_id") or "") == str(review_id):
+                matched += 1
+                row = {
+                    **row,
+                    "human_winner": normalized_winner,
+                    "reason_codes": sorted({str(item) for item in reason_codes if str(item)}),
+                    "reviewer": str(reviewer),
+                }
+            updated.append(row)
+        if matched != 1:
+            raise ValueError("strategy_review_id_not_unique")
+        write_jsonl(path, updated)
+        return {
+            "success": True,
+            "review_path": str(path),
+            "review_id": review_id,
+            "human_winner": normalized_winner,
+        }
+
     async def generate_strategy_ab(
         self,
         *,
@@ -2609,9 +2862,10 @@ class LongformBenchmarkHarness:
             judge_canon_summary = "\n".join(str(row.get("statement") or "") for row in judge_facts)
 
             for trial in range(1, trials + 1):
+                writer_key = _sha256_text(str(profile_id or "default-writer"))[:10]
                 pair_id = (
                     f"SAB-{_safe_slug(scene_id)}-T{trial:03d}-"
-                    f"{_safe_slug(spec_a.name)}-vs-{_safe_slug(spec_b.name)}"
+                    f"{_safe_slug(spec_a.name)}-vs-{_safe_slug(spec_b.name)}-W{writer_key}"
                 )
                 selections: Dict[str, Dict[str, Any]] = {}
                 for role in ("A", "B"):
@@ -2688,7 +2942,7 @@ class LongformBenchmarkHarness:
                         variant=variant,
                         include_context=True,
                         prompt_variant="retrieval_context",
-                        include_fact_metadata=False,
+                        include_fact_metadata=True,
                     )
                     joined = "\n".join(message.get("content", "") for message in messages)
                     block_reason = _api_safety_block_reason(joined)
@@ -2768,6 +3022,26 @@ class LongformBenchmarkHarness:
                         )
                         continue
 
+                    semantic_completeness = _candidate_semantic_completeness(candidate_text)
+                    if not semantic_completeness["complete"]:
+                        failures.append(
+                            {
+                                "id": f"SAB-GEN-{_sha256_text(f'{pair_id}|{role}|semantic_incomplete')[:16]}",
+                                "pair_id": pair_id,
+                                "scene_id": scene_id,
+                                "chapter_id": chapter_id,
+                                "trial": trial,
+                                "strategy_role": role,
+                                "requested_strategy": selection["requested_strategy"],
+                                "reason": "candidate_semantically_incomplete",
+                                "quality_reasons": semantic_completeness["reasons"],
+                                "candidate_char_count": semantic_completeness["char_count"],
+                                "candidate_sha256": _sha256_text(candidate_text),
+                                "contains_corpus_text": False,
+                            }
+                        )
+                        continue
+
                     context_pack_stats = self._calibration_context_pack_stats(selected_facts)
                     resident_context = str(brief.get("resident_context") or "")
                     context_pack_stats.update(
@@ -2810,9 +3084,12 @@ class LongformBenchmarkHarness:
                             "canon_refs": [item.get("id") for item in selected_facts if item.get("id")],
                             "context_pack_stats": context_pack_stats,
                             "retrieval_execution": {key: value for key, value in selection.items() if key != "facts"},
-                            "candidate_text": _shorten(candidate_text, 2400),
-                            "chapter_text": _shorten(candidate_text, 2400),
-                            "reference_excerpt": str(brief.get("prior_summary") or ""),
+                            "candidate_text": candidate_text,
+                            "chapter_text": candidate_text,
+                            "candidate_char_count": len(candidate_text),
+                            "candidate_storage_complete": True,
+                            "candidate_semantically_complete": True,
+                            "reference_excerpt": str(brief.get("reference_continuation") or ""),
                             "self_check": parsed.get("self_check") if isinstance(parsed.get("self_check"), dict) else {},
                             "generation_quality": parsed.get("generation_quality"),
                             "gateway_usage": usage,
@@ -2826,8 +3103,8 @@ class LongformBenchmarkHarness:
                         content=candidate_text,
                     ).to_dict()
                     pair_rows.append(row)
-                    candidates.append(row)
                 if {str(row.get("strategy_role")) for row in pair_rows} == {"A", "B"}:
+                    candidates.extend(pair_rows)
                     generated_pairs += 1
 
         archive_slug = _timestamp_slug()
@@ -2857,6 +3134,19 @@ class LongformBenchmarkHarness:
         current_failures = self._dedupe_rows([*retained_failures, *failures]) if append else failures
         write_jsonl(failure_path, current_failures)
 
+        current_candidates = read_jsonl(current_path) if current_path.exists() else []
+        requested_scene_ids = {str(row.get("id") or "") for row in usable_scenes}
+        complete_roles: Dict[str, set[str]] = {}
+        for row in current_candidates:
+            if str(row.get("writer_profile_id") or "") != str(profile_id or ""):
+                continue
+            if str(row.get("scene_id") or "") not in requested_scene_ids:
+                continue
+            complete_roles.setdefault(str(row.get("pair_id") or ""), set()).add(
+                str(row.get("strategy_role") or "")
+            )
+        complete_pair_ids = sorted(pair_id for pair_id, roles in complete_roles.items() if roles == {"A", "B"})
+
         summary = {
             "success": bool(generated_pairs),
             "available": True,
@@ -2869,10 +3159,11 @@ class LongformBenchmarkHarness:
             "requested_pairs": len(usable_scenes) * trials,
             "generated_pairs": generated_pairs,
             "generated_candidates": len(candidates),
+            "pair_ids": complete_pair_ids,
             "requests_attempted": requests_attempted,
             "failures": len(failures),
             "append": bool(append),
-            "current_total": len(read_jsonl(current_path)) if current_path.exists() else 0,
+            "current_total": len(current_candidates),
             "scene_ids": sorted(scene_filter),
             "generation_config": {"temperature": temperature, "max_tokens": max_tokens, "top_k": top_k},
             "usage_tokens_by_role": {
@@ -3017,6 +3308,26 @@ class LongformBenchmarkHarness:
                 continue
             row = dict(source)
             row["context_rank_score"] = round(float(item.relevance_score or 0.0), 6)
+            fact_chapter = str(row.get("chapter_id") or row.get("introduced_in") or row.get("source") or "")
+            chapter_relation = ChapterIDValidator.compare(fact_chapter, current_chapter)
+            fact_position = self._optional_float(row.get("source_position_ratio"))
+            scene_start = self._optional_float(brief.get("source_start_ratio"))
+            row["context_temporal_relation"] = (
+                "prior_chapter"
+                if chapter_relation == -1
+                else "prior"
+                if fact_position is not None and scene_start is not None and fact_position < scene_start
+                else "scene"
+            )
+            statement = str(row.get("statement") or "")
+            subject_entities = self._extract_names(statement)[:8]
+            subject_entities.extend(
+                match.group(0)
+                for match in re.finditer(r"管家|老板|父亲|母亲|丈夫|妻子|女儿|儿子|新娘|新郎|记者|警察", statement)
+                if match.group(0) not in subject_entities
+            )
+            row["context_subject_entities"] = subject_entities[:8]
+            row["context_irreversible_state"] = self._has_state_change_signal(statement)
             selected.append(row)
         selected_text = "\n".join(str(row.get("statement") or "") for row in selected)
         return {
@@ -3365,6 +3676,7 @@ class LongformBenchmarkHarness:
                 "temporal_relation=scene 的事实也可能已包含在 prior_summary 中；续写应推进其后果，不要复写输入。",
                 "irreversible_state=true 表示死亡、失踪、受伤、关系改变等不可逆状态，续写必须保持，不得让状态回退。",
                 "resident_state=true 表示最近章节的关键连续性状态，即使 scene 未直接提问也必须遵守。",
+                "subject_entities 标明事实所属人物；禁止把一个人物的经历、关系、身份或动作转移给另一个人物。",
             ]
         user = {
             "task": "根据给定前文和场景目标续写一段 450-700 字中文小说正文。",
@@ -3388,6 +3700,8 @@ class LongformBenchmarkHarness:
                     "temporal_relation": row.get("context_temporal_relation"),
                     "irreversible_state": row.get("context_irreversible_state"),
                     "resident_state": row.get("context_resident_state"),
+                    "subject_entities": row.get("context_subject_entities")
+                    or LongformBenchmarkHarness._extract_names(str(row.get("statement") or ""))[:8],
                     }
                 )
                 for row in facts
@@ -4897,7 +5211,7 @@ class LongformBenchmarkHarness:
         append_latest: bool = False,
         force_external: bool = False,
     ) -> Dict[str, Any]:
-        """Judge retrieval-strategy continuations with position-swapped v3 pairwise scoring."""
+        """Judge retrieval-strategy continuations with order-free pointwise scoring."""
 
         paths = self.paths(benchmark_id)
         manifest = self._load_manifest(paths)
@@ -4909,6 +5223,15 @@ class LongformBenchmarkHarness:
             }
         candidates = read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl")
         pairs = self._strategy_ab_pairs(candidates)
+        human_gold = {
+            str(row.get("pair_id") or ""): row
+            for row in read_jsonl(paths.gold_dir / "strategy_human_gold.jsonl")
+            if row.get("pair_id")
+        }
+        for pair in pairs:
+            gold = human_gold.get(str(pair.get("pair_id") or "")) or {}
+            if gold.get("pair_fingerprint") == pair.get("pair_fingerprint"):
+                pair["human_winner"] = gold.get("human_winner")
         scene_filter = {str(item).strip() for item in (scene_ids or []) if str(item).strip()}
         pair_filter = {str(item).strip() for item in (pair_ids or []) if str(item).strip()}
         if scene_filter:
@@ -4922,6 +5245,33 @@ class LongformBenchmarkHarness:
         for pair in pairs:
             first = pair["a"]
             second = pair["b"]
+            completeness = {
+                "A": _candidate_semantic_completeness(
+                    str(first.get("candidate_text") or first.get("chapter_text") or "")
+                ),
+                "B": _candidate_semantic_completeness(
+                    str(second.get("candidate_text") or second.get("chapter_text") or "")
+                ),
+            }
+            if not all(row["complete"] for row in completeness.values()):
+                results.append(
+                    {
+                        "pair_id": pair["pair_id"],
+                        "chapter_id": pair["chapter_id"],
+                        "scene_id": pair.get("scene_id"),
+                        "trial": pair.get("trial"),
+                        "strategy_a": pair.get("strategy_a"),
+                        "strategy_b": pair.get("strategy_b"),
+                        "available": False,
+                        "success": False,
+                        "skipped_reason": "candidate_semantically_incomplete",
+                        "candidate_quality": completeness,
+                        "human_winner": pair.get("human_winner"),
+                        "pair_fingerprint": pair["pair_fingerprint"],
+                        "judge_prompt_version": PAIRWISE_JUDGE_PROMPT_VERSION,
+                    }
+                )
+                continue
             block_reason = _api_safety_block_reason(
                 first.get("candidate_text"),
                 second.get("candidate_text"),
@@ -4941,6 +5291,7 @@ class LongformBenchmarkHarness:
                         "available": False,
                         "skipped_reason": block_reason,
                         "pair_fingerprint": pair["pair_fingerprint"],
+                        "judge_prompt_version": PAIRWISE_JUDGE_PROMPT_VERSION,
                     }
                 )
                 continue
@@ -4962,9 +5313,13 @@ class LongformBenchmarkHarness:
         )
         output_path = paths.generated_dir / f"strategy_ab_pairwise_judge_{_timestamp_slug()}.jsonl"
         write_jsonl(output_path, output_rows)
+        analyzed_pair_ids = {str(row.get("pair_id") or "") for row in output_rows if row.get("pair_id")}
+        analyzed_candidates = [
+            row for row in candidates if str(row.get("pair_id") or "") in analyzed_pair_ids
+        ]
         analysis = self.analyze_strategy_ab(
             benchmark_id=benchmark_id,
-            candidates=candidates,
+            candidates=analyzed_candidates,
             pairwise_rows=output_rows,
         )
         summary = {
@@ -5042,6 +5397,7 @@ class LongformBenchmarkHarness:
                 "generation_config": row.get("generation_config") or {},
                 "writer_provider": row.get("writer_provider"),
                 "writer_model": row.get("writer_model"),
+                "candidate_storage_complete": row.get("candidate_storage_complete"),
             }
 
         payload = {
@@ -5052,6 +5408,12 @@ class LongformBenchmarkHarness:
             "prior_sha256": _sha256_text(str(first.get("prior_summary") or second.get("prior_summary") or "")),
             "resident_sha256": _sha256_text(
                 str(first.get("resident_context") or second.get("resident_context") or "")
+            ),
+            "scene_brief_sha256": _sha256_text(
+                str(first.get("scene_brief") or second.get("scene_brief") or "")
+            ),
+            "reference_sha256": _sha256_text(
+                str(first.get("reference_excerpt") or second.get("reference_excerpt") or "")
             ),
             "first": candidate_payload(first),
             "second": candidate_payload(second),
@@ -5119,6 +5481,15 @@ class LongformBenchmarkHarness:
             pairwise_rows if pairwise_rows is not None else self._latest_strategy_ab_pairwise_rows(paths)
         )
         pairs, current_rows, stale_rows = self._current_strategy_ab_rows(candidates, pairwise_rows)
+        human_gold = {
+            str(row.get("pair_id") or ""): row
+            for row in read_jsonl(paths.gold_dir / "strategy_human_gold.jsonl")
+            if row.get("pair_id")
+        }
+        for row in current_rows:
+            gold = human_gold.get(str(row.get("pair_id") or "")) or {}
+            if gold.get("pair_fingerprint") == row.get("pair_fingerprint"):
+                row["human_winner"] = gold.get("human_winner")
         expected = {pair["pair_id"]: pair for pair in pairs}
         comparable = [
             row
@@ -5146,6 +5517,24 @@ class LongformBenchmarkHarness:
         comparable_rate = len(comparable) / attempted if attempted else 0.0
         position_consistency = (
             sum(1 for row in current_rows if row.get("position_consistent") is True) / attempted if attempted else 0.0
+        )
+        first_attempts = [
+            (row.get("attempts") or [{}])[0]
+            for row in current_rows
+            if isinstance(row.get("attempts"), list) and row.get("attempts")
+        ]
+        first_attempt_comparable = [
+            row
+            for row in first_attempts
+            if row.get("position_consistent") is True and row.get("judge_winner") in {"A", "B", "tie"}
+        ]
+        first_attempt_rate = (
+            len(first_attempt_comparable) / len(first_attempts) if first_attempts else 0.0
+        )
+        first_attempt_position_consistency = (
+            sum(1 for row in first_attempts if row.get("position_consistent") is True) / len(first_attempts)
+            if first_attempts
+            else 0.0
         )
         strategy_fidelity = bool(pairs) and all(
             bool((pair[role].get("retrieval_execution") or {}).get("strategy_fidelity"))
@@ -5187,14 +5576,7 @@ class LongformBenchmarkHarness:
         judge_identity_fidelity = bool(current_rows) and len(judge_identities) == 1 and ("", "") not in judge_identities
         judge_identity_fidelity = judge_identity_fidelity and all(
             all(
-                (
-                    str(attempt.get("forward_provider") or ""),
-                    str(attempt.get("forward_model") or ""),
-                )
-                == (
-                    str(attempt.get("swapped_provider") or ""),
-                    str(attempt.get("swapped_model") or ""),
-                )
+                self._attempt_judge_identity_fidelity(attempt)
                 for attempt in (row.get("attempts") or [])
             )
             for row in current_rows
@@ -5220,6 +5602,17 @@ class LongformBenchmarkHarness:
         sample_size_ready = len(comparable) >= STRATEGY_AB_MIN_PAIRS
         scene_diversity_ready = independent_scenes >= STRATEGY_AB_MIN_SCENES
         repeated_trials_ready = min_trials_per_scene >= STRATEGY_AB_MIN_TRIALS_PER_SCENE
+        candidate_complete_pairs = sum(
+            all(
+                _candidate_semantic_completeness(
+                    str(pair[role].get("candidate_text") or pair[role].get("chapter_text") or "")
+                )["complete"]
+                for role in ("a", "b")
+            )
+            for pair in pairs
+        )
+        candidate_validity_rate = candidate_complete_pairs / len(pairs) if pairs else 0.0
+        candidate_validity_ready = candidate_validity_rate >= 0.95
         quality_gate = bool(
             sample_size_ready
             and scene_diversity_ready
@@ -5227,6 +5620,7 @@ class LongformBenchmarkHarness:
             and comparable_rate >= STRATEGY_AB_MIN_COMPARABLE_RATE
             and position_consistency >= STRATEGY_AB_MIN_POSITION_CONSISTENCY
             and confidence_interval.get("lower", 0.0) > STRATEGY_AB_MIN_WIN_CI_LOWER
+            and candidate_validity_ready
         )
         corpus_gate_passed = bool(
             quality_gate
@@ -5248,6 +5642,7 @@ class LongformBenchmarkHarness:
             "comparable_rate_ready": comparable_rate >= STRATEGY_AB_MIN_COMPARABLE_RATE,
             "position_consistency_ready": position_consistency >= STRATEGY_AB_MIN_POSITION_CONSISTENCY,
             "win_ci_ready": confidence_interval.get("lower", 0.0) > STRATEGY_AB_MIN_WIN_CI_LOWER,
+            "candidate_validity_ready": candidate_validity_ready,
             "strategy_fidelity": strategy_fidelity,
             "distinct_execution": distinct_execution,
             "distinct_context": distinct_context,
@@ -5262,6 +5657,8 @@ class LongformBenchmarkHarness:
         recommendation = (
             "eligible_for_cross_corpus_compare"
             if corpus_gate_passed
+            else "fix_candidate_generation_quality"
+            if not candidate_validity_ready
             else "expand_output_ab_sample"
             if not sample_size_ready or not scene_diversity_ready or not repeated_trials_ready
             else "investigate_output_ab_failures"
@@ -5273,6 +5670,7 @@ class LongformBenchmarkHarness:
         )
         failure_path = paths.generated_dir / "strategy_ab_failures.jsonl"
         analysis_path = paths.generated_dir / "strategy_ab_analysis.json"
+        judge_human_agreement = self._calculate_pairwise_human_agreement(current_rows)
         summary = {
             "success": True,
             "benchmark_id": benchmark_id,
@@ -5281,6 +5679,9 @@ class LongformBenchmarkHarness:
             "comparable_pairs": len(comparable),
             "comparable_rate": comparable_rate,
             "position_consistency": position_consistency,
+            "first_attempt_comparable_rate": first_attempt_rate,
+            "first_attempt_position_consistency": first_attempt_position_consistency,
+            "stabilized_pairs": sum(1 for row in current_rows if int(row.get("attempt_count") or 1) > 1),
             "wins": wins,
             "strategy_b_preference": preference_b,
             "strategy_b_preference_ci95": confidence_interval,
@@ -5299,7 +5700,10 @@ class LongformBenchmarkHarness:
             "independent_scenes": independent_scenes,
             "min_trials_per_scene": min_trials_per_scene,
             "sample_size_ready": sample_size_ready,
+            "candidate_complete_pairs": candidate_complete_pairs,
+            "candidate_validity_rate": candidate_validity_rate,
             "quality_gate_passed": quality_gate,
+            "judge_human_agreement": judge_human_agreement,
             "corpus_gate_passed": corpus_gate_passed,
             "adoption_gate_passed": False,
             "adoption_gate_scope": "cross_corpus_only",
@@ -5314,6 +5718,28 @@ class LongformBenchmarkHarness:
         write_jsonl(failure_path, failures)
         write_json(analysis_path, summary)
         return summary
+
+    @staticmethod
+    def _attempt_judge_identity_fidelity(attempt: Dict[str, Any]) -> bool:
+        if attempt.get("comparison_method") == "independent_pointwise_weighted":
+            first = (
+                str(attempt.get("candidate_a_provider") or ""),
+                str(attempt.get("candidate_a_model") or ""),
+            )
+            second = (
+                str(attempt.get("candidate_b_provider") or ""),
+                str(attempt.get("candidate_b_model") or ""),
+            )
+        else:
+            first = (
+                str(attempt.get("forward_provider") or ""),
+                str(attempt.get("forward_model") or ""),
+            )
+            second = (
+                str(attempt.get("swapped_provider") or ""),
+                str(attempt.get("swapped_model") or ""),
+            )
+        return first == second and first != ("", "")
 
     def compare_strategy_ab_corpora(self, *, benchmark_ids: List[str]) -> Dict[str, Any]:
         """Aggregate current output A/B evidence without treating one corpus as a global adoption result."""
@@ -5655,11 +6081,34 @@ class LongformBenchmarkHarness:
         attempts: List[Dict[str, Any]] = []
         usage: List[Dict[str, Any]] = []
         for attempt_idx in range(1, max_attempts + 1):
-            forward = await run_pairwise_judge_eval(case, provider=provider, require_available=require_judge)
-            swapped_case = {**case, "candidate_a": case["candidate_b"], "candidate_b": case["candidate_a"]}
-            swapped = await run_pairwise_judge_eval(swapped_case, provider=provider, require_available=require_judge)
-            usage.extend([forward.get("usage") or {}, swapped.get("usage") or {}])
-            attempt = self._pairwise_attempt_summary(attempt_idx, forward, swapped)
+            comparison = await run_pointwise_pair_judge_eval(
+                case,
+                provider=provider,
+                require_available=require_judge,
+            )
+            usage.extend(comparison.get("usage_rows") or [])
+            judge = comparison.get("judge") or {}
+            attempt = {
+                "attempt": attempt_idx,
+                "available": bool(comparison.get("available")),
+                "success": bool(comparison.get("success")),
+                "position_consistent": bool(comparison.get("order_invariant")),
+                "judge_winner": str(judge.get("winner") or ""),
+                "forward_winner": "",
+                "swapped_winner": "",
+                "judge_provider": comparison.get("provider"),
+                "judge_model": comparison.get("model"),
+                "candidate_a_provider": comparison.get("provider"),
+                "candidate_a_model": comparison.get("model"),
+                "candidate_b_provider": comparison.get("provider"),
+                "candidate_b_model": comparison.get("model"),
+                "judge_prompt_version": comparison.get("prompt_version"),
+                "comparison_method": comparison.get("comparison_method"),
+                "score_a": judge.get("score_a"),
+                "score_b": judge.get("score_b"),
+                "score_delta_b_minus_a": judge.get("score_delta_b_minus_a"),
+                "reason": comparison.get("error"),
+            }
             attempts.append(attempt)
             if attempt.get("position_consistent") is True and attempt.get("judge_winner"):
                 break
@@ -5695,10 +6144,14 @@ class LongformBenchmarkHarness:
                 "judge_provider": selected.get("judge_provider"),
                 "judge_model": selected.get("judge_model"),
                 "judge_prompt_version": selected.get("judge_prompt_version"),
+                "comparison_method": selected.get("comparison_method"),
+                "score_a": selected.get("score_a"),
+                "score_b": selected.get("score_b"),
+                "score_delta_b_minus_a": selected.get("score_delta_b_minus_a"),
                 "reason": selected.get("reason"),
                 "attempt_count": len(attempts),
                 "attempts": attempts,
-                "requests_attempted": len(attempts) * 2,
+                "requests_attempted": len(usage),
                 "judge_artifact": judge_artifact.to_dict(),
             },
             usage,
@@ -5785,6 +6238,9 @@ class LongformBenchmarkHarness:
                 "canon_sha256": _sha256_text(str(row.get("canon_summary") or "")),
                 "prior_sha256": _sha256_text(str(row.get("prior_summary") or "")),
                 "resident_sha256": _sha256_text(str(row.get("resident_context") or "")),
+                "scene_brief_sha256": _sha256_text(str(row.get("scene_brief") or "")),
+                "reference_sha256": _sha256_text(str(row.get("reference_excerpt") or "")),
+                "candidate_storage_complete": row.get("candidate_storage_complete"),
             }
 
         payload = {
@@ -6309,10 +6765,12 @@ class LongformBenchmarkHarness:
             if require_available:
                 raise
             return {"success": False, "available": False, "reason": "p12_candidate_generation_failed"}
-        candidate_path = paths.generated_dir / "p12_context_candidates.jsonl"
-        failure_path = paths.generated_dir / "p12_context_generation_failures.jsonl"
+        writer_key = _sha256_text(str(profile_id or "default-writer"))[:10]
+        candidate_path = paths.generated_dir / f"p12_context_candidates_W{writer_key}.jsonl"
+        failure_path = paths.generated_dir / f"p12_context_generation_failures_W{writer_key}.jsonl"
         write_jsonl(candidate_path, generated["candidates"])
         write_jsonl(failure_path, generated["failures"])
+        candidate_usage = [row.get("gateway_usage") or {} for row in generated["candidates"]]
         result = {
             "success": generated["pairs"] > 0,
             "available": True,
@@ -6322,6 +6780,8 @@ class LongformBenchmarkHarness:
             "failures": len(generated["failures"]),
             "candidate_path": str(candidate_path),
             "failure_path": str(failure_path),
+            "requests_attempted": len(generated["candidates"]) + len(generated["failures"]),
+            "usage": _usage_breakdown(candidate_usage),
         }
         self._record_manifest_event(paths, action="generate-p12-context-ab", payload=result)
         return result
@@ -6333,16 +6793,26 @@ class LongformBenchmarkHarness:
         provider: Optional[str] = None,
         require_judge: bool = False,
         force_external: bool = False,
+        candidate_path: Optional[str | Path] = None,
+        pairwise_retries: int = 0,
     ) -> Dict[str, Any]:
         paths = self.paths(benchmark_id)
         manifest = self._load_manifest(paths)
         if not manifest.get("allow_external_api") and not force_external:
             return {"success": False, "available": False, "reason": "external_api_not_allowed"}
-        candidates = read_jsonl(paths.generated_dir / "p12_context_candidates.jsonl")
+        source_path = Path(candidate_path) if candidate_path else paths.generated_dir / "p12_context_candidates.jsonl"
+        candidates = read_jsonl(source_path)
         if not candidates:
             return {"success": False, "available": False, "reason": "missing_p12_context_candidates"}
-        scored = await score_p12_candidates(candidates, provider=provider, require_available=require_judge)
-        pairwise_path = paths.generated_dir / "p12_context_pairwise.jsonl"
+        scored = await score_p12_candidates(
+            candidates,
+            provider=provider,
+            require_available=require_judge,
+            pairwise_retries=pairwise_retries,
+        )
+        source_key = _sha256_text(str(source_path.resolve()))[:10]
+        judge_key = _sha256_text(str(provider or "default-judge"))[:10]
+        pairwise_path = paths.generated_dir / f"p12_context_pairwise_{source_key}_J{judge_key}.jsonl"
         write_jsonl(pairwise_path, scored["pairwise_rows"])
         analysis = self.analyze_p12_context_ab(benchmark_id=benchmark_id, pairwise_rows=scored["pairwise_rows"])
         result = {
@@ -6350,8 +6820,15 @@ class LongformBenchmarkHarness:
             "available": True,
             "benchmark_id": benchmark_id,
             "pairs": scored["pairs"],
+            "candidate_path": str(source_path),
             "pairwise_path": str(pairwise_path),
             "analysis": analysis,
+            "requests_attempted": sum(
+                int(row.get("requests_attempted") or 2) for row in scored["pairwise_rows"]
+            ),
+            "usage": _usage_breakdown(
+                [row.get("judge_usage") or {} for row in scored["pairwise_rows"]]
+            ),
         }
         self._record_manifest_event(paths, action="score-p12-context-ab", payload=result)
         return result

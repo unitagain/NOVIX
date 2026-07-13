@@ -13,7 +13,9 @@ from app.eval.p12_context_eval import (
     assemble_p12_context,
     generate_p12_candidates,
     p12_pair_fingerprint,
+    score_p12_candidates,
 )
+from app.eval.writing_judge import POINTWISE_PAIR_JUDGE_PROMPT_VERSION
 from app.storage.creative_memory import CreativeMemoryStorage
 from app.storage.session_history import SessionHistoryStorage
 from app.orchestrator.architecture import service_boundaries
@@ -165,6 +167,7 @@ def test_p12_pairwise_gate_and_failures_are_goal_directed():
             "scene_id": "s1",
             "judge_winner": "A",
             "position_consistent": True,
+            "judge_prompt_version": POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
             "memory_pollution_count": 1,
             "recoverable": False,
             "variant_a": "memory_off",
@@ -228,3 +231,66 @@ def test_p12_real_candidate_generator_requires_explicit_distinct_variants():
     assert generated["pairs"] == 1
     assert {row["variant"] for row in generated["candidates"]} == {"memory_off", "memory_on"}
     assert all(row["candidate_sha256"] for row in generated["candidates"])
+
+
+def test_p12_scoring_uses_order_free_pointwise_protocol(monkeypatch):
+    calls = []
+
+    async def pointwise(case, **_kwargs):
+        calls.append(case)
+        return {
+            "available": True,
+            "success": True,
+            "order_invariant": True,
+            "judge": {
+                "winner": "B",
+                "score_a": 2.0,
+                "score_b": 4.0,
+                "score_delta_b_minus_a": 2.0,
+            },
+            "provider": "judge-provider",
+            "model": "judge-model",
+            "prompt_version": POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
+            "comparison_method": "independent_pointwise_weighted",
+            "usage_rows": [{"total_tokens": 10}, {"total_tokens": 12}],
+        }
+
+    monkeypatch.setattr("app.eval.p12_context_eval.run_pointwise_pair_judge_eval", pointwise)
+    candidates = [
+        {
+            "id": "p1-A",
+            "pair_id": "p1",
+            "scene_id": "s1",
+            "strategy_role": "A",
+            "variant": "memory_off",
+            "candidate_text": "候选 A",
+            "candidate_sha256": "sha-a",
+            "context_fingerprint": "ctx-a",
+            "writer_provider": "writer",
+            "writer_model": "model",
+            "prompt_version": "p12-context-writer-v1",
+        },
+        {
+            "id": "p1-B",
+            "pair_id": "p1",
+            "scene_id": "s1",
+            "strategy_role": "B",
+            "variant": "memory_on",
+            "candidate_text": "候选 B",
+            "candidate_sha256": "sha-b",
+            "context_fingerprint": "ctx-b",
+            "writer_provider": "writer",
+            "writer_model": "model",
+            "prompt_version": "p12-context-writer-v1",
+        },
+    ]
+
+    result = asyncio.run(score_p12_candidates(candidates, provider="judge", pairwise_retries=2))
+
+    assert len(calls) == 1
+    row = result["pairwise_rows"][0]
+    assert row["judge_winner"] == "B"
+    assert row["position_consistent"] is True
+    assert row["judge_prompt_version"] == POINTWISE_PAIR_JUDGE_PROMPT_VERSION
+    assert row["requests_attempted"] == 2
+    assert row["pair_fingerprint"] == p12_pair_fingerprint(row)

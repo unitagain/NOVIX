@@ -7,10 +7,13 @@
 import asyncio
 
 from app.eval.writing_judge import (
+    POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
     build_pairwise_judge_messages,
+    build_pointwise_candidate_judge_messages,
     build_rubric_judge_messages,
     judge_extra_body,
     parse_rubric_judge_response,
+    run_pointwise_pair_judge_eval,
     run_writing_judge_eval,
 )
 
@@ -80,6 +83,14 @@ def test_parse_rubric_judge_response_normalizes_scores():
     assert len(parsed["violations"]) == 1
 
 
+def test_pointwise_candidate_prompt_has_compact_scores_only_schema():
+    messages = build_pointwise_candidate_judge_messages(_case())
+    assert POINTWISE_PAIR_JUDGE_PROMPT_VERSION in messages[1]["content"]
+    assert "required_json_schema" in messages[1]["content"]
+    assert "violations" not in messages[1]["content"]
+    assert "calibration_notes" not in messages[1]["content"]
+
+
 def test_writing_judge_without_config_reports_unavailable():
     result = asyncio.run(run_writing_judge_eval(_case(), provider="missing-profile-for-test"))
     assert result["available"] is False
@@ -100,3 +111,36 @@ def test_judge_extra_body_disables_optional_reasoning(monkeypatch):
     assert judge_extra_body("qwen") == {"enable_thinking": False}
     assert judge_extra_body("glm") == {"thinking": {"type": "disabled"}}
     assert judge_extra_body("plain") is None
+
+
+def test_pointwise_pair_judge_derives_order_invariant_winner(monkeypatch):
+    async def score(case, **_kwargs):
+        strong = case["candidate_text"] == _case()["candidate_a"]
+        value = 4.5 if strong else 2.0
+        return {
+            "available": True,
+            "success": True,
+            "judge": {"scores": {field: value for field in (
+                "context_utilization",
+                "factual_consistency",
+                "timeline_consistency",
+                "character_consistency",
+                "foreshadowing_integrity",
+                "style_consistency",
+                "readability",
+            )}},
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            "provider": "judge-provider",
+            "model": "judge-model",
+        }
+
+    monkeypatch.setattr("app.eval.writing_judge.run_pointwise_candidate_judge_eval", score)
+
+    result = asyncio.run(run_pointwise_pair_judge_eval(_case(), provider="judge"))
+
+    assert result["success"] is True
+    assert result["order_invariant"] is True
+    assert result["judge"]["winner"] == "A"
+    assert result["judge"]["score_a"] > result["judge"]["score_b"]
+    assert result["prompt_version"] == POINTWISE_PAIR_JUDGE_PROMPT_VERSION
+    assert len(result["usage_rows"]) == 2

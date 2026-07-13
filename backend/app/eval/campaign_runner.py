@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 import subprocess
 import time
 from pathlib import Path
@@ -13,8 +14,11 @@ from app.eval.campaign_models import CampaignUsage, EvalCampaign, campaign_job_i
 from app.eval.campaign_store import CampaignStore
 from app.eval.longform_artifacts import read_json, read_jsonl
 from app.eval.longform_benchmark import LongformBenchmarkHarness
+from app.eval.p12_context_eval import p12_pair_fingerprint
+from app.eval.writing_judge import POINTWISE_PAIR_JUDGE_PROMPT_VERSION
 from app.storage.file_lock import get_file_lock
 from app.security.egress_context import EgressPolicy, bind_egress_policy
+from app.services.llm_config_service import llm_config_service
 from app.error_contract import benchmark_failure, classify_benchmark_failure_record
 
 
@@ -85,12 +89,10 @@ class CampaignRunner:
         scene_ids = self._scene_ids(corpus)
         if "retrieval_ab" in corpus.enabled_experiments:
             for writer in self.campaign.writer_providers:
-                for judge in self.campaign.judge_providers:
-                    await self._run_retrieval_batches(corpus, scene_ids, writer, judge)
+                await self._run_retrieval_batches(corpus, scene_ids, writer, self.campaign.judge_providers)
         if "p12_context_ab" in corpus.enabled_experiments:
             for writer in self.campaign.writer_providers:
-                for judge in self.campaign.judge_providers:
-                    await self._run_p12_job(corpus, writer, judge)
+                await self._run_p12_jobs(corpus, writer, self.campaign.judge_providers)
 
     async def _run_suite_job(self, corpus: Any) -> None:
         job_id = campaign_job_id(self.campaign.id, corpus.benchmark_id, "suite", self.campaign.suite)
@@ -113,149 +115,273 @@ class CampaignRunner:
             usage={"elapsed_seconds": time.time() - started},
         )
 
-    async def _run_retrieval_batches(self, corpus: Any, scene_ids: List[str], writer: str, judge: str) -> None:
-        stop_prefix = f"{corpus.benchmark_id}:{writer}:{judge}:"
-        if any(str(reason).startswith(stop_prefix) for reason in self.store.load_state().get("stop_reasons") or []):
-            return
+    async def _run_retrieval_batches(
+        self,
+        corpus: Any,
+        scene_ids: List[str],
+        writer: str,
+        judges: List[str],
+    ) -> None:
         size = max(1, self.campaign.budget.batch_scenes)
         for offset in range(0, len(scene_ids), size):
             batch = scene_ids[offset : offset + size]
-            job_id = campaign_job_id(
-                self.campaign.id, corpus.benchmark_id, "retrieval_ab", writer, judge, ",".join(batch)
+            generation_job_id = campaign_job_id(
+                self.campaign.id, corpus.benchmark_id, "retrieval_ab_generation", writer, ",".join(batch)
             )
-            if await self._should_skip(job_id):
+            generation_result = self._completed_job_result(generation_job_id)
+            if generation_result is None and await self._should_skip(generation_job_id):
                 continue
-            estimated_requests = len(batch) * self.campaign.trials * 4
-            if self._budget_exhausted(estimated_requests, estimated_requests * 4000):
+            estimated_requests = len(batch) * self.campaign.trials * 2
+            if generation_result is None and self._budget_exhausted(estimated_requests, estimated_requests * 4000):
                 await self._record_stop("campaign_budget_exhausted")
                 return
-            await self._begin_job(job_id, corpus.benchmark_id, "retrieval_ab")
-            started = time.time()
-            try:
-                with bind_egress_policy(
-                    EgressPolicy(
-                        corpus_id=corpus.benchmark_id,
-                        data_classification=corpus.data_classification,
-                        authorized=corpus.allow_external_api,
+            if generation_result is None:
+                await self._begin_job(generation_job_id, corpus.benchmark_id, "retrieval_ab_generation")
+                started = time.time()
+                try:
+                    with bind_egress_policy(self._egress_policy(corpus)):
+                        generated = await self.harness.pipeline.generation.strategy_ab(
+                            benchmark_id=corpus.benchmark_id,
+                            strategy_a=self.campaign.retrieval_strategy_a,
+                            strategy_b=self.campaign.retrieval_strategy_b,
+                            provider=writer,
+                            limit=len(batch),
+                            trials=self.campaign.trials,
+                            scene_ids=batch,
+                            append=True,
+                            force_external=True,
+                            require_available=False,
+                        )
+                except Exception as exc:
+                    await self._finish_job(
+                        generation_job_id,
+                        corpus.benchmark_id,
+                        "retrieval_ab_generation",
+                        {**benchmark_failure(exc), "writer": writer},
+                        usage={"requests": 0, "elapsed_seconds": time.time() - started},
+                        status="failed",
                     )
+                    return
+                generated_usage = dict(generated.get("usage") or {})
+                generation_result = {"generated": generated, "writer": writer}
+                await self._finish_job(
+                    generation_job_id,
+                    corpus.benchmark_id,
+                    "retrieval_ab_generation",
+                    generation_result,
+                    usage={
+                        "requests": int(generated.get("requests_attempted") or 0),
+                        "prompt_tokens": int(generated_usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(generated_usage.get("completion_tokens") or 0),
+                        "total_tokens": int(generated_usage.get("total_tokens") or 0),
+                        "elapsed_seconds": time.time() - started,
+                    },
+                )
+            generated = dict(generation_result.get("generated") or {})
+            pair_ids = [str(item) for item in (generated.get("pair_ids") or []) if str(item)]
+            if not pair_ids:
+                continue
+
+            for judge in judges:
+                stop_prefix = f"{corpus.benchmark_id}:{writer}:{judge}:"
+                if any(
+                    str(reason).startswith(stop_prefix)
+                    for reason in self.store.load_state().get("stop_reasons") or []
                 ):
-                    generated = await self.harness.pipeline.generation.strategy_ab(
-                    benchmark_id=corpus.benchmark_id,
-                    strategy_a=self.campaign.retrieval_strategy_a,
-                    strategy_b=self.campaign.retrieval_strategy_b,
-                    provider=writer,
-                    limit=len(batch),
-                    trials=self.campaign.trials,
-                    scene_ids=batch,
-                    append=True,
-                    force_external=True,
-                    require_available=False,
+                    continue
+                job_id = campaign_job_id(
+                    self.campaign.id, corpus.benchmark_id, "retrieval_ab", writer, judge, ",".join(pair_ids)
                 )
-                    scored = await self.harness.pipeline.judge.strategy_ab(
-                    benchmark_id=corpus.benchmark_id,
-                    provider=judge,
-                    require_judge=False,
-                    pairwise_retries=1 if self.campaign.retry_provider_errors else 0,
-                    scene_ids=batch,
-                    append_latest=True,
-                    force_external=True,
-                )
-            except Exception as exc:
-                failure = benchmark_failure(exc)
+                if await self._should_skip(job_id):
+                    continue
+                estimated_requests = len(pair_ids) * 2 * (self.campaign.pairwise_retries + 1)
+                if self._budget_exhausted(estimated_requests, estimated_requests * 4000):
+                    await self._record_stop("campaign_budget_exhausted")
+                    return
+                await self._begin_job(job_id, corpus.benchmark_id, "retrieval_ab")
+                started = time.time()
+                try:
+                    with bind_egress_policy(self._egress_policy(corpus)):
+                        scored = await self.harness.pipeline.judge.strategy_ab(
+                            benchmark_id=corpus.benchmark_id,
+                            provider=judge,
+                            require_judge=False,
+                            pairwise_retries=self.campaign.pairwise_retries,
+                            pair_ids=pair_ids,
+                            append_latest=False,
+                            force_external=True,
+                        )
+                except Exception as exc:
+                    await self._finish_job(
+                        job_id,
+                        corpus.benchmark_id,
+                        "retrieval_ab",
+                        {**benchmark_failure(exc), "writer": writer, "judge": judge, "pair_ids": pair_ids},
+                        usage={"requests": 0, "elapsed_seconds": time.time() - started},
+                        status="failed",
+                    )
+                    continue
+                analysis = dict(scored.get("analysis") or {})
+                result = {
+                    "generated_job_id": generation_job_id,
+                    "pair_ids": pair_ids,
+                    "scored": scored,
+                    "analysis": analysis,
+                    "writer": writer,
+                    "judge": judge,
+                }
+                judge_usage = dict(scored.get("usage") or {})
                 await self._finish_job(
                     job_id,
                     corpus.benchmark_id,
                     "retrieval_ab",
-                    {**failure, "writer": writer, "judge": judge},
-                    usage={"requests": 0, "elapsed_seconds": time.time() - started},
-                    status="failed",
+                    result,
+                    usage={
+                        "requests": int(scored.get("requests_attempted") or 0),
+                        "prompt_tokens": int(judge_usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(judge_usage.get("completion_tokens") or 0),
+                        "total_tokens": int(judge_usage.get("total_tokens") or 0),
+                        "elapsed_seconds": time.time() - started,
+                    },
                 )
-                return
-            analysis = dict(scored.get("analysis") or {})
-            result = {"generated": generated, "scored": scored, "analysis": analysis, "writer": writer, "judge": judge}
-            generated_usage = dict(generated.get("usage") or {})
-            judge_usage = dict(scored.get("usage") or {})
-            actual_pairs = int(scored.get("scored_pairs") or 0)
-            await self._finish_job(
-                job_id,
-                corpus.benchmark_id,
-                "retrieval_ab",
-                result,
-                usage={
-                    "requests": int(generated.get("requests_attempted") or 0)
-                    + int(scored.get("requests_attempted") or actual_pairs * 2),
-                    "prompt_tokens": int(generated_usage.get("prompt_tokens") or 0)
-                    + int(judge_usage.get("prompt_tokens") or 0),
-                    "completion_tokens": int(generated_usage.get("completion_tokens") or 0)
-                    + int(judge_usage.get("completion_tokens") or 0),
-                    "total_tokens": int(generated_usage.get("total_tokens") or 0)
-                    + int(judge_usage.get("total_tokens") or 0),
-                    "elapsed_seconds": time.time() - started,
-                },
-            )
-            reason = self._sequential_stop(analysis)
-            if reason:
-                await self._record_stop(f"{corpus.benchmark_id}:{writer}:{judge}:{reason}")
-                return
+                reason = self._sequential_stop(analysis)
+                if reason:
+                    await self._record_stop(f"{corpus.benchmark_id}:{writer}:{judge}:{reason}")
 
-    async def _run_p12_job(self, corpus: Any, writer: str, judge: str) -> None:
-        job_id = campaign_job_id(self.campaign.id, corpus.benchmark_id, "p12_context_ab", writer, judge)
-        if await self._should_skip(job_id):
-            return
+    def _completed_job_result(self, job_id: str) -> Optional[Dict[str, Any]]:
+        for row in reversed(self.store.jobs()):
+            if (
+                str(row.get("job_id") or "") == job_id
+                and row.get("status") == "completed"
+                and self._completed_job_is_current(row)
+            ):
+                return read_json(Path(str(row.get("result_path") or "")), {}) or {}
+        return None
+
+    @staticmethod
+    def _egress_policy(corpus: Any) -> EgressPolicy:
+        return EgressPolicy(
+            corpus_id=corpus.benchmark_id,
+            data_classification=corpus.data_classification,
+            authorized=corpus.allow_external_api,
+        )
+
+    async def _run_p12_jobs(self, corpus: Any, writer: str, judges: List[str]) -> None:
         paths = self.harness.pipeline.corpus.paths(corpus.benchmark_id)
         cases = read_jsonl(paths.generated_dir / "p12_context_cases.jsonl")
-        estimated_requests = len(cases) * 4
         if not cases:
-            await self._begin_job(job_id, corpus.benchmark_id, "p12_context_ab")
+            job_id = campaign_job_id(self.campaign.id, corpus.benchmark_id, "p12_context_generation", writer)
+            if await self._should_skip(job_id):
+                return
+            await self._begin_job(job_id, corpus.benchmark_id, "p12_context_generation")
             await self._finish_job(
                 job_id,
                 corpus.benchmark_id,
-                "p12_context_ab",
-                {"success": False, "reason": "missing_p12_context_cases", "writer": writer, "judge": judge},
+                "p12_context_generation",
+                {"success": False, "reason": "missing_p12_context_cases", "writer": writer},
                 usage={},
                 status="skipped",
             )
             return
-        if self._budget_exhausted(estimated_requests, estimated_requests * 4000):
+        generation_job_id = campaign_job_id(
+            self.campaign.id, corpus.benchmark_id, "p12_context_generation", writer
+        )
+        generation_result = self._completed_job_result(generation_job_id)
+        if generation_result is None and await self._should_skip(generation_job_id):
+            return
+        estimated_requests = len(cases) * 4
+        if generation_result is None and self._budget_exhausted(estimated_requests, estimated_requests * 4000):
             await self._record_stop("campaign_budget_exhausted")
             return
-        await self._begin_job(job_id, corpus.benchmark_id, "p12_context_ab")
-        started = time.time()
-        try:
-            with bind_egress_policy(
-                EgressPolicy(
-                    corpus_id=corpus.benchmark_id,
-                    data_classification=corpus.data_classification,
-                    authorized=corpus.allow_external_api,
+        if generation_result is None:
+            await self._begin_job(generation_job_id, corpus.benchmark_id, "p12_context_generation")
+            started = time.time()
+            try:
+                with bind_egress_policy(self._egress_policy(corpus)):
+                    generated = await self.harness.pipeline.generation.p12_context_ab(
+                        benchmark_id=corpus.benchmark_id, provider=writer, force_external=True
+                    )
+            except Exception as exc:
+                await self._finish_job(
+                    generation_job_id,
+                    corpus.benchmark_id,
+                    "p12_context_generation",
+                    {**benchmark_failure(exc), "writer": writer},
+                    usage={"requests": 0, "elapsed_seconds": time.time() - started},
+                    status="failed",
                 )
-            ):
-                generated = await self.harness.pipeline.generation.p12_context_ab(
-                    benchmark_id=corpus.benchmark_id, provider=writer, force_external=True
+                return
+            generated_usage = dict(generated.get("usage") or {})
+            generation_result = {"generated": generated, "writer": writer}
+            await self._finish_job(
+                generation_job_id,
+                corpus.benchmark_id,
+                "p12_context_generation",
+                generation_result,
+                usage={
+                    "requests": int(generated.get("requests_attempted") or 0),
+                    "prompt_tokens": int(generated_usage.get("prompt_tokens") or 0),
+                    "completion_tokens": int(generated_usage.get("completion_tokens") or 0),
+                    "total_tokens": int(generated_usage.get("total_tokens") or 0),
+                    "elapsed_seconds": time.time() - started,
+                },
+            )
+        generated = dict(generation_result.get("generated") or {})
+        candidate_path = str(generated.get("candidate_path") or "")
+        if not candidate_path:
+            return
+
+        for judge in judges:
+            job_id = campaign_job_id(self.campaign.id, corpus.benchmark_id, "p12_context_ab", writer, judge)
+            if await self._should_skip(job_id):
+                continue
+            estimated_requests = len(cases) * 2 * (self.campaign.pairwise_retries + 1)
+            if self._budget_exhausted(estimated_requests, estimated_requests * 4000):
+                await self._record_stop("campaign_budget_exhausted")
+                return
+            await self._begin_job(job_id, corpus.benchmark_id, "p12_context_ab")
+            started = time.time()
+            try:
+                with bind_egress_policy(self._egress_policy(corpus)):
+                    scored = await self.harness.pipeline.judge.p12_context_ab(
+                        benchmark_id=corpus.benchmark_id,
+                        provider=judge,
+                        candidate_path=candidate_path,
+                        pairwise_retries=self.campaign.pairwise_retries,
+                        force_external=True,
+                    )
+            except Exception as exc:
+                await self._finish_job(
+                    job_id,
+                    corpus.benchmark_id,
+                    "p12_context_ab",
+                    {**benchmark_failure(exc), "writer": writer, "judge": judge},
+                    usage={"requests": 0, "elapsed_seconds": time.time() - started},
+                    status="failed",
                 )
-                scored = await self.harness.pipeline.judge.p12_context_ab(
-                    benchmark_id=corpus.benchmark_id, provider=judge, force_external=True
-                )
-        except Exception as exc:
-            failure = benchmark_failure(exc)
+                continue
+            analysis = dict(scored.get("analysis") or {})
+            scored_usage = dict(scored.get("usage") or {})
             await self._finish_job(
                 job_id,
                 corpus.benchmark_id,
                 "p12_context_ab",
-                {**failure, "writer": writer, "judge": judge},
-                usage={"requests": 0, "elapsed_seconds": time.time() - started},
-                status="failed",
+                {
+                    "generated_job_id": generation_job_id,
+                    "candidate_path": candidate_path,
+                    "scored": scored,
+                    "analysis": analysis,
+                    "writer": writer,
+                    "judge": judge,
+                },
+                usage={
+                    "requests": int(scored.get("requests_attempted") or 0),
+                    "prompt_tokens": int(scored_usage.get("prompt_tokens") or 0),
+                    "completion_tokens": int(scored_usage.get("completion_tokens") or 0),
+                    "total_tokens": int(scored_usage.get("total_tokens") or 0),
+                    "elapsed_seconds": time.time() - started,
+                },
             )
-            return
-        analysis = dict(scored.get("analysis") or {})
-        usage = self._p12_usage(paths, writer, judge)
-        usage["elapsed_seconds"] = time.time() - started
-        await self._finish_job(
-            job_id,
-            corpus.benchmark_id,
-            "p12_context_ab",
-            {"generated": generated, "scored": scored, "analysis": analysis, "writer": writer, "judge": judge},
-            usage=usage,
-        )
 
     async def _finish_job(
         self,
@@ -277,7 +403,7 @@ class CampaignRunner:
                 "result_path": str(result_path),
                 "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
                 "usage": usage,
-                "fingerprints": self._job_fingerprints(benchmark_id, experiment),
+                "fingerprints": self._job_fingerprints(benchmark_id, experiment, result=result),
                 "completed_at": time.time(),
             }
             self.store.append_jsonl(self.store.jobs_path, row)
@@ -355,7 +481,9 @@ class CampaignRunner:
     def _aggregate(self) -> Dict[str, Any]:
         latest: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
         component_reports: Dict[str, Dict[str, Any]] = {}
-        for job in self.store.jobs():
+        judge_decisions: Dict[tuple[str, str, str], Dict[str, Dict[str, str]]] = {}
+        retrieval_groups: Dict[tuple[str, str, str, str], Dict[str, Any]] = {}
+        for job in self._latest_jobs():
             if job.get("status") != "completed":
                 continue
             result = read_json(Path(str(job.get("result_path"))), {}) or {}
@@ -376,7 +504,57 @@ class CampaignRunner:
                 continue
             if job.get("experiment") not in {"retrieval_ab", "p12_context_ab"}:
                 continue
+            if job.get("experiment") == "retrieval_ab":
+                key = (
+                    "retrieval_ab",
+                    str(job.get("benchmark_id") or ""),
+                    str(result.get("writer") or ""),
+                    str(result.get("judge") or ""),
+                )
+                group = retrieval_groups.setdefault(
+                    key,
+                    {"pair_ids": set(), "pairwise_rows": [], "completed_at": 0.0},
+                )
+                group["pair_ids"].update(str(item) for item in (result.get("pair_ids") or []) if str(item))
+                group["completed_at"] = max(
+                    float(group.get("completed_at") or 0.0),
+                    float(job.get("completed_at") or 0.0),
+                )
+                score_path_value = str(((result.get("scored") or {}).get("path") or ""))
+                score_path = Path(score_path_value) if score_path_value else None
+                if score_path is not None and not score_path.is_absolute():
+                    score_path = Path(__file__).resolve().parents[2] / score_path
+                score_rows = read_jsonl(score_path) if score_path is not None and score_path.is_file() else []
+                group["pairwise_rows"].extend(score_rows)
+                decisions = {
+                    str(item.get("pair_id")): str(item.get("judge_winner"))
+                    for item in score_rows
+                    if item.get("position_consistent") is True
+                    and item.get("judge_winner") in {"A", "B", "tie"}
+                    and item.get("pair_id")
+                }
+                decision_group = judge_decisions.setdefault(
+                    ("retrieval_ab", str(job.get("benchmark_id") or ""), str(result.get("writer") or "")),
+                    {},
+                )
+                decision_group.setdefault(str(result.get("judge") or ""), {}).update(decisions)
+                continue
             analysis = result.get("analysis") or {}
+            pairwise_path_value = str(((result.get("scored") or {}).get("pairwise_path") or ""))
+            pairwise_path = Path(pairwise_path_value) if pairwise_path_value else None
+            pairwise_rows = read_jsonl(pairwise_path) if pairwise_path is not None and pairwise_path.is_file() else []
+            decisions = {
+                str(item.get("pair_id")): str(item.get("judge_winner"))
+                for item in pairwise_rows
+                if item.get("position_consistent") is True
+                and item.get("judge_winner") in {"A", "B", "tie"}
+                and item.get("pair_id")
+            }
+            decision_group = judge_decisions.setdefault(
+                ("p12_context_ab", str(job.get("benchmark_id") or ""), str(result.get("writer") or "")),
+                {},
+            )
+            decision_group.setdefault(str(result.get("judge") or ""), {}).update(decisions)
             row = {
                 "benchmark_id": job.get("benchmark_id"),
                 "experiment": job.get("experiment"),
@@ -384,15 +562,55 @@ class CampaignRunner:
                 "judge": result.get("judge"),
                 "pairs": analysis.get("comparable_pairs") or analysis.get("pairs") or 0,
                 "ci": analysis.get("strategy_b_preference_ci95") or {},
-                "gate": bool(analysis.get("adoption_gate_passed")),
+                "gate": bool(analysis.get("corpus_gate_passed") or analysis.get("adoption_gate_passed")),
+                "comparable_rate": float(analysis.get("comparable_rate") or 0.0),
+                "position_consistency": float(analysis.get("position_consistency") or 0.0),
+                "first_attempt_comparable_rate": float(analysis.get("first_attempt_comparable_rate") or 0.0),
+                "first_attempt_position_consistency": float(
+                    analysis.get("first_attempt_position_consistency") or 0.0
+                ),
+                "judge_human_agreement": analysis.get("judge_human_agreement") or {},
                 "completed_at": job.get("completed_at"),
             }
             key = tuple(str(row.get(field) or "") for field in ("experiment", "benchmark_id", "writer", "judge"))
             latest[key] = row
+        for key, group in retrieval_groups.items():
+            _, benchmark_id, writer, judge = key
+            pair_ids = set(group.get("pair_ids") or set())
+            paths = self.harness.pipeline.corpus.paths(benchmark_id)
+            candidates = [
+                row
+                for row in read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl")
+                if str(row.get("pair_id") or "") in pair_ids
+            ]
+            analysis = self.harness.pipeline.statistics.analyze_strategy_ab(
+                benchmark_id=benchmark_id,
+                candidates=candidates,
+                pairwise_rows=list(group.get("pairwise_rows") or []),
+            )
+            latest[key] = {
+                "benchmark_id": benchmark_id,
+                "experiment": "retrieval_ab",
+                "writer": writer,
+                "judge": judge,
+                "pairs": analysis.get("comparable_pairs") or 0,
+                "ci": analysis.get("strategy_b_preference_ci95") or {},
+                "gate": bool(analysis.get("corpus_gate_passed") or analysis.get("adoption_gate_passed")),
+                "comparable_rate": float(analysis.get("comparable_rate") or 0.0),
+                "position_consistency": float(analysis.get("position_consistency") or 0.0),
+                "first_attempt_comparable_rate": float(analysis.get("first_attempt_comparable_rate") or 0.0),
+                "first_attempt_position_consistency": float(
+                    analysis.get("first_attempt_position_consistency") or 0.0
+                ),
+                "judge_human_agreement": analysis.get("judge_human_agreement") or {},
+                "completed_at": group.get("completed_at"),
+            }
         evidence = sorted(latest.values(), key=lambda item: tuple(str(item.get(key) or "") for key in ("experiment", "benchmark_id", "writer", "judge")))
         corpora = {str(item.get("benchmark_id")) for item in evidence if item.get("pairs")}
         writers = {str(item.get("writer")) for item in evidence if item.get("pairs")}
         judges = {str(item.get("judge")) for item in evidence if item.get("pairs")}
+        writer_infrastructures = {self._provider_infrastructure(item) for item in writers}
+        judge_infrastructures = {self._provider_infrastructure(item) for item in judges}
         provider_groups: Dict[tuple[str, str, str], List[Dict[str, Any]]] = {}
         for item in evidence:
             provider_groups.setdefault(
@@ -407,11 +625,56 @@ class CampaignRunner:
             for key, rows in provider_groups.items()
         }
         provider_scope = any(row["passed"] for row in provider_scope_rows.values())
+        judge_agreement = self._judge_agreement(judge_decisions)
+        agreement_ready = bool(judge_agreement) and all(row["passed"] for row in judge_agreement.values())
+        judge_calibration = {
+            judge: {
+                "passed": any(
+                    bool((row.get("judge_human_agreement") or {}).get("gate_passed"))
+                    for row in evidence
+                    if row.get("experiment") == "retrieval_ab" and row.get("judge") == judge
+                ),
+                "evidence": [
+                    row.get("judge_human_agreement")
+                    for row in evidence
+                    if row.get("experiment") == "retrieval_ab"
+                    and row.get("judge") == judge
+                    and (row.get("judge_human_agreement") or {}).get("available")
+                ],
+            }
+            for judge in judges
+        }
+        judge_calibration_ready = bool(judge_calibration) and all(
+            row["passed"] for row in judge_calibration.values()
+        )
+        observed_scope = {
+            (
+                str(item.get("experiment") or ""),
+                str(item.get("benchmark_id") or ""),
+                str(item.get("writer") or ""),
+                str(item.get("judge") or ""),
+            )
+            for item in evidence
+            if item.get("pairs")
+        }
+        expected_scope = {
+            (experiment, corpus.benchmark_id, writer, judge)
+            for corpus in self.campaign.corpora
+            for experiment in corpus.enabled_experiments
+            if experiment in {"retrieval_ab", "p12_context_ab"}
+            for writer in self.campaign.writer_providers
+            for judge in self.campaign.judge_providers
+        }
+        missing_scope = sorted("|".join(item) for item in expected_scope - observed_scope)
+        experiment_coverage_ready = bool(expected_scope) and not missing_scope
         global_scope = bool(
             provider_scope_rows
-            and len(writers) >= 2
-            and len(judges) >= 2
+            and len(writer_infrastructures) >= 2
+            and len(judge_infrastructures) >= 2
             and all(row["passed"] for row in provider_scope_rows.values())
+            and agreement_ready
+            and judge_calibration_ready
+            and experiment_coverage_ready
         )
         return {
             "jobs": len({str(row.get("job_id")) for row in self.store.jobs() if row.get("job_id")}),
@@ -421,6 +684,14 @@ class CampaignRunner:
             "corpora": sorted(corpora),
             "writer_providers": sorted(writers),
             "judge_providers": sorted(judges),
+            "writer_infrastructures": sorted(writer_infrastructures),
+            "judge_infrastructures": sorted(judge_infrastructures),
+            "judge_agreement": judge_agreement,
+            "judge_agreement_gate_passed": agreement_ready,
+            "judge_human_calibration": judge_calibration,
+            "judge_human_calibration_gate_passed": judge_calibration_ready,
+            "experiment_coverage_gate_passed": experiment_coverage_ready,
+            "missing_experiment_scope": missing_scope,
             "provider_scope_gate_passed": provider_scope,
             "provider_scope": provider_scope_rows,
             "global_scope_gate_passed": global_scope,
@@ -428,6 +699,38 @@ class CampaignRunner:
             "failure_count": len(read_jsonl(self.store.failures_path)),
             "failures_by_scope": self._failure_counts_by_scope(),
         }
+
+    def _judge_agreement(
+        self,
+        grouped: Dict[tuple[str, str, str], Dict[str, Dict[str, str]]],
+    ) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for group_key, by_judge in grouped.items():
+            for left, right in itertools.combinations(sorted(by_judge), 2):
+                common = sorted(set(by_judge[left]) & set(by_judge[right]))
+                agreement = (
+                    sum(by_judge[left][pair_id] == by_judge[right][pair_id] for pair_id in common) / len(common)
+                    if common
+                    else 0.0
+                )
+                key = "|".join((*group_key, left, right))
+                result[key] = {
+                    "experiment": group_key[0],
+                    "benchmark_id": group_key[1],
+                    "writer": group_key[2],
+                    "judge_a": left,
+                    "judge_b": right,
+                    "common_pairs": len(common),
+                    "agreement": agreement,
+                    "passed": len(common) >= self.campaign.stop.min_pairs
+                    and agreement >= self.campaign.stop.judge_agreement,
+                }
+        return result
+
+    @staticmethod
+    def _provider_infrastructure(profile_id: str) -> str:
+        profile = llm_config_service.get_profile_by_id(str(profile_id)) or {}
+        return str(profile.get("provider") or f"profile:{profile_id}")
 
     def _failure_counts_by_scope(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
@@ -479,6 +782,8 @@ class CampaignRunner:
             "corpora": corpora,
             "writer_providers": self.campaign.writer_providers,
             "judge_providers": self.campaign.judge_providers,
+            "writer_infrastructures": summary.get("writer_infrastructures") or [],
+            "judge_infrastructures": summary.get("judge_infrastructures") or [],
             "quality_gates": summary,
             "job_ledger_sha256": hashlib.sha256(self.store.jobs_path.read_bytes()).hexdigest()
             if self.store.jobs_path.exists()
@@ -510,8 +815,11 @@ class CampaignRunner:
             raise PermissionError(f"benchmark_manifest_external_api_disabled:{corpus.benchmark_id}")
 
     async def _should_skip(self, job_id: str) -> bool:
-        status = self.store.latest_job_statuses().get(job_id)
-        if status in {"completed", "skipped"}:
+        latest = next((row for row in reversed(self.store.jobs()) if str(row.get("job_id") or "") == job_id), None)
+        status = str((latest or {}).get("status") or "")
+        if status == "completed" and latest is not None:
+            return self._completed_job_is_current(latest)
+        if status == "skipped":
             return True
         if status == "running":
             await self._record_stop(f"uncertain_job_requires_manual_resolution:{job_id}")
@@ -519,6 +827,29 @@ class CampaignRunner:
         if status == "failed" and not self.campaign.retry_provider_errors:
             return True
         return False
+
+    def _latest_jobs(self) -> List[Dict[str, Any]]:
+        latest: Dict[str, Dict[str, Any]] = {}
+        for row in self.store.jobs():
+            job_id = str(row.get("job_id") or "")
+            if job_id:
+                latest[job_id] = row
+        return list(latest.values())
+
+    def _completed_job_is_current(self, row: Dict[str, Any]) -> bool:
+        result_path = Path(str(row.get("result_path") or ""))
+        if not result_path.is_file():
+            return False
+        expected_sha256 = str(row.get("result_sha256") or "")
+        if not expected_sha256 or hashlib.sha256(result_path.read_bytes()).hexdigest() != expected_sha256:
+            return False
+        result = read_json(result_path, {}) or {}
+        current = self._job_fingerprints(
+            str(row.get("benchmark_id") or ""),
+            str(row.get("experiment") or ""),
+            result=result,
+        )
+        return bool(row.get("fingerprints")) and row.get("fingerprints") == current
 
     def _budget_exhausted(self, next_requests: int, next_tokens: int) -> bool:
         state = self.store.load_state()
@@ -534,12 +865,15 @@ class CampaignRunner:
         pairs = int(analysis.get("comparable_pairs") or 0)
         scenes = int(analysis.get("independent_scenes") or 0)
         rate = float(analysis.get("comparable_rate") or 0.0)
+        position_consistency = float(analysis.get("position_consistency") or 0.0)
         ci = analysis.get("strategy_b_preference_ci95") or {}
         lower, upper = float(ci.get("lower") or 0.0), float(ci.get("upper") or 1.0)
         if pairs < self.campaign.stop.min_pairs or scenes < self.campaign.stop.min_scenes:
             return ""
         if rate < self.campaign.stop.comparable_rate:
             return "low_comparable_rate"
+        if position_consistency < self.campaign.stop.position_consistency:
+            return "low_position_consistency"
         if lower > self.campaign.stop.win_ci_lower:
             return "decisive_win"
         if upper < self.campaign.stop.loss_ci_upper:
@@ -557,27 +891,44 @@ class CampaignRunner:
             state["stop_reasons"] = reasons
             self.store.save_json(self.store.state_path, state)
 
-    @staticmethod
-    def _p12_usage(paths: Any, writer: str, judge: str) -> Dict[str, Any]:
-        candidates = read_jsonl(paths.generated_dir / "p12_context_candidates.jsonl")
-        pairwise = read_jsonl(paths.generated_dir / "p12_context_pairwise.jsonl")
-        usages = [row.get("gateway_usage") or {} for row in candidates if row.get("writer_provider") == writer]
-        judge_usages = [row.get("judge_usage") or {} for row in pairwise if row.get("judge_provider") == judge]
-        all_usage = usages + judge_usages
-        return {
-            "requests": len(candidates) + len(pairwise) * 2,
-            "prompt_tokens": sum(int(item.get("prompt_tokens") or 0) for item in all_usage),
-            "completion_tokens": sum(int(item.get("completion_tokens") or 0) for item in all_usage),
-            "total_tokens": sum(int(item.get("total_tokens") or 0) for item in all_usage),
-        }
-
-    def _job_fingerprints(self, benchmark_id: str, experiment: str) -> Dict[str, Any]:
+    def _job_fingerprints(
+        self,
+        benchmark_id: str,
+        experiment: str,
+        *,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         paths = self.harness.pipeline.corpus.paths(benchmark_id)
-        if experiment == "retrieval_ab":
+        result = result or {}
+        if experiment in {"retrieval_ab", "retrieval_ab_generation"}:
             candidates = read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl")
-            pairwise_files = sorted(paths.generated_dir.glob("strategy_ab_pairwise_judge_*.jsonl"))
-            pairwise = read_jsonl(pairwise_files[-1]) if pairwise_files else []
-            return {
+            pair_ids = {
+                str(item)
+                for item in (
+                    result.get("pair_ids")
+                    or ((result.get("generated") or {}).get("pair_ids") or [])
+                )
+                if str(item)
+            }
+            if pair_ids:
+                candidates = [row for row in candidates if str(row.get("pair_id") or "") in pair_ids]
+            candidate_fingerprints = sorted(
+                stable_fingerprint(
+                    {
+                        "id": row.get("id"),
+                        "pair_id": row.get("pair_id"),
+                        "candidate_sha256": hashlib.sha256(
+                            str(row.get("candidate_text") or row.get("chapter_text") or "").encode("utf-8")
+                        ).hexdigest(),
+                        "prompt_version": row.get("prompt_version"),
+                        "retrieval_execution": row.get("retrieval_execution") or {},
+                        "writer_provider": row.get("writer_provider"),
+                        "writer_model": row.get("writer_model"),
+                    }
+                )
+                for row in candidates
+            )
+            base = {
                 "prompt_versions": sorted(
                     {str(row.get("prompt_version")) for row in candidates if row.get("prompt_version")}
                 ),
@@ -588,25 +939,90 @@ class CampaignRunner:
                         if (row.get("retrieval_execution") or {}).get("execution_signature")
                     }
                 ),
+                "candidate_fingerprints": candidate_fingerprints,
+                "tool_fingerprint": "not_applicable_no_tools",
+            }
+            if experiment == "retrieval_ab_generation":
+                return base
+            expected_pairs = {
+                pair["pair_id"]: pair["pair_fingerprint"]
+                for pair in LongformBenchmarkHarness._strategy_ab_pairs(candidates)
+            }
+            score_path_value = str(((result.get("scored") or {}).get("path") or ""))
+            score_path = Path(score_path_value) if score_path_value else None
+            pairwise = read_jsonl(score_path) if score_path is not None and score_path.is_file() else []
+            return {
+                **base,
+                "expected_pair_fingerprints": sorted(expected_pairs.values()),
                 "pair_fingerprints": sorted(
                     {str(row.get("pair_fingerprint")) for row in pairwise if row.get("pair_fingerprint")}
                 ),
-                "tool_fingerprint": "not_applicable_no_tools",
             }
-        if experiment == "p12_context_ab":
-            candidates = read_jsonl(paths.generated_dir / "p12_context_candidates.jsonl")
-            pairwise = read_jsonl(paths.generated_dir / "p12_context_pairwise.jsonl")
-            return {
+        if experiment in {"p12_context_generation", "p12_context_ab"}:
+            candidate_path_value = str(
+                result.get("candidate_path") or ((result.get("generated") or {}).get("candidate_path") or "")
+            )
+            pairwise_path_value = str(((result.get("scored") or {}).get("pairwise_path") or ""))
+            candidates = read_jsonl(Path(candidate_path_value)) if candidate_path_value else []
+            pairwise = read_jsonl(Path(pairwise_path_value)) if pairwise_path_value else []
+            candidate_fingerprints = sorted(
+                stable_fingerprint(
+                    {
+                        "id": row.get("id"),
+                        "pair_id": row.get("pair_id"),
+                        "candidate_sha256": row.get("candidate_sha256"),
+                        "context_fingerprint": row.get("context_fingerprint"),
+                        "prompt_version": row.get("prompt_version"),
+                        "writer_provider": row.get("writer_provider"),
+                        "writer_model": row.get("writer_model"),
+                    }
+                )
+                for row in candidates
+            )
+            base = {
                 "prompt_versions": sorted(
                     {str(row.get("prompt_version")) for row in candidates if row.get("prompt_version")}
                 ),
                 "context_fingerprints": sorted(
                     {str(row.get("context_fingerprint")) for row in candidates if row.get("context_fingerprint")}
                 ),
+                "candidate_fingerprints": candidate_fingerprints,
+                "tool_fingerprint": "not_applicable_no_tools",
+            }
+            if experiment == "p12_context_generation":
+                return base
+            candidates_by_pair: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for candidate in candidates:
+                candidates_by_pair.setdefault(str(candidate.get("pair_id") or ""), {})[
+                    str(candidate.get("strategy_role") or "")
+                ] = candidate
+            expected_pair_fingerprints = []
+            for row in pairwise:
+                roles = candidates_by_pair.get(str(row.get("pair_id") or ""), {})
+                first, second = roles.get("A"), roles.get("B")
+                if not first or not second:
+                    continue
+                expected_pair_fingerprints.append(
+                    p12_pair_fingerprint(
+                        {
+                            **row,
+                            "context_fingerprint_a": first.get("context_fingerprint"),
+                            "context_fingerprint_b": second.get("context_fingerprint"),
+                            "candidate_a_sha256": first.get("candidate_sha256"),
+                            "candidate_b_sha256": second.get("candidate_sha256"),
+                            "writer_provider": first.get("writer_provider"),
+                            "writer_model": first.get("writer_model"),
+                            "prompt_version": first.get("prompt_version"),
+                            "judge_prompt_version": POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
+                        }
+                    )
+                )
+            return {
+                **base,
+                "expected_pair_fingerprints": sorted(expected_pair_fingerprints),
                 "pair_fingerprints": sorted(
                     {str(row.get("pair_fingerprint")) for row in pairwise if row.get("pair_fingerprint")}
                 ),
-                "tool_fingerprint": "not_applicable_no_tools",
             }
         return {"tool_fingerprint": "not_applicable_no_tools"}
 

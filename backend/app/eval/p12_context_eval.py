@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List
 from app.context_engine.memory_record import MemoryRecordV2, parse_string_list
 from app.error_contract import safe_error_code
 from app.eval.longform_statistics import cluster_bootstrap_mean_ci
-from app.eval.writing_judge import run_pairwise_judge_eval
+from app.eval.writing_judge import POINTWISE_PAIR_JUDGE_PROMPT_VERSION, run_pointwise_pair_judge_eval
 from app.utils.llm_output import parse_json_payload
 
 
@@ -70,6 +70,7 @@ def p12_pair_fingerprint(row: Dict[str, Any]) -> str:
         "writer_provider": row.get("writer_provider"),
         "writer_model": row.get("writer_model"),
         "prompt_version": row.get("prompt_version"),
+        "judge_prompt_version": row.get("judge_prompt_version"),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -129,7 +130,9 @@ def analyze_p12_pairwise(rows: List[Dict[str, Any]], *, bootstrap_samples: int =
     current = [
         row
         for row in rows
-        if not row.get("stale") and str(row.get("pair_fingerprint") or "") == p12_pair_fingerprint(row)
+        if not row.get("stale")
+        and row.get("judge_prompt_version") == POINTWISE_PAIR_JUDGE_PROMPT_VERSION
+        and str(row.get("pair_fingerprint") or "") == p12_pair_fingerprint(row)
     ]
     stale_rows = len(rows) - len(current)
     comparable = [
@@ -155,6 +158,20 @@ def analyze_p12_pairwise(rows: List[Dict[str, Any]], *, bootstrap_samples: int =
     contradictions = sum(int(row.get("severe_contradictions") or 0) for row in current)
     unrecoverable = sum(1 for row in current if row.get("recoverable") is False)
     comparable_rate = len(comparable) / len(current) if current else 0.0
+    position_consistency = (
+        sum(row.get("position_consistent") is True for row in current) / len(current) if current else 0.0
+    )
+    first_attempt_comparable = []
+    first_attempt_consistent = []
+    for row in current:
+        attempts = list(row.get("attempts") or [])
+        first = attempts[0] if attempts else {}
+        consistent = bool(first.get("order_invariant")) if attempts else row.get("position_consistent") is True
+        if consistent:
+            first_attempt_consistent.append(row)
+        winner = str(first.get("winner") or row.get("judge_winner") or "")
+        if consistent and winner in {"A", "B", "tie"}:
+            first_attempt_comparable.append(row)
     gate = bool(
         len(comparable) >= 100
         and len(scene_ids) >= 20
@@ -172,6 +189,9 @@ def analyze_p12_pairwise(rows: List[Dict[str, Any]], *, bootstrap_samples: int =
         "stale_pairs": stale_rows,
         "comparable_pairs": len(comparable),
         "comparable_rate": comparable_rate,
+        "position_consistency": position_consistency,
+        "first_attempt_comparable_rate": len(first_attempt_comparable) / len(current) if current else 0.0,
+        "first_attempt_position_consistency": len(first_attempt_consistent) / len(current) if current else 0.0,
         "independent_scenes": len(scene_ids),
         "min_trials_per_scene": min(trials.values()) if trials else 0,
         "strategy_b_preference": (sum(row["score_b"] for row in scored) / len(scored)) if scored else 0.0,
@@ -293,7 +313,11 @@ async def generate_p12_candidates(
 
 
 async def score_p12_candidates(
-    candidates: List[Dict[str, Any]], *, provider: str | None, require_available: bool = False
+    candidates: List[Dict[str, Any]],
+    *,
+    provider: str | None,
+    require_available: bool = False,
+    pairwise_retries: int = 0,
 ) -> Dict[str, Any]:
     grouped: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for row in candidates:
@@ -310,17 +334,48 @@ async def score_p12_candidates(
             "candidate_a": first.get("candidate_text") or "",
             "candidate_b": second.get("candidate_text") or "",
         }
-        forward = await run_pairwise_judge_eval(case, provider=provider, require_available=require_available)
-        swapped = await run_pairwise_judge_eval(
-            {**case, "candidate_a": case["candidate_b"], "candidate_b": case["candidate_a"]},
-            provider=provider,
-            require_available=require_available,
+        attempts = []
+        usage_rows = []
+        for attempt_number in range(1, max(1, int(pairwise_retries) + 1) + 1):
+            comparison = await run_pointwise_pair_judge_eval(
+                case,
+                provider=provider,
+                require_available=require_available,
+            )
+            usage_rows.extend(comparison.get("usage_rows") or [])
+            judge = comparison.get("judge") or {}
+            attempt = {
+                "attempt": attempt_number,
+                "available": bool(comparison.get("available")),
+                "success": bool(comparison.get("success")),
+                "order_invariant": bool(comparison.get("order_invariant")),
+                "winner": str(judge.get("winner") or ""),
+                "score_a": judge.get("score_a"),
+                "score_b": judge.get("score_b"),
+                "score_delta_b_minus_a": judge.get("score_delta_b_minus_a"),
+                "provider": comparison.get("provider"),
+                "model": comparison.get("model"),
+                "prompt_version": comparison.get("prompt_version"),
+                "comparison_method": comparison.get("comparison_method"),
+                "error": comparison.get("error"),
+            }
+            attempts.append(attempt)
+            if attempt["success"] and attempt["order_invariant"] and attempt["winner"] in {"A", "B", "tie"}:
+                break
+        selected = next(
+            (
+                attempt
+                for attempt in attempts
+                if attempt["success"] and attempt["order_invariant"] and attempt["winner"] in {"A", "B", "tie"}
+            ),
+            attempts[-1],
         )
-        forward_winner = str((forward.get("judge") or {}).get("winner") or "")
-        swapped_winner = str((swapped.get("judge") or {}).get("winner") or "")
-        mapped_swapped = {"A": "B", "B": "A", "tie": "tie"}.get(swapped_winner)
-        consistent = bool(forward.get("success") and swapped.get("success") and mapped_swapped == forward_winner)
-        winner = forward_winner if consistent and forward_winner in {"A", "B", "tie"} else None
+        consistent = bool(selected["success"] and selected["order_invariant"])
+        winner = selected["winner"] if consistent and selected["winner"] in {"A", "B", "tie"} else None
+        judge_usage = {
+            key: sum(int((usage or {}).get(key) or 0) for usage in usage_rows)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
         row = {
             "pair_id": pair_id,
             "scene_id": first.get("scene_id") or second.get("scene_id"),
@@ -335,12 +390,17 @@ async def score_p12_candidates(
             "prompt_version": first.get("prompt_version"),
             "judge_winner": winner,
             "position_consistent": consistent,
-            "judge_provider": forward.get("provider") or provider,
-            "judge_model": forward.get("model"),
-            "judge_usage": {
-                key: int((forward.get("usage") or {}).get(key) or 0) + int((swapped.get("usage") or {}).get(key) or 0)
-                for key in ("prompt_tokens", "completion_tokens", "total_tokens")
-            },
+            "judge_provider": selected.get("provider") or provider,
+            "judge_model": selected.get("model"),
+            "judge_prompt_version": selected.get("prompt_version") or POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
+            "comparison_method": selected.get("comparison_method"),
+            "score_a": selected.get("score_a"),
+            "score_b": selected.get("score_b"),
+            "score_delta_b_minus_a": selected.get("score_delta_b_minus_a"),
+            "judge_usage": judge_usage,
+            "requests_attempted": len(usage_rows),
+            "attempt_count": len(attempts),
+            "attempts": attempts,
             "memory_pollution_count": max(
                 int(first.get("memory_pollution_count") or 0), int(second.get("memory_pollution_count") or 0)
             ),

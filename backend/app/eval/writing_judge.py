@@ -27,6 +27,17 @@ RUBRIC_FIELDS = (
 )
 
 PAIRWISE_JUDGE_PROMPT_VERSION = "context-quality-v3"
+POINTWISE_PAIR_JUDGE_PROMPT_VERSION = "context-quality-v4-pointwise"
+POINTWISE_TIE_DELTA = 0.25
+POINTWISE_WEIGHTS = {
+    "context_utilization": 0.20,
+    "factual_consistency": 0.20,
+    "timeline_consistency": 0.15,
+    "character_consistency": 0.15,
+    "foreshadowing_integrity": 0.10,
+    "style_consistency": 0.10,
+    "readability": 0.10,
+}
 
 
 def judge_extra_body(profile_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -166,6 +177,35 @@ def build_pairwise_judge_messages(case: Dict[str, Any]) -> List[Dict[str, str]]:
     return [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}]
 
 
+def build_pointwise_candidate_judge_messages(case: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Build the compact, order-free candidate scoring prompt used by automated A/B gates."""
+
+    system = (
+        "你是长篇中文小说后端 benchmark 的独立评分器。只评价当前单个候选，不与其他候选比较，"
+        "不得引入外部知识或已知名著情节。只输出一个 JSON 对象，不输出解释、引用、Markdown 或额外字段。"
+    )
+    user = {
+        "prompt_version": POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
+        "canon_summary": str(case.get("canon_summary") or ""),
+        "prior_summary": str(case.get("prior_summary") or ""),
+        "resident_context": str(case.get("resident_context") or ""),
+        "scene_brief": str(case.get("scene_brief") or ""),
+        "reference_excerpt": str(case.get("reference_excerpt") or ""),
+        "candidate_text": str(case.get("candidate_text") or ""),
+        "scoring": {
+            "context_utilization": "0-5，是否自然利用适用于当前 scene 的具体上下文",
+            "factual_consistency": "0-5，是否遵循明确事实",
+            "timeline_consistency": "0-5，事件顺序与当前时点是否一致",
+            "character_consistency": "0-5，人物称谓、关系、动机与状态是否一致",
+            "foreshadowing_integrity": "0-5，是否保留线索连续性且不无依据改写",
+            "style_consistency": "0-5，叙述语气、节奏与视角是否贴近前文",
+            "readability": "0-5，是否为完整可读正文，非说明、JSON 外壳或截断",
+        },
+        "required_json_schema": {"scores": {field: "number 0-5" for field in RUBRIC_FIELDS}},
+    }
+    return [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}]
+
+
 def parse_rubric_judge_response(raw: str) -> Dict[str, Any]:
     """Parse and normalize a rubric judge JSON response."""
 
@@ -277,4 +317,104 @@ async def run_pairwise_judge_eval(
         "model": response.get("model"),
         "provider": response.get("provider"),
         "elapsed_time": response.get("elapsed_time"),
+    }
+
+
+def _weighted_pointwise_score(judge: Dict[str, Any]) -> float:
+    scores = judge.get("scores") if isinstance(judge.get("scores"), dict) else {}
+    return sum(float(scores.get(field) or 0.0) * weight for field, weight in POINTWISE_WEIGHTS.items())
+
+
+async def run_pointwise_candidate_judge_eval(
+    case: Dict[str, Any],
+    *,
+    provider: Optional[str] = None,
+    require_available: bool = False,
+) -> Dict[str, Any]:
+    gateway = get_gateway()
+    try:
+        profile_id = provider or gateway.get_provider_for_agent("editor")
+        response = await gateway.chat(
+            build_pointwise_candidate_judge_messages(case),
+            provider=profile_id,
+            temperature=0.0,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+            extra_body=judge_extra_body(profile_id),
+        )
+    except Exception as exc:
+        if require_available:
+            raise
+        return {"available": False, **benchmark_failure(exc)}
+
+    parsed = parse_rubric_judge_response(str(response.get("content") or ""))
+    finish_reason = str(response.get("finish_reason") or "")
+    error = "judge_output_truncated" if finish_reason == "length" else (parsed.get("error") or "")
+    return {
+        "available": True,
+        "success": bool(parsed.get("success")) and not error,
+        "judge": parsed,
+        "usage": response.get("usage") or {},
+        "model": response.get("model"),
+        "provider": response.get("provider"),
+        "error": error,
+        "finish_reason": finish_reason,
+    }
+
+
+async def run_pointwise_pair_judge_eval(
+    case: Dict[str, Any],
+    *,
+    provider: Optional[str] = None,
+    require_available: bool = False,
+) -> Dict[str, Any]:
+    """Score each candidate independently, then derive a deterministic winner."""
+
+    common = {key: value for key, value in case.items() if key not in {"candidate_a", "candidate_b"}}
+    candidate_a = await run_pointwise_candidate_judge_eval(
+        {**common, "candidate_text": str(case.get("candidate_a") or "")},
+        provider=provider,
+        require_available=require_available,
+    )
+    candidate_b = await run_pointwise_candidate_judge_eval(
+        {**common, "candidate_text": str(case.get("candidate_b") or "")},
+        provider=provider,
+        require_available=require_available,
+    )
+    usage_rows = [candidate_a.get("usage") or {}, candidate_b.get("usage") or {}]
+    available = bool(candidate_a.get("available") and candidate_b.get("available"))
+    success = bool(candidate_a.get("success") and candidate_b.get("success"))
+    identities = {
+        (str(candidate_a.get("provider") or ""), str(candidate_a.get("model") or "")),
+        (str(candidate_b.get("provider") or ""), str(candidate_b.get("model") or "")),
+    }
+    if success and (len(identities) != 1 or ("", "") in identities):
+        success = False
+    score_a = _weighted_pointwise_score(candidate_a.get("judge") or {}) if success else 0.0
+    score_b = _weighted_pointwise_score(candidate_b.get("judge") or {}) if success else 0.0
+    delta = score_b - score_a
+    winner = "tie" if abs(delta) < POINTWISE_TIE_DELTA else ("B" if delta > 0 else "A")
+    identity = next(iter(identities)) if len(identities) == 1 else ("", "")
+    return {
+        "available": available,
+        "success": success,
+        "judge": {
+            "winner": winner if success else "",
+            "score_a": score_a,
+            "score_b": score_b,
+            "score_delta_b_minus_a": delta,
+            "scores_a": (candidate_a.get("judge") or {}).get("scores") or {},
+            "scores_b": (candidate_b.get("judge") or {}).get("scores") or {},
+        },
+        "prompt_version": POINTWISE_PAIR_JUDGE_PROMPT_VERSION,
+        "comparison_method": "independent_pointwise_weighted",
+        "order_invariant": success,
+        "error": "" if success else (
+            (candidate_a.get("judge") or {}).get("error")
+            or (candidate_b.get("judge") or {}).get("error")
+            or "pointwise_judge_failed"
+        ),
+        "usage_rows": usage_rows,
+        "provider": identity[0],
+        "model": identity[1],
     }

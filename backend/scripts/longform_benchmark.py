@@ -22,6 +22,8 @@ def _ensure_sys_path() -> None:
 
 
 def _print(payload) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
@@ -231,6 +233,55 @@ def _parser() -> argparse.ArgumentParser:
     p_preflight_strategy_ab.add_argument("--top-k", type=int, default=10)
     p_preflight_strategy_ab.add_argument("--scene-id", action="append", default=[])
 
+    p_refresh_strategy_refs = sub.add_parser(
+        "refresh-strategy-references",
+        help="Attach held-out scene continuations to existing strategy candidates without API calls",
+    )
+    p_refresh_strategy_refs.add_argument("--benchmark-id", required=True)
+
+    p_strategy_review = sub.add_parser(
+        "strategy-review-pack",
+        help="Create a blinded full-candidate human calibration pack",
+    )
+    p_strategy_review.add_argument("--benchmark-id", required=True)
+    p_strategy_review.add_argument("--size", type=int, default=20)
+
+    p_apply_strategy_review = sub.add_parser(
+        "apply-strategy-review",
+        help="Validate a completed strategy review pack and persist content-free gold labels",
+    )
+    p_apply_strategy_review.add_argument("--benchmark-id", required=True)
+    p_apply_strategy_review.add_argument("--review-path", required=True)
+    p_apply_strategy_review.add_argument("--key-path", required=True)
+    p_apply_strategy_review.add_argument("--reviewer", required=True)
+
+    p_record_strategy_review = sub.add_parser(
+        "record-strategy-review",
+        help="Record one blinded strategy review decision without reading the mapping key",
+    )
+    p_record_strategy_review.add_argument("--review-path", required=True)
+    p_record_strategy_review.add_argument("--review-id", required=True)
+    p_record_strategy_review.add_argument(
+        "--winner",
+        required=True,
+        choices=["left", "right", "tie", "incomparable"],
+    )
+    p_record_strategy_review.add_argument("--reason-code", action="append", default=[])
+    p_record_strategy_review.add_argument("--reviewer", required=True)
+
+    p_show_strategy_review = sub.add_parser(
+        "show-strategy-review",
+        help="Show one blinded review row by one-based index",
+    )
+    p_show_strategy_review.add_argument("--review-path", required=True)
+    p_show_strategy_review.add_argument("--index", type=int, required=True)
+
+    p_strategy_review_status = sub.add_parser(
+        "strategy-review-status",
+        help="Show review progress and candidate completeness signals without the full prose",
+    )
+    p_strategy_review_status.add_argument("--review-path", required=True)
+
     p_review = sub.add_parser("review-pack", help="Create human review pack")
     p_review.add_argument("--benchmark-id", required=True)
     p_review.add_argument("--size", type=int, default=50)
@@ -270,7 +321,7 @@ def _parser() -> argparse.ArgumentParser:
 
     p_score_strategy_ab = sub.add_parser(
         "score-strategy-ab",
-        help="Run position-swapped v3 judge scoring for retrieval strategy output pairs",
+        help="Run order-free v4 pointwise judge scoring for retrieval strategy output pairs",
     )
     p_score_strategy_ab.add_argument("--benchmark-id", required=True)
     p_score_strategy_ab.add_argument("--provider", default=None)
@@ -299,11 +350,12 @@ def _parser() -> argparse.ArgumentParser:
     p_generate_p12.add_argument("--force-external", action="store_true")
     p_generate_p12.add_argument("--require-available", action="store_true")
 
-    p_score_p12 = sub.add_parser("score-p12-context-ab", help="Run position-swapped judge for P12 context pairs")
+    p_score_p12 = sub.add_parser("score-p12-context-ab", help="Run order-free v4 pointwise judge for P12 pairs")
     p_score_p12.add_argument("--benchmark-id", required=True)
     p_score_p12.add_argument("--provider", default=None)
     p_score_p12.add_argument("--force-external", action="store_true")
     p_score_p12.add_argument("--require-judge", action="store_true")
+    p_score_p12.add_argument("--pairwise-retries", type=int, default=0)
 
     p_compare_strategy_ab = sub.add_parser(
         "compare-strategy-ab",
@@ -421,6 +473,49 @@ async def _main() -> int:
             scene_ids=args.scene_id,
             append=args.append,
         )
+    elif command == "refresh-strategy-references":
+        result = harness.refresh_strategy_references(benchmark_id=args.benchmark_id)
+    elif command == "strategy-review-pack":
+        result = harness.build_strategy_review_pack(benchmark_id=args.benchmark_id, size=args.size)
+    elif command == "apply-strategy-review":
+        result = harness.apply_strategy_review_pack(
+            benchmark_id=args.benchmark_id,
+            review_path=args.review_path,
+            key_path=args.key_path,
+            reviewer=args.reviewer,
+        )
+    elif command == "record-strategy-review":
+        result = harness.record_strategy_review(
+            review_path=args.review_path,
+            review_id=args.review_id,
+            winner=args.winner,
+            reason_codes=args.reason_code,
+            reviewer=args.reviewer,
+        )
+    elif command == "show-strategy-review":
+        rows = [json.loads(line) for line in Path(args.review_path).read_text(encoding="utf-8").splitlines() if line]
+        if args.index < 1 or args.index > len(rows):
+            raise ValueError("strategy_review_index_out_of_range")
+        result = rows[args.index - 1]
+    elif command == "strategy-review-status":
+        rows = [json.loads(line) for line in Path(args.review_path).read_text(encoding="utf-8").splitlines() if line]
+        result = {
+            "pairs": len(rows),
+            "reviewed": sum(bool(row.get("human_winner")) for row in rows),
+            "rows": [
+                {
+                    "index": index,
+                    "review_id": row.get("review_id"),
+                    "left_chars": len(str(row.get("candidate_left") or "")),
+                    "right_chars": len(str(row.get("candidate_right") or "")),
+                    "left_tail": str(row.get("candidate_left") or "")[-40:],
+                    "right_tail": str(row.get("candidate_right") or "")[-40:],
+                    "reference_chars": len(str(row.get("reference_excerpt") or "")),
+                    "human_winner": row.get("human_winner"),
+                }
+                for index, row in enumerate(rows, 1)
+            ],
+        }
     elif command == "review-pack":
         result = harness.build_review_pack(benchmark_id=args.benchmark_id, size=args.size)
     elif command == "apply-review":
@@ -471,6 +566,7 @@ async def _main() -> int:
             provider=args.provider,
             force_external=args.force_external,
             require_judge=args.require_judge,
+            pairwise_retries=args.pairwise_retries,
         )
     elif command == "compare-strategy-ab":
         result = harness.compare_strategy_ab_corpora(benchmark_ids=args.benchmark_id)
