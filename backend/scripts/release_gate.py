@@ -21,6 +21,11 @@ def main() -> None:
     parser.add_argument("--production-manifest", action="append", default=[])
     parser.add_argument("--require-global-campaign", action="store_true")
     parser.add_argument("--engineering-only", action="store_true")
+    parser.add_argument(
+        "--skip-campaign-evidence",
+        action="store_true",
+        help="Skip optional model-quality campaign evidence for the non-commercial release profile",
+    )
     parser.add_argument("--allow-dirty-worktree", action="store_true")
     parser.add_argument("--max-evidence-age-days", type=float, default=30.0)
     parser.add_argument("--output", default="backend/release_gate_report.json")
@@ -29,7 +34,7 @@ def main() -> None:
         campaign_manifests=args.campaign_manifest,
         production_manifests=args.production_manifest,
         require_global_campaign=args.require_global_campaign,
-        require_campaign_evidence=not args.engineering_only,
+        require_campaign_evidence=not (args.engineering_only or args.skip_campaign_evidence),
         require_production_evidence=not args.engineering_only,
         require_clean_worktree=not args.allow_dirty_worktree,
         max_evidence_age_seconds=max(1.0, args.max_evidence_age_days * 86400.0),
