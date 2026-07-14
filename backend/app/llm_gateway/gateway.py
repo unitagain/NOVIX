@@ -574,6 +574,19 @@ class LLMGateway:
             raise PermissionError("external_egress_not_authorized")
         request_trace["timeout_seconds"] = deadline.total_seconds
         request_trace["_deadline"] = deadline
+
+        async def record_cancelled_egress() -> None:
+            await self.telemetry.record_egress(
+                request_trace,
+                provider_profile=provider,
+                provider_name=target_provider.get_provider_name(),
+                messages=prepared_messages,
+                data_classification=data_classification,
+                authorized=egress_authorized,
+                status="cancelled_uncertain",
+            )
+            runtime_metrics.increment("gateway.agentic_stream_cancelled")
+
         try:
             from app.jobs.durable_queue import current_task_execution
 
@@ -582,11 +595,18 @@ class LLMGateway:
                 await task_execution.mark_external_side_effect(str(request_trace.get("request_fingerprint") or ""))
         except ImportError:
             pass
+        except asyncio.CancelledError:
+            await record_cancelled_egress()
+            raise
 
-        lease = await self.reliability.before_request(
-            f"{target_provider.get_provider_name()}:{getattr(target_provider, 'model', '')}",
-            deadline=deadline,
-        )
+        try:
+            lease = await self.reliability.before_request(
+                f"{target_provider.get_provider_name()}:{getattr(target_provider, 'model', '')}",
+                deadline=deadline,
+            )
+        except asyncio.CancelledError:
+            await record_cancelled_egress()
+            raise
         content_parts: List[str] = []
         thinking_parts: List[str] = []
         tool_buffers: Dict[int, Dict[str, str]] = {}
@@ -654,16 +674,7 @@ class LLMGateway:
             self.reliability.success(lease)
         except asyncio.CancelledError:
             self.reliability.cancelled(lease)
-            await self.telemetry.record_egress(
-                request_trace,
-                provider_profile=provider,
-                provider_name=target_provider.get_provider_name(),
-                messages=prepared_messages,
-                data_classification=data_classification,
-                authorized=egress_authorized,
-                status="cancelled_uncertain",
-            )
-            runtime_metrics.increment("gateway.agentic_stream_cancelled")
+            await record_cancelled_egress()
             raise
         except Exception:
             self.reliability.failure(lease)

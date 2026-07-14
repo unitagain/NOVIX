@@ -62,13 +62,20 @@ class RequestDeadline:
             raise
         if limit is not None:
             timeout = min(timeout, max(0.001, float(limit)))
+        task = asyncio.ensure_future(awaitable)
         try:
-            return await asyncio.wait_for(awaitable, timeout=timeout)
+            done, _pending = await asyncio.wait({task}, timeout=timeout)
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        if task not in done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise TimeoutError("request_deadline_exceeded")
+        try:
+            return task.result()
         except asyncio.TimeoutError as exc:
-            current = asyncio.current_task()
-            cancelling = getattr(current, "cancelling", None)
-            if callable(cancelling) and int(cancelling() or 0) > 0:
-                raise asyncio.CancelledError() from exc
             raise TimeoutError("request_deadline_exceeded") from exc
 
     async def sleep(self, delay: float) -> None:
