@@ -202,8 +202,8 @@ def test_chat_turn_auto_execute_plan(tmp_path):
         return {"success": True, "plan": {"status": "done"}}
 
     orch.decide_writing_action = fake_decide
-    orch.create_plan = fake_create
-    orch.execute_plan = fake_exec
+    orch.application.plans.create_plan = fake_create
+    orch.application.plans.execute_plan = fake_exec
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "在6-8章回收", auto_execute_plan=True))
     assert r["action"] == "plan" and r["execution"]["success"]
     assert "permission_gate" in [s["stage"] for s in r["route_contract"]["stages"]]

@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -25,6 +26,18 @@ def _print(payload) -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+
+
+def _reserve_stdout_for_json() -> None:
+    """Keep the CLI stdout contract machine-readable; operational logs use stderr."""
+    configured = [
+        value for value in logging.Logger.manager.loggerDict.values() if isinstance(value, logging.Logger)
+    ]
+    loggers = [logging.getLogger(), *configured]
+    for logger in loggers:
+        for handler in logger.handlers:
+            if isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout:
+                handler.setStream(sys.stderr)
 
 
 def _metric_summary(metrics: dict) -> dict:
@@ -421,6 +434,7 @@ async def _main() -> int:
     _ensure_sys_path()
     from app.eval.longform_benchmark import LongformBenchmarkHarness, ensure_benchmark_gitignore
 
+    _reserve_stdout_for_json()
     args = _parser().parse_args()
     harness = LongformBenchmarkHarness(args.root)
     command = args.command
