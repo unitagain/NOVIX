@@ -2,8 +2,10 @@ name: Quality
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: ["develop"]
   pull_request:
+    branches: ["develop"]
+  workflow_dispatch:
 
 jobs:
   backend-linux:
