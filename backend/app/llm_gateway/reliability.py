@@ -65,6 +65,10 @@ class RequestDeadline:
         try:
             return await asyncio.wait_for(awaitable, timeout=timeout)
         except asyncio.TimeoutError as exc:
+            current = asyncio.current_task()
+            cancelling = getattr(current, "cancelling", None)
+            if callable(cancelling) and int(cancelling() or 0) > 0:
+                raise asyncio.CancelledError() from exc
             raise TimeoutError("request_deadline_exceeded") from exc
 
     async def sleep(self, delay: float) -> None:

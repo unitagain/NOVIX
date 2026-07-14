@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.llm_gateway.contracts import ProviderUsage
@@ -74,3 +76,18 @@ def test_retry_after_takes_priority_over_local_backoff():
 async def test_retry_after_sleep_cannot_exceed_total_deadline():
     with pytest.raises(TimeoutError, match="request_deadline_exceeded"):
         await RequestDeadline(0.01).sleep(5)
+
+
+@pytest.mark.asyncio
+async def test_request_deadline_preserves_parent_task_cancellation():
+    started = asyncio.Event()
+
+    async def blocked():
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(RequestDeadline(30).wait_for(blocked()))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
