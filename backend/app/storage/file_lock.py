@@ -99,7 +99,10 @@ class AsyncFileLock:
 
         try:
             if timeout is not None:
-                await asyncio.wait_for(lock.acquire(), timeout=timeout)
+                try:
+                    await asyncio.wait_for(lock.acquire(), timeout=timeout)
+                except asyncio.TimeoutError as exc:
+                    raise TimeoutError(f"file_lock_timeout:{path}") from exc
             else:
                 await lock.acquire()
             acquired = True
