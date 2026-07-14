@@ -76,6 +76,10 @@ class UnifiedStorageAdapter:
         """获取所有事实 / Get all canonical facts for the project."""
         return await self.canon.get_all_facts(project_id)
 
+    async def get_eligible_facts(self, project_id: str) -> List[Any]:
+        """Return only confirmed, provenance-bound facts for model context."""
+        return await self.canon.get_eligible_facts(project_id)
+
     def get_relations_path(self, project_id: str):
         """返回 canon/relations.jsonl 的路径（轻量关系图数据源，Phase 4）。
 

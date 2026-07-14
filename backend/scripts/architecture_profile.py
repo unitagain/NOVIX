@@ -128,27 +128,69 @@ def _cycles(graph: dict[str, set[str]]) -> list[list[str]]:
     return sorted(result)
 
 
-def _external_private_accesses() -> list[str]:
+def _external_private_accesses(roots: list[Path] | None = None) -> list[str]:
     violations: list[str] = []
-    roots = [BACKEND_ROOT / name for name in ("app/routers", "app/jobs", "scripts", "tests")]
+    roots = roots or [BACKEND_ROOT / name for name in ("app/routers", "app/jobs", "scripts", "tests")]
     private_modules = ("app.orchestrator._", "app.llm_gateway._", "app.eval._")
-    owner_names = {"orchestrator", "orch", "gateway", "harness"}
+    owner_types = {"Orchestrator", "LLMGateway"}
     for root in roots:
         if not root.exists():
             continue
         for path in root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8-sig"), filename=str(path))
-            relative = path.relative_to(BACKEND_ROOT).as_posix()
+            try:
+                relative = path.relative_to(BACKEND_ROOT).as_posix()
+            except ValueError:
+                relative = path.name
+            constructors: set[str] = set(owner_types)
+            owners = {"orchestrator", "orch", "gateway", "harness"}
             for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith(private_modules):
-                    violations.append(f"{relative}:{node.lineno}:private_module:{node.module}")
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith(private_modules):
+                            violations.append(f"{relative}:{node.lineno}:private_module:{alias.name}")
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module and node.module.startswith(private_modules):
+                        violations.append(f"{relative}:{node.lineno}:private_module:{node.module}")
+                    for alias in node.names:
+                        if alias.name in owner_types:
+                            constructors.add(alias.asname or alias.name)
+            changed = True
+            while changed:
+                changed = False
+                for node in ast.walk(tree):
+                    if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                        continue
+                    value = node.value
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    owned = isinstance(value, ast.Name) and value.id in owners
+                    owned = owned or (
+                        isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in constructors
+                    )
+                    owned = owned or (
+                        isinstance(value, ast.Attribute) and value.attr in {"orchestrator", "gateway", "harness"}
+                    )
+                    if owned:
+                        for target in targets:
+                            if isinstance(target, ast.Name) and target.id not in owners:
+                                owners.add(target.id)
+                                changed = True
+            for node in ast.walk(tree):
                 if (
                     isinstance(node, ast.Attribute)
                     and node.attr.startswith("_")
                     and isinstance(node.value, ast.Name)
-                    and node.value.id in owner_names
+                    and node.value.id in owners
                 ):
                     violations.append(f"{relative}:{node.lineno}:private_attribute:{node.value.id}.{node.attr}")
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr.startswith("_")
+                    and relative == "app/eval/longform_pipeline.py"
+                    and isinstance(node.value, ast.Attribute)
+                    and node.value.attr == "backend"
+                ):
+                    violations.append(f"{relative}:{node.lineno}:private_owner_port:backend.{node.attr}")
     return sorted(set(violations))
 
 
@@ -187,7 +229,7 @@ def build_profile() -> dict[str, Any]:
             }
         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "backend_root": str(BACKEND_ROOT),
         "orchestrator": str(ORCHESTRATOR_PATH.relative_to(BACKEND_ROOT)),
         "method_count": len(rows),

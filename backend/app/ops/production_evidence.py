@@ -45,8 +45,23 @@ class ProductionEvidenceBundle:
             "required_checks": sorted(REQUIRED_CHECKS),
             "missing_checks": missing,
             "artifacts": artifact_hashes,
-            "success": not missing and all(bool((checks.get(name) or {}).get("success")) for name in REQUIRED_CHECKS),
+            "success": (
+                not git_state["dirty"]
+                and bool(git_state["revision"])
+                and not missing
+                and all(bool((checks.get(name) or {}).get("success")) for name in REQUIRED_CHECKS)
+            ),
         }
+        payload["failure_reasons"] = [
+            reason
+            for reason, failed in (
+                ("dirty_worktree", git_state["dirty"]),
+                ("missing_revision", not bool(git_state["revision"])),
+                ("missing_checks", bool(missing)),
+                ("failed_checks", not all(bool((checks.get(name) or {}).get("success")) for name in REQUIRED_CHECKS)),
+            )
+            if failed
+        ]
         payload["fingerprint"] = self._fingerprint(payload)
         output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return payload

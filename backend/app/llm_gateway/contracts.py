@@ -13,9 +13,13 @@ class ProviderUsage:
     completion_tokens: int = 0
     total_tokens: int = 0
     elapsed_seconds: float = 0.0
+    status: str = "missing"
+    requested_max_tokens: int = 0
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, Any] | None, *, requests: int = 0) -> "ProviderUsage":
+    def from_mapping(
+        cls, value: Mapping[str, Any] | None, *, requests: int = 0, requested_max_tokens: int = 0
+    ) -> "ProviderUsage":
         data = value or {}
         prompt = int(data.get("prompt_tokens") or data.get("input_tokens") or 0)
         completion = int(data.get("completion_tokens") or data.get("output_tokens") or 0)
@@ -26,6 +30,8 @@ class ProviderUsage:
             completion_tokens=completion,
             total_tokens=total,
             elapsed_seconds=float(data.get("elapsed_seconds") or 0.0),
+            status=str(data.get("status") or ("reported" if value is not None else "missing")),
+            requested_max_tokens=int(data.get("requested_max_tokens") or requested_max_tokens),
         )
 
     def merge(self, other: "ProviderUsage") -> "ProviderUsage":
@@ -35,6 +41,8 @@ class ProviderUsage:
             completion_tokens=self.completion_tokens + other.completion_tokens,
             total_tokens=self.total_tokens + other.total_tokens,
             elapsed_seconds=self.elapsed_seconds + other.elapsed_seconds,
+            status="reported" if self.status == other.status == "reported" else "estimated",
+            requested_max_tokens=self.requested_max_tokens + other.requested_max_tokens,
         )
 
     def to_dict(self) -> dict[str, Any]:

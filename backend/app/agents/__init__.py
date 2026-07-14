@@ -9,6 +9,7 @@ from .archivist import ArchivistAgent
 from .writer import WriterAgent
 from .editor import EditorAgent
 from .agent_task import AgentTask, AgentTaskKind, AgentTaskRunner, AgentTaskStatus, MergePolicy
+from .runtime_result import AgentRunResult, AgentRunStatus
 
 __all__ = [
     "BaseAgent",
@@ -20,4 +21,6 @@ __all__ = [
     "AgentTaskRunner",
     "AgentTaskStatus",
     "MergePolicy",
+    "AgentRunResult",
+    "AgentRunStatus",
 ]

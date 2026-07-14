@@ -26,6 +26,7 @@ from app.utils.text import normalize_newlines
 from app.llm_gateway import get_gateway
 from app.prompts import text_chunk_rerank_prompt
 from app.services.llm_config_service import llm_config_service
+from app.context_engine.turn_scope import register_current_provider_payload
 
 
 class TextChunkIndexService:
@@ -224,11 +225,13 @@ class TextChunkIndexService:
 
         try:
             gateway = get_gateway()
+            messages = [
+                {"role": "system", "content": prompt.system},
+                {"role": "user", "content": prompt.user},
+            ]
+            register_current_provider_payload(messages, owner="text_chunk.rerank")
             response = await gateway.chat(
-                messages=[
-                    {"role": "system", "content": prompt.system},
-                    {"role": "user", "content": prompt.user},
-                ],
+                messages=messages,
                 provider=provider_id,
                 temperature=0,
                 max_tokens=600,

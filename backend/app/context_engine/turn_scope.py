@@ -13,7 +13,10 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
+
+from app.context_engine.source_snapshot import SourceDescriptor, SourceRegistry
 
 
 @dataclass
@@ -57,6 +60,15 @@ class TurnTrace:
             request["token_reconciliation"] = "provider_reported" if actual else "provider_usage_unavailable"
             request["actual_provider"] = provider
             request["actual_model"] = model
+            if actual:
+                from app.context_engine.token_accounting import record_token_estimator_observation
+
+                request["estimator_calibration"] = record_token_estimator_observation(
+                    provider=provider or str(request.get("provider") or ""),
+                    model=model,
+                    estimated_tokens=planned,
+                    actual_tokens=actual,
+                )
             return
 
     def reconcile_sources(self, planned_sources: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -94,11 +106,13 @@ class TurnScope:
     parent_turn_id: Optional[str] = None
     context_epoch: int = 0
     started_at: float = field(default_factory=time.time)
+    timeout_seconds: Optional[float] = None
     cancelled: bool = False
     plans: List[Any] = field(default_factory=list)
     trace_events: List[Any] = field(default_factory=list)
     turn_trace: Optional[TurnTrace] = None
     runtime: Optional[Any] = None
+    source_registry: Optional[SourceRegistry] = None
 
     def __post_init__(self) -> None:
         if not self.trace_id:
@@ -108,7 +122,17 @@ class TurnScope:
         if self.runtime is None:
             from app.orchestrator.turn_runtime import TurnRuntime
 
-            self.runtime = TurnRuntime(turn_id=self.turn_id)
+            timeout = self.timeout_seconds
+            if timeout is None:
+                try:
+                    from app.config import config
+
+                    timeout = float(config.get("session", {}).get("timeout_seconds") or 600)
+                except (AttributeError, TypeError, ValueError):
+                    timeout = 600.0
+            self.runtime = TurnRuntime(turn_id=self.turn_id, timeout_seconds=max(0.001, float(timeout)))
+        if self.source_registry is None:
+            self.source_registry = SourceRegistry()
 
     @property
     def active_plan(self) -> Any:
@@ -120,6 +144,55 @@ class TurnScope:
 
     def activate_plan(self, plan: Any) -> None:
         self.plans.append(plan)
+        project_root = str(getattr(plan, "project_root", "") or "")
+        planned = getattr(plan, "sources", ()) or ()
+        self.source_registry = SourceRegistry(
+            project_root=Path(project_root) if project_root else None,
+            planned=planned,
+        )
+        self.source_registry.register_materialized_planned()
+
+    def register_source(self, descriptor: SourceDescriptor | Dict[str, Any]) -> SourceDescriptor:
+        if self.source_registry is None:
+            self.source_registry = SourceRegistry()
+        return self.source_registry.register_actual(descriptor)
+
+    def register_source_content(self, **kwargs: Any) -> SourceDescriptor:
+        if self.source_registry is None:
+            self.source_registry = SourceRegistry()
+        return self.source_registry.register_content(**kwargs)
+
+    def register_source_file(self, path: Path, **kwargs: Any) -> SourceDescriptor:
+        if self.source_registry is None:
+            self.source_registry = SourceRegistry()
+        return self.source_registry.register_file(path, **kwargs)
+
+    def register_provider_payload(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        source_prefix: str,
+        selection_reason: str,
+        artifact_ref: str = "",
+    ) -> List[SourceDescriptor]:
+        if self.source_registry is None:
+            self.source_registry = SourceRegistry()
+        return self.source_registry.register_payload(
+            messages,
+            tools,
+            source_prefix=source_prefix,
+            selection_reason=selection_reason,
+            artifact_ref=artifact_ref,
+        )
+
+    @property
+    def source_closure_required(self) -> bool:
+        plan = self.active_plan
+        if plan is None:
+            return False
+        policy = getattr(plan, "policy", {}) or {}
+        return bool(policy.get("source_closure_required"))
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -129,6 +202,8 @@ class TurnScope:
     def ensure_active(self) -> None:
         if self.cancelled:
             raise RuntimeError("turn_cancelled")
+        if self.runtime is not None:
+            self.runtime.ensure_active()
 
     def prepare_model_request(
         self,
@@ -148,14 +223,42 @@ class TurnScope:
         self.ensure_active()
         plan = self.active_plan
         if plan is not None and hasattr(plan, "validate_request"):
-            source_verification = (
+            planned_verification = (
                 plan.verify_sources() if hasattr(plan, "verify_sources") else {"valid": False, "failures": ["unsupported"]}
             )
+            actual_verification = (
+                self.source_registry.verify_mutable_sources()
+                if self.source_registry is not None
+                else {"valid": False, "failures": [{"reason": "source_registry_missing"}]}
+            )
+            payload_verification = (
+                self.source_registry.verify_payload(messages, tools)
+                if self.source_registry is not None
+                else {"valid": False, "missing": [{"kind": "registry"}]}
+            )
+            source_verification = {
+                "valid": bool(planned_verification.get("valid"))
+                and bool(actual_verification.get("valid"))
+                and (not self.source_closure_required or bool(payload_verification.get("valid"))),
+                "planned": planned_verification,
+                "actual_mutable": actual_verification,
+                "payload": payload_verification,
+            }
             if self.turn_trace is not None:
                 self.turn_trace.source_verifications.append(source_verification)
-            if source_verification.get("valid") is not True:
-                failure = (source_verification.get("failures") or [{}])[0]
+            if planned_verification.get("valid") is not True:
+                failure = (planned_verification.get("failures") or [{}])[0]
                 raise RuntimeError(f"context_source_revision_unavailable:{failure.get('path') or failure.get('reason')}")
+            if actual_verification.get("valid") is not True:
+                failure = (actual_verification.get("failures") or [{}])[0]
+                raise RuntimeError(
+                    f"context_actual_source_revision_unavailable:{failure.get('path') or failure.get('reason')}"
+                )
+            if self.source_closure_required and payload_verification.get("valid") is not True:
+                missing = (payload_verification.get("missing") or [{}])[0]
+                raise RuntimeError(
+                    f"context_unregistered_payload:{missing.get('kind') or 'source'}:{missing.get('index', '')}"
+                )
             record = plan.validate_request(
                 messages=messages,
                 provider=provider,
@@ -167,6 +270,7 @@ class TurnScope:
                 degradation=degradation,
                 final_payload_fingerprint=final_payload_fingerprint,
             )
+            record["source_closure"] = source_verification
         else:
             record = {
                 "planned": False,
@@ -194,6 +298,42 @@ def current_turn_scope() -> Optional[TurnScope]:
     return _current_turn_scope.get()
 
 
+def register_current_provider_payload(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    *,
+    owner: str,
+    selection_reason: str = "direct_provider_call_assembly",
+) -> None:
+    """Register a direct provider call assembled outside BaseAgent services."""
+
+    scope = current_turn_scope()
+    if scope is None or not scope.source_closure_required:
+        return
+    for index, message in enumerate(messages):
+        role = str(message.get("role") or "")
+        asset_type = {
+            "system": "prompt",
+            "user": "user_message",
+            "assistant": "provider_response",
+            "tool": "tool_result",
+        }.get(role, "provider_message")
+        scope.register_source_content(
+            source_id=f"{owner}.semantic.{role or 'message'}.{index}",
+            asset_type=asset_type,
+            content=dict(message),
+            selection_reason=selection_reason,
+            artifact_ref=owner,
+        )
+    scope.register_provider_payload(
+        messages,
+        tools,
+        source_prefix=owner,
+        selection_reason=selection_reason,
+        artifact_ref=owner,
+    )
+
+
 def new_turn_scope(
     *,
     project_id: str = "",
@@ -201,6 +341,7 @@ def new_turn_scope(
     turn_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
     context_epoch: int = 0,
+    timeout_seconds: Optional[float] = None,
 ) -> TurnScope:
     return TurnScope(
         turn_id=turn_id or f"turn_{uuid.uuid4().hex}",
@@ -208,6 +349,7 @@ def new_turn_scope(
         chapter_id=str(chapter_id or ""),
         parent_turn_id=parent_turn_id,
         context_epoch=max(0, int(context_epoch or 0)),
+        timeout_seconds=timeout_seconds,
     )
 
 

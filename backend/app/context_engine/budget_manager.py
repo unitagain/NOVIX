@@ -15,7 +15,8 @@ License: PolyForm Noncommercial License 1.0.0
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 from app.config import config
-from app.context_engine.token_counter import count_tokens, get_model_context_window
+from app.context_engine.token_accounting import count_text_tokens, token_estimator_calibration
+from app.context_engine.token_counter import get_model_context_window
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -95,25 +96,6 @@ class BudgetUsage:
         return self.used / self.allocated
 
 
-# Token 校准系数：tiktoken 使用 cl100k_base (GPT-4)，不同提供商的实际 token 数有偏差。
-# 系数 > 1.0 表示该提供商的 token 数通常高于 tiktoken 计数，预算按此缩减以避免溢出截断。
-# Calibration ratios: tiktoken uses cl100k_base (GPT-4). Providers with different tokenizers
-# consume more tokens per-text; multiply budget by 1/ratio to leave a safe margin.
-PROVIDER_TOKEN_RATIO = {
-    "openai": 1.0,
-    "anthropic": 1.15,
-    "deepseek": 1.05,
-    "gemini": 1.10,
-    "qwen": 1.05,
-    "kimi": 1.05,
-    "glm": 1.05,
-    "grok": 1.05,
-    "wenxin": 1.05,
-    "aistudio": 1.05,
-    "custom": 1.10,
-}
-
-
 class ContextBudgetManager:
     """
     上下文预算管理器 / Context Budget Manager
@@ -147,7 +129,7 @@ class ContextBudgetManager:
         """
         self.model_name = model_name
         self.max_output_tokens = max_output_tokens
-        self._token_ratio = PROVIDER_TOKEN_RATIO.get(str(provider or "").lower(), 1.0)
+        self.provider = str(provider or "").lower()
 
         # 从 config 加载预算比例
         # Load budget ratios from config.yaml
@@ -182,9 +164,7 @@ class ContextBudgetManager:
         # 确保输出预留至少能容纳 max_output_tokens
         output_reserve = max(output_reserve, self.max_output_tokens)
         raw_budget = self._context_window - output_reserve
-        # 按提供商校准系数缩减，避免实际 token 超出上下文窗口
-        # Shrink by provider ratio to prevent context overflow on non-GPT-4 tokenizers
-        return int(raw_budget / self._token_ratio)
+        return int(raw_budget)
 
     def get_allocation(self) -> BudgetAllocation:
         """获取预算分配"""
@@ -276,7 +256,7 @@ class ContextBudgetManager:
         Returns:
             使用情况
         """
-        tokens = count_tokens(content)
+        tokens = count_text_tokens(content, provider=self.provider, model=str(self.model_name or "")).upper_bound_tokens
         allocation = self.get_allocation()
 
         allocated = getattr(allocation, category, 0)
@@ -300,6 +280,7 @@ class ContextBudgetManager:
 
         return {
             "model": self.model_name,
+            "provider": self.provider,
             "context_window": self._context_window,
             "total_budget": self._total_budget,
             "total_used": total_used,
@@ -314,11 +295,12 @@ class ContextBudgetManager:
                 }
                 for cat, usage in self._usage.items()
             },
+            "estimator_calibration": token_estimator_calibration(self.provider, str(self.model_name or "")),
         }
 
     def can_fit(self, content: str, category: str) -> bool:
         """检查内容是否能放入指定类别的预算"""
-        tokens = count_tokens(content)
+        tokens = count_text_tokens(content, provider=self.provider, model=str(self.model_name or "")).upper_bound_tokens
         allocation = self.get_allocation()
         allocated = getattr(allocation, category, 0)
 

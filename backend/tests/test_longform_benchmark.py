@@ -18,6 +18,7 @@ from app.eval.longform_benchmark import (
     _candidate_semantic_completeness,
     _load_api_safety_policy,
     _paragraphs,
+    _project_candidate_to_complete_prefix,
     _sentence_split,
     _shorten_prose,
     ensure_benchmark_gitignore,
@@ -476,6 +477,79 @@ def test_strategy_ab_truncated_writer_attempts_are_billed_and_classified_as_data
     assert {row["reason"] for row in failures} == {"writer_output_truncated"}
 
 
+def test_strategy_ab_repairs_semantically_incomplete_candidates_once(tmp_path, monkeypatch):
+    source = _write_corpus(tmp_path)
+    harness = LongformBenchmarkHarness(
+        tmp_path / "benchmarks",
+        embeddings_factory=lambda: _DeterministicEmbedder(),
+        reranker_factory=lambda: _DeterministicReranker(),
+    )
+    harness.import_corpus(source=source, benchmark_id="repair", allow_external_api=True)
+    asyncio.run(harness.generate_candidates(benchmark_id="repair", scene_windows=2))
+    scene_id = read_jsonl(harness.paths("repair").generated_dir / "candidate_scene_briefs.jsonl")[0]["id"]
+
+    async def distinct_selection(**kwargs):
+        strategy = kwargs["spec"].name
+        return {
+            "requested_strategy": strategy,
+            "executed_strategy": strategy,
+            "strategy_fidelity": True,
+            "facts": [{"id": f"fact-{strategy}", "statement": f"context-{strategy}"}],
+            "latency_ms": 1.0,
+            "execution_signature": f"execution-{strategy}",
+        }
+
+    incomplete_body = "她沿着走廊继续追查那封信的来历。" * 20 + "他忽然说道：“事情还没有结束……"
+    repaired_body = "”\n\n" + "她沿着走廊继续追查那封信的来历，确认身后的门已经关好。" * 40
+
+    class RepairingGateway:
+        async def chat(self, messages, *, provider, **_kwargs):
+            is_repair = "候选收尾器" in messages[0]["content"]
+            assert "response_format" not in _kwargs
+            payload = (
+                {"continuation_suffix": repaired_body, "self_check": {}}
+                if is_repair
+                else {"candidate_text": incomplete_body, "self_check": {}}
+            )
+            return {
+                "content": json.dumps(payload),
+                "provider": provider,
+                "model": "repair-model",
+                "finish_reason": "stop",
+                "elapsed_time": 0.1 if is_repair else 0.2,
+                "usage": {
+                    "prompt_tokens": 20 if is_repair else 10,
+                    "completion_tokens": 10,
+                    "total_tokens": 30 if is_repair else 20,
+                },
+            }
+
+    monkeypatch.setattr("app.eval.longform_benchmark.get_gateway", lambda: RepairingGateway())
+    monkeypatch.setattr(harness, "_select_writer_strategy_context", distinct_selection)
+    result = asyncio.run(
+        harness.generate_strategy_ab(
+            benchmark_id="repair",
+            provider="writer-profile",
+            scene_ids=[scene_id],
+        )
+    )
+
+    assert result["success"] is True
+    assert result["requests_attempted"] == 4
+    assert result["initial_candidate_responses"] == 2
+    assert result["initial_candidate_validity_rate"] == 0.0
+    assert result["repair_requests_attempted"] == 2
+    assert result["repair_success_rate"] == 1.0
+    assert result["final_pair_validity_rate"] == 1.0
+    rows = read_jsonl(harness.paths("repair").generated_dir / "strategy_ab_candidates.jsonl")
+    assert len(rows) == 2
+    assert all(row["candidate_generation_stage"] == "semantic_repair" for row in rows)
+    assert all(row["gateway_usage"]["total_tokens"] == 50 for row in rows)
+    assert all(row["candidate_artifact"]["usage"]["total_tokens"] == 50 for row in rows)
+    assert all(row["candidate_artifact"]["usage"]["requests"] == 2 for row in rows)
+    assert all(row["generation_latency_ms"] == 300.0 for row in rows)
+
+
 def test_strategy_pair_ids_are_scoped_by_writer_profile(tmp_path, monkeypatch):
     source = _write_corpus(tmp_path)
     harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
@@ -494,7 +568,7 @@ def test_strategy_pair_ids_are_scoped_by_writer_profile(tmp_path, monkeypatch):
             "execution_signature": f"execution-{strategy}",
         }
 
-    candidate_body = "她沿着昏暗的走廊缓慢向前，确认门外没有脚步声后，才把信封收进衣袋。" * 100
+    candidate_body = "她沿着昏暗的走廊缓慢向前，确认门外没有脚步声后，才把信封收进衣袋。" * 20
 
     class SuccessfulGateway:
         async def chat(self, _messages, *, provider, **_kwargs):
@@ -889,11 +963,74 @@ def test_calibration_writer_messages_have_full_and_low_context_variants():
     assert "strategy_bm25" not in strategy[1]["content"]
     assert "rank_score" not in strategy[1]["content"]
 
+    direct_strategy = LongformBenchmarkHarness._build_calibration_writer_messages(
+        brief=brief,
+        facts=facts,
+        variant="strategy_bm25",
+        include_context=True,
+        prompt_variant="retrieval_context",
+        include_fact_metadata=True,
+        structured_output=False,
+    )
+    assert "不要 JSON" in direct_strategy[0]["content"]
+    assert "required_json_schema" not in direct_strategy[1]["content"]
+
 
 def test_candidate_semantic_completeness_rejects_short_open_or_dangling_output():
     assert _candidate_semantic_completeness("完整场景。" * 80)["complete"] is True
     assert _candidate_semantic_completeness("他说：“事情还没有结束……")["complete"] is False
     assert _candidate_semantic_completeness("叙述内容" * 80 + "密码")["complete"] is False
+    internal_imbalance = _candidate_semantic_completeness("“缺少内部闭合。\n\n" + "完整场景。" * 80)
+    assert internal_imbalance["complete"] is True
+    assert internal_imbalance["warnings"] == ["internal_quote_imbalance"]
+
+
+def test_candidate_length_projection_uses_complete_sentence_boundary():
+    source = "完整长句。" * 400
+
+    projected = _project_candidate_to_complete_prefix(source, max_chars=1500)
+
+    assert projected["applied"] is True
+    assert projected["original_char_count"] == len(source)
+    assert projected["projected_char_count"] <= 1500
+    assert projected["text"].endswith("。")
+    assert _candidate_semantic_completeness(projected["text"])["complete"] is True
+
+    dialogue_source = "“第一句没有闭合。" + "前段叙述。" * 50 + "\n\n" + "最后一段完整结束。" * 250
+    dialogue_projection = _project_candidate_to_complete_prefix(dialogue_source, max_chars=1500)
+    assert dialogue_projection["applied"] is True
+    assert _candidate_semantic_completeness(dialogue_projection["text"])["complete"] is True
+
+
+def test_normalize_strategy_ab_candidates_updates_artifact_fingerprint(tmp_path):
+    harness = LongformBenchmarkHarness(tmp_path / "benchmarks")
+    paths = harness.paths("normalize")
+    original = "完整长句。" * 400
+    write_jsonl(
+        paths.generated_dir / "strategy_ab_candidates.jsonl",
+        [
+            {
+                "id": "pair-A",
+                "pair_id": "pair",
+                "strategy_role": "A",
+                "candidate_text": original,
+                "chapter_text": original,
+                "candidate_artifact": {"content_fingerprint": "stale"},
+            }
+        ],
+    )
+
+    result = harness.normalize_strategy_ab_candidates(benchmark_id="normalize")
+    row = read_jsonl(paths.generated_dir / "strategy_ab_candidates.jsonl")[0]
+
+    assert result["success"] is True
+    assert result["length_projections_applied"] == 1
+    assert row["candidate_char_count"] <= 1500
+    assert row["candidate_text"].endswith("。")
+    assert row["candidate_artifact"]["content_fingerprint"] == hashlib.sha256(
+        row["candidate_text"].encode("utf-8")
+    ).hexdigest()
+    assert Path(result["archive_path"]).exists()
 
 
 def test_strategy_judge_skips_semantically_incomplete_candidate_pairs(tmp_path, monkeypatch):

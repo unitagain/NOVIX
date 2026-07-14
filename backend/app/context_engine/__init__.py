@@ -27,7 +27,15 @@ from .reranker import OnnxCrossEncoderReranker, RerankerBackend, create_reranker
 from .trace_collector import trace_collector, TraceEvent, TraceEventType
 from .tool_registry import ToolSpec, list_tool_specs, tool_loadout_for_route, tool_loadout_summary
 from .compact_artifact import CompactArtifactV2, CompactVerifier
-from .memory_record import MemoryRecordV2
+from .memory_record import MemoryGraphState, MemoryRecordV2, build_memory_graph, normalize_memory_status
+from .source_snapshot import SourceDescriptor, SourceRegistry
+from .token_accounting import (
+    TokenAccounting,
+    count_provider_payload,
+    count_text_tokens,
+    token_estimator_calibration,
+)
+from .tool_artifact import ToolArtifactStore, ToolExecutionResult, ToolExecutionStatus
 
 __all__ = [
     # 数据模型
@@ -66,6 +74,18 @@ __all__ = [
     "CompactArtifactV2",
     "CompactVerifier",
     "MemoryRecordV2",
+    "MemoryGraphState",
+    "build_memory_graph",
+    "normalize_memory_status",
+    "SourceDescriptor",
+    "SourceRegistry",
+    "TokenAccounting",
+    "count_provider_payload",
+    "count_text_tokens",
+    "token_estimator_calibration",
+    "ToolArtifactStore",
+    "ToolExecutionResult",
+    "ToolExecutionStatus",
     # Trace
     "trace_collector",
     "TraceEvent",

@@ -57,14 +57,24 @@ class ChatTurnService:
                 )
                 if result.get("cancelled") or scope.cancelled:
                     scope.runtime.cancel()
+                elif result.get("incomplete"):
+                    scope.runtime.incomplete(str(result.get("reason") or "incomplete"))
+                elif result.get("success") is False:
+                    scope.runtime.fail(str(result.get("reason") or "turn_failed"))
                 else:
                     scope.runtime.complete()
                 result["runtime"] = scope.runtime.to_dict()
                 from app.observability.runtime_metrics import runtime_metrics
 
-                runtime_metrics.increment(
-                    "writer.turn.cancelled" if result.get("cancelled") or scope.cancelled else "writer.turn.success"
-                )
+                if result.get("cancelled") or scope.cancelled:
+                    metric = "writer.turn.cancelled"
+                elif result.get("incomplete"):
+                    metric = "writer.turn.incomplete"
+                elif result.get("success") is False:
+                    metric = "writer.turn.failure"
+                else:
+                    metric = "writer.turn.success"
+                runtime_metrics.increment(metric)
                 return result
         except asyncio.CancelledError:
             scope.runtime.cancel("task_cancelled")
@@ -175,6 +185,8 @@ class ChatTurnService:
                     intent=result_action,
                     target_word_count=target_word_count,
                 )
+            if scope is not None:
+                scope.ensure_active()
             fallback_reason = str(agent_result.get("reason") or "")
         else:
             fallback_reason = "no_chapter"

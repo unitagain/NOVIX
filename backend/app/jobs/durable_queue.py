@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import hashlib
+import json
+import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -24,11 +27,33 @@ class TaskExecutionContext:
     attempt: int
     lease_generation: int
     llm_call_index: int = field(default=0)
+    queue: Any = field(default=None, repr=False)
+    worker_id: str = ""
+    deadline_at: float = 0.0
 
     def next_llm_idempotency_key(self, request_fingerprint: str) -> str:
-        index = self.llm_call_index
         self.llm_call_index += 1
-        return f"durable-job:{self.job_id}:{index}:{request_fingerprint}"
+        return f"durable-job:{self.job_id}:{request_fingerprint}"
+
+    async def mark_external_side_effect(self, request_fingerprint: str) -> None:
+        if self.queue is None:
+            return
+        ok = await self.queue.mark_side_effect(
+            self.job_id,
+            self.worker_id,
+            generation=self.lease_generation,
+            fingerprint=request_fingerprint,
+        )
+        if not ok:
+            raise RuntimeError("stale_job_lease")
+
+    def bounded_timeout(self, requested_seconds: float) -> float:
+        if self.deadline_at <= 0:
+            return max(0.001, float(requested_seconds))
+        remaining = self.deadline_at - time.time()
+        if remaining <= 0:
+            raise TimeoutError("job_deadline_exceeded")
+        return min(max(0.001, float(requested_seconds)), remaining)
 
 
 _current_execution: ContextVar[Optional[TaskExecutionContext]] = ContextVar(
@@ -54,13 +79,20 @@ class DurableTaskQueue:
         *,
         idempotency_key: str,
         max_attempts: int = 3,
+        timeout_seconds: float = 300.0,
     ) -> Dict[str, Any]:
+        request_fingerprint = hashlib.sha256(
+            json.dumps({"kind": str(kind), "payload": payload}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+        deadline_at = time.time() + max(0.001, float(timeout_seconds))
         job = await asyncio.to_thread(
             self.store.enqueue_job,
             kind,
             payload,
             idempotency_key=idempotency_key,
             max_attempts=max_attempts,
+            request_fingerprint=request_fingerprint,
+            deadline_at=deadline_at,
         )
         self._metric("queued")
         return job
@@ -168,6 +200,15 @@ class DurableTaskQueue:
     async def cancellation_requested(self, job_id: str, worker_id: str, generation: int) -> bool:
         return await asyncio.to_thread(self.store.job_cancel_requested, job_id, worker_id, generation)
 
+    async def mark_side_effect(self, job_id: str, worker_id: str, *, generation: int, fingerprint: str) -> bool:
+        return await asyncio.to_thread(
+            self.store.mark_job_side_effect,
+            job_id,
+            worker_id,
+            generation,
+            fingerprint,
+        )
+
     async def recover_expired(self) -> int:
         recovered = await asyncio.to_thread(self.store.recover_expired_jobs)
         if recovered:
@@ -231,7 +272,7 @@ class DurableTaskWorker:
         self.retry_delay = max(0.0, float(retry_delay))
         self._stop = asyncio.Event()
         self._task: Optional[asyncio.Task] = None
-        self._handler_task: Optional[asyncio.Task] = None
+        self._handler_task: Optional[asyncio.Future[Dict[str, Any]]] = None
         self._active_job: Optional[Dict[str, Any]] = None
         self.last_error = ""
 
@@ -306,21 +347,39 @@ class DurableTaskWorker:
             idempotency_key=str(job["idempotency_key"]),
             attempt=int(job["attempt"]),
             lease_generation=generation,
+            queue=self.queue,
+            worker_id=self.worker_id,
+            deadline_at=float(job.get("deadline_at") or 0),
         )
         token = _current_execution.set(execution)
         try:
-            self._handler_task = asyncio.create_task(handler(dict(job.get("payload") or {})))
+            self._handler_task = asyncio.create_task(self._run_handler(handler, dict(job.get("payload") or {})))
         finally:
             _current_execution.reset(token)
         heartbeat_interval = max(0.1, self.lease_seconds / 3.0)
         while True:
-            done, _ = await asyncio.wait({self._handler_task}, timeout=heartbeat_interval)
+            remaining = float(job.get("deadline_at") or 0) - time.time()
+            if float(job.get("deadline_at") or 0) > 0 and remaining <= 0:
+                self._handler_task.cancel()
+                await asyncio.gather(self._handler_task, return_exceptions=True)
+                await self.queue.fail(job["id"], self.worker_id, "job_deadline_exceeded", generation=generation, retry_delay=0)
+                return
+            wait_timeout = min(heartbeat_interval, remaining) if remaining > 0 else heartbeat_interval
+            done, _ = await asyncio.wait({self._handler_task}, timeout=max(0.001, wait_timeout))
             if done:
                 break
             if await self.queue.cancellation_requested(job["id"], self.worker_id, generation):
                 self._handler_task.cancel()
                 await asyncio.gather(self._handler_task, return_exceptions=True)
-                await self.queue.cancel_running(job["id"], self.worker_id, generation=generation)
+                latest = self.queue.get(job["id"]) or {}
+                if latest.get("side_effect_started"):
+                    await asyncio.to_thread(
+                        self.queue.store.finish_job,
+                        job["id"], self.worker_id, generation,
+                        status="cancelled_uncertain", error="cancelled_after_side_effect_started",
+                    )
+                else:
+                    await self.queue.cancel_running(job["id"], self.worker_id, generation=generation)
                 return
             renewed = await self.queue.heartbeat(
                 job["id"],
@@ -347,3 +406,9 @@ class DurableTaskWorker:
             )
         else:
             await self.queue.complete(job["id"], self.worker_id, result, generation=generation)
+
+    @staticmethod
+    async def _run_handler(
+        handler: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]], payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return await handler(payload)

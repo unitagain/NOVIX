@@ -33,6 +33,9 @@ SAFE_ATTRIBUTE_KEYS = {
     "wenshape.event_id",
     "wenshape.event_type",
     "wenshape.request_id",
+    "wenshape.trace_id",
+    "wenshape.turn_id",
+    "wenshape.job_id",
     "wenshape.plan_id",
     "wenshape.request_fingerprint",
     "wenshape.route_path",
@@ -46,13 +49,16 @@ SAFE_ATTRIBUTE_KEYS = {
 class JsonlSpanExporter(SpanExporter):
     """Append SDK span envelopes without recording prompts, outputs, or secrets."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, max_file_bytes: int = 256 * 1024 * 1024, retained_files: int = 3):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self.exported_spans = 0
         self.failed_exports = 0
         self.exported_bytes = 0
+        self.max_file_bytes = max(1024, int(max_file_bytes))
+        self.retained_files = max(1, int(retained_files))
+        self.rotations = 0
 
     def export(self, spans: Iterable[Any]) -> SpanExportResult:
         rows = []
@@ -75,6 +81,12 @@ class JsonlSpanExporter(SpanExporter):
             )
         try:
             with self._lock:
+                incoming_bytes = sum(
+                    len((json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"))
+                    for row in rows
+                )
+                if self.path.exists() and self.path.stat().st_size + incoming_bytes > self.max_file_bytes:
+                    self._rotate()
                 with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                     for row in rows:
                         payload = json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
@@ -88,9 +100,21 @@ class JsonlSpanExporter(SpanExporter):
             self.failed_exports += 1
             return SpanExportResult.FAILURE
 
-    def budget_report(self, *, max_file_bytes: int = 256 * 1024 * 1024) -> Dict[str, Any]:
+    def _rotate(self) -> None:
+        oldest = self.path.with_name(f"{self.path.name}.{self.retained_files}")
+        oldest.unlink(missing_ok=True)
+        for index in range(self.retained_files - 1, 0, -1):
+            source = self.path.with_name(f"{self.path.name}.{index}")
+            if source.exists():
+                os.replace(source, self.path.with_name(f"{self.path.name}.{index + 1}"))
+        if self.path.exists():
+            os.replace(self.path, self.path.with_name(f"{self.path.name}.1"))
+        self.rotations += 1
+
+    def budget_report(self, *, max_file_bytes: Optional[int] = None) -> Dict[str, Any]:
+        limit = int(max_file_bytes or self.max_file_bytes)
         file_bytes = self.path.stat().st_size if self.path.exists() else 0
-        checks = {"failed_exports": self.failed_exports == 0, "file_size": file_bytes <= max_file_bytes}
+        checks = {"export_backpressure": self.failed_exports == 0, "file_size": file_bytes <= limit}
         return {
             "healthy": all(checks.values()),
             "checks": checks,
@@ -98,7 +122,9 @@ class JsonlSpanExporter(SpanExporter):
             "failed_exports": self.failed_exports,
             "exported_bytes": self.exported_bytes,
             "file_bytes": file_bytes,
-            "file_limit_bytes": max_file_bytes,
+            "file_limit_bytes": limit,
+            "retained_files": self.retained_files,
+            "rotations": self.rotations,
         }
 
 
@@ -153,7 +179,7 @@ class TelemetryRuntime:
             name,
             context=context,
             kind=kind,
-            attributes=_safe_attributes(attributes or {}),
+            attributes=_safe_attributes({**_correlation_attributes(), **(attributes or {})}),
         ) as span:
             try:
                 yield span
@@ -168,6 +194,7 @@ class TelemetryRuntime:
             "wenshape.agent": row.get("agent_name"),
             "wenshape.event_id": row.get("id"),
             "wenshape.event_type": row.get("type"),
+            "wenshape.trace_id": row.get("trace_id"),
             **_event_attributes(row.get("data") or {}),
         }
         start_ns = int(float(row.get("timestamp") or 0.0) * 1_000_000_000)
@@ -251,6 +278,9 @@ def _event_attributes(data: Dict[str, Any]) -> Dict[str, Any]:
         "provider": "gen_ai.provider.name",
         "model": "gen_ai.response.model",
         "request_id": "wenshape.request_id",
+        "trace_id": "wenshape.trace_id",
+        "turn_id": "wenshape.turn_id",
+        "job_id": "wenshape.job_id",
         "plan_id": "wenshape.plan_id",
         "request_fingerprint": "wenshape.request_fingerprint",
         "route_path": "wenshape.route_path",
@@ -272,6 +302,27 @@ def _safe_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in attributes.items()
         if key in SAFE_ATTRIBUTE_KEYS and isinstance(value, (str, int, float, bool))
     }
+
+
+def _correlation_attributes() -> Dict[str, Any]:
+    attributes: Dict[str, Any] = {}
+    try:
+        from app.context_engine.turn_scope import current_turn_scope
+
+        scope = current_turn_scope()
+        if scope is not None:
+            attributes.update({"wenshape.trace_id": scope.trace_id, "wenshape.turn_id": scope.turn_id})
+    except (ImportError, RuntimeError):
+        pass
+    try:
+        from app.jobs.durable_queue import current_task_execution
+
+        execution = current_task_execution()
+        if execution is not None:
+            attributes["wenshape.job_id"] = execution.job_id
+    except (ImportError, RuntimeError):
+        pass
+    return attributes
 
 
 def _safe_resource(attributes: Dict[str, Any]) -> Dict[str, Any]:

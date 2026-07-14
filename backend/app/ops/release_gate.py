@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from app.ops.engineering_gate import engineering_checks
+
 
 class ReleaseGate:
     def __init__(
@@ -34,16 +36,7 @@ class ReleaseGate:
         output: Optional[str | Path] = None,
     ) -> Dict[str, Any]:
         checks = [
-            ("ruff", ["python", "-m", "ruff", "check", "app", "tests", "scripts"], self.backend),
-            ("pytest", ["python", "-m", "pytest", "-W", "error"], self.backend),
-            ("error_contract", ["python", "scripts/error_contract_audit.py"], self.backend),
-            ("architecture", ["python", "scripts/architecture_profile.py", "--check"], self.backend),
-            ("pip_check", ["python", "-m", "pip", "check"], self.backend),
-            (
-                "requirements_sync",
-                ["python", "scripts/check_requirements_sync.py"],
-                self.repo_root,
-            ),
+            *engineering_checks(self.repo_root),
             ("sidecar_syntax", ["node", "--check", "desktop/scripts/build-sidecar.mjs"], self.repo_root),
             ("diff_check", ["git", "diff", "--check"], self.repo_root),
             (

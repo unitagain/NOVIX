@@ -7,6 +7,7 @@ Phase 2 验收：LLM 网关增强（tools / response_format / tool_calls 透传�
 import asyncio
 
 from app.llm_gateway.gateway import LLMGateway
+from app.llm_gateway.errors import classify_error
 from app.llm_gateway.providers.base import BaseLLMProvider
 from app.context_engine.context_plan import ContextPlanV2
 from app.context_engine.turn_scope import bind_turn_scope, new_turn_scope
@@ -77,6 +78,17 @@ def test_chat_threads_response_format():
     resp = asyncio.run(gw.chat([{"role": "user", "content": "hi"}], provider="fake", response_format=rf))
     assert gw.providers["fake"].last_kwargs["response_format"] == rf
     assert resp["tool_calls"] is None  # 无 tools 时不应有 tool_calls
+
+
+def test_billing_exhaustion_errors_fail_fast_without_retry():
+    error = RuntimeError(
+        "Error code: 400 - {'errorCode': 40408, 'errorMsg': 'token 已经用完毕，请充值后使用'}"
+    )
+
+    retryable, reason = classify_error(error)
+
+    assert retryable is False
+    assert reason == "billing"
 
 
 def test_chat_backward_compatible_text_path():

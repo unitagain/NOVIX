@@ -91,7 +91,7 @@ class EvidenceIndexService:
         if existing:
             return existing
 
-        raw_facts = await self.canon_storage.get_all_facts_raw(project_id)
+        raw_facts = await self.canon_storage.get_eligible_facts_raw(project_id)
         items: List[EvidenceItem] = []
         seen = set()
         for fact in raw_facts:

@@ -143,8 +143,8 @@ class ContextPlanningService:
         payload["turn_trace"] = scope.turn_trace.to_dict() if scope is not None and scope.turn_trace else {}
         payload["reconciliation"] = {
             "sources": (
-                scope.turn_trace.reconcile_sources(payload["sources"])
-                if scope is not None and scope.turn_trace is not None
+                scope.source_registry.reconcile()
+                if scope is not None and scope.source_registry is not None
                 else {}
             ),
             "requests": list(scope.model_requests) if scope is not None else [],

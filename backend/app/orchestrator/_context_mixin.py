@@ -16,7 +16,7 @@ License: PolyForm Noncommercial License 1.0.0
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from app.context_engine.token_counter import count_tokens
+from app.context_engine.token_accounting import count_text_tokens
 from app.context_engine.budget_manager import create_budget_manager
 from app.context_engine.trace_collector import trace_collector
 from app.orchestrator.orchestrator_helpers import full_canon_eligible
@@ -225,7 +225,7 @@ class ContextMixin:
         return None
 
     def _extract_memory_pack_payload(self, pack: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if not pack:
+        if not pack or pack.get("stale") is True:
             return None
         payload = pack.get("payload") or pack.get("working_memory_payload")
         if isinstance(payload, dict):
@@ -275,7 +275,7 @@ class ContextMixin:
         }
         try:
             await self.memory_pack_storage.write_pack(project_id, chapter, pack)
-            return pack
+            return await self.memory_pack_storage.read_pack(project_id, chapter)
         except Exception as exc:
             logger.warning("Memory pack save failed: %s", exc)
             return None
@@ -572,10 +572,10 @@ class ContextMixin:
             _max_tokens = int(_rc.get("full_canon_max_tokens", 12000))
             _char_names = await self.card_storage.list_character_cards(project_id)
             _world_names = await self.card_storage.list_world_cards(project_id)
-            _all_facts = await self.canon_storage.get_all_facts(project_id)
+            _all_facts = await self.canon_storage.get_eligible_facts(project_id)
             # Phase 13：从纯数量升级为「数量 + token」双门槛——少量超长事实也不会撑爆全注入预算。
             _fact_text = " ".join(str(getattr(f, "statement", "") or "") for f in _all_facts)
-            _fact_tokens = count_tokens(_fact_text)
+            _fact_tokens = count_text_tokens(_fact_text).upper_bound_tokens
             if full_canon_eligible(
                 len(_all_facts),
                 len(_char_names) + len(_world_names),
@@ -614,8 +614,16 @@ class ContextMixin:
         )
 
         # 计算已使用的 tokens
-        critical_tokens = sum(count_tokens(str(c)) for c in critical_items)
-        dynamic_tokens = sum(count_tokens(str(i.content)) for i in dynamic_items)
+        provider_name = str((writer_profile or {}).get("provider") or (writer_profile or {}).get("id") or "")
+        model_name = str((writer_profile or {}).get("model") or writer_model or "")
+        critical_tokens = sum(
+            count_text_tokens(str(c), provider=provider_name, model=model_name).upper_bound_tokens
+            for c in critical_items
+        )
+        dynamic_tokens = sum(
+            count_text_tokens(str(i.content), provider=provider_name, model=model_name).upper_bound_tokens
+            for i in dynamic_items
+        )
         base_tokens = critical_tokens + dynamic_tokens
 
         # 从预算管理器获取分配

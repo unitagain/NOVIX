@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 import app.config as app_config
 from app.utils.logger import get_logger
 from app.services.llm_config_service import llm_config_service
-from app.llm_gateway.errors import classify_error, get_retry_delay, LLMError
+from app.llm_gateway.errors import LLMError, normalize_provider_error, provider_retry_delay
 from app.error_contract import DomainError, ErrorCategory, record_degradation
 from app.llm_gateway.reliability import GatewayReliabilityController, PersistentIdempotencyRegistry, RequestDeadline
 from app.observability.runtime_metrics import runtime_metrics
@@ -99,7 +99,16 @@ class LLMGateway:
         # Actually, caller usually passes result of get_provider_for_agent()
 
         self._ensure_reliability()
-        deadline = RequestDeadline(float(timeout_seconds or self.request_timeout))
+        requested_timeout = float(timeout_seconds or self.request_timeout)
+        try:
+            from app.jobs.durable_queue import current_task_execution
+
+            task_execution = current_task_execution()
+            if task_execution is not None:
+                requested_timeout = task_execution.bounded_timeout(requested_timeout)
+        except ImportError:
+            pass
+        deadline = RequestDeadline(requested_timeout)
         target_provider = self.provider_registry.resolve(provider)
 
         # 收集可选生成参数（仅传非 None 的），透传给 provider / collect optional gen params
@@ -177,6 +186,14 @@ class LLMGateway:
         )
         if not egress_authorized:
             raise PermissionError("external_egress_not_authorized")
+        try:
+            from app.jobs.durable_queue import current_task_execution
+
+            task_execution = current_task_execution()
+            if task_execution is not None:
+                await task_execution.mark_external_side_effect(str(request_trace.get("request_fingerprint") or ""))
+        except ImportError:
+            pass
 
         # Execute with retry
         try:
@@ -260,16 +277,15 @@ class LLMGateway:
                 )
             except Exception as e:
                 last_exception = e
+                provider_name = provider.get_provider_name() if hasattr(provider, "get_provider_name") else "unknown"
+                contract = normalize_provider_error(e, provider=provider_name)
 
                 # Classify the error
-                is_retryable, reason = classify_error(e)
+                is_retryable, reason = contract.retryable, contract.category
 
                 if not is_retryable:
                     # Non-retryable error - fail immediately
                     logger.error("LLM non-retryable error (reason=%s): %s", reason, e, exc_info=True)
-                    provider_name = (
-                        provider.get_provider_name() if hasattr(provider, "get_provider_name") else "unknown"
-                    )
                     raise LLMError(
                         str(e),
                         provider=provider_name,
@@ -277,6 +293,7 @@ class LLMGateway:
                         status_code=getattr(e, "status_code", None),
                         is_retryable=False,
                         original=e,
+                        contract=contract,
                     ) from e
 
                 # Retryable error - log and retry with backoff
@@ -296,7 +313,7 @@ class LLMGateway:
                     record_degradation("gateway_retry_trace", trace_exc)
 
                 if attempt < attempts - 1:
-                    delay = get_retry_delay(attempt, self.retry_delays, self.max_retry_delay)
+                    delay = provider_retry_delay(contract, attempt, self.retry_delays, self.max_retry_delay)
                     logger.info("Retrying in %.1f seconds...", delay)
                     deadline = (request_trace or {}).get("_deadline")
                     if isinstance(deadline, RequestDeadline):
@@ -308,7 +325,8 @@ class LLMGateway:
         logger.error("LLM request failed after %d attempts: %s", attempts, last_exception)
         runtime_metrics.increment("gateway.retry_exhausted")
         provider_name = provider.get_provider_name() if hasattr(provider, "get_provider_name") else "unknown"
-        is_retryable, reason = classify_error(last_exception)
+        contract = normalize_provider_error(last_exception, provider=provider_name)
+        is_retryable, reason = contract.retryable, contract.category
         raise LLMError(
             str(last_exception),
             provider=provider_name,
@@ -353,7 +371,11 @@ class LLMGateway:
                 else:
                     timeout = float((request_trace or {}).get("timeout_seconds") or self.request_timeout)
                     response = await asyncio.wait_for(request, timeout=timeout)
-                usage = ProviderUsage.from_mapping(response.get("usage"), requests=1).to_dict()
+                usage = ProviderUsage.from_mapping(
+                    response.get("usage"),
+                    requests=1,
+                    requested_max_tokens=int(max_tokens or getattr(provider, "max_tokens", 0) or 0),
+                ).to_dict()
                 response["usage"] = usage
                 provider_span.set_attribute("gen_ai.response.model", str(response.get("model") or ""))
                 provider_span.set_attribute("gen_ai.usage.input_tokens", int(usage.get("prompt_tokens") or 0))
@@ -485,7 +507,16 @@ class LLMGateway:
             String chunks as they arrive from the LLM
         """
         self._ensure_reliability()
-        deadline = RequestDeadline(float(timeout_seconds or self.request_timeout))
+        requested_timeout = float(timeout_seconds or self.request_timeout)
+        try:
+            from app.jobs.durable_queue import current_task_execution
+
+            task_execution = current_task_execution()
+            if task_execution is not None:
+                requested_timeout = task_execution.bounded_timeout(requested_timeout)
+        except ImportError:
+            pass
+        deadline = RequestDeadline(requested_timeout)
         chunk_timeout = max(1.0, float(chunk_timeout_seconds or min(30.0, deadline.total_seconds)))
         target_provider = self.provider_registry.resolve(provider)
 
@@ -520,6 +551,14 @@ class LLMGateway:
         )
         if not egress_authorized:
             raise PermissionError("external_egress_not_authorized")
+        try:
+            from app.jobs.durable_queue import current_task_execution
+
+            task_execution = current_task_execution()
+            if task_execution is not None:
+                await task_execution.mark_external_side_effect(str(request_trace.get("request_fingerprint") or ""))
+        except ImportError:
+            pass
         started_at = time.time()
 
         # Retry loop: retry only before the first chunk arrives.
@@ -558,6 +597,12 @@ class LLMGateway:
                         yield chunk
                 self.reliability.success(lease)
                 runtime_metrics.increment("gateway.stream_success")
+                stream_usage = ProviderUsage.from_mapping(
+                    None,
+                    requests=1,
+                    requested_max_tokens=int(max_tokens or getattr(target_provider, "max_tokens", 0) or 0),
+                ).to_dict()
+                request_trace["usage"] = stream_usage
                 try:
                     from app.context_engine.trace_collector import TraceEventType, trace_collector
 
@@ -571,6 +616,7 @@ class LLMGateway:
                             "provider": target_provider.get_provider_name(),
                             "latency_ms": int((time.time() - started_at) * 1000),
                             "stream": True,
+                            "usage": stream_usage,
                         },
                     )
                 except Exception as exc:
@@ -617,7 +663,9 @@ class LLMGateway:
                     )
                     raise
                 last_exception = e
-                is_retryable, reason = classify_error(e)
+                provider_name = target_provider.get_provider_name()
+                contract = normalize_provider_error(e, provider=provider_name)
+                is_retryable, reason = contract.retryable, contract.category
                 if not is_retryable:
                     provider_name = (
                         target_provider.get_provider_name()
@@ -631,6 +679,7 @@ class LLMGateway:
                         status_code=getattr(e, "status_code", None),
                         is_retryable=False,
                         original=e,
+                        contract=contract,
                     ) from e
                 logger.warning(
                     "Stream retryable error before first chunk (attempt=%d/%d, reason=%s): %s",
@@ -640,7 +689,7 @@ class LLMGateway:
                     e,
                 )
                 if attempt < attempts - 1:
-                    delay = get_retry_delay(attempt, self.retry_delays, self.max_retry_delay)
+                    delay = provider_retry_delay(contract, attempt, self.retry_delays, self.max_retry_delay)
                     await deadline.sleep(delay)
             finally:
                 await self.telemetry.close_provider_stream(stream)
@@ -649,7 +698,8 @@ class LLMGateway:
         provider_name = (
             target_provider.get_provider_name() if hasattr(target_provider, "get_provider_name") else "unknown"
         )
-        is_retryable, reason = classify_error(last_exception)
+        contract = normalize_provider_error(last_exception, provider=provider_name)
+        is_retryable, reason = contract.retryable, contract.category
         await self.telemetry.record_egress(
             request_trace,
             provider_profile=provider,
@@ -666,6 +716,7 @@ class LLMGateway:
             status_code=getattr(last_exception, "status_code", None),
             is_retryable=True,
             original=last_exception,
+            contract=contract,
         ) from last_exception
 
     def get_provider_for_agent(self, agent_name: str) -> str:

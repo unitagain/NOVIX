@@ -1416,8 +1416,17 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                 "open_loops (string arrays), and recent_summary (string). Include only source-supported claims; do not "
                 "turn assistant suggestions into user decisions. Preserve active constraints and unresolved work.",
             )
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": text[:6000]}]
+            scope = current_turn_scope()
+            if scope is not None and scope.source_closure_required:
+                scope.register_provider_payload(
+                    messages,
+                    source_prefix="orchestrator.compact_summary",
+                    selection_reason="conversation_compact_assembly",
+                    artifact_ref="Orchestrator._summarize_conversation",
+                )
             resp = await self.gateway.chat(
-                [{"role": "system", "content": system}, {"role": "user", "content": text[:6000]}],
+                messages,
                 provider=provider,
                 temperature=0.3,
                 response_format={"type": "json_object"},
@@ -1463,18 +1472,27 @@ class Orchestrator(ContextMixin, AnalysisMixin):
                 "contradictions": "artifact conflicts with source",
             },
         }
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是独立的会话压缩审计器。只输出 JSON：unsupported_claims、severe_omissions、"
+                    "contradictions（字符串数组）及 valid（布尔值）。只有三个数组均为空时 valid 才为 true。"
+                    "不要评价文风，不要补充来源中不存在的信息。"
+                ),
+            },
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ]
+        scope = current_turn_scope()
+        if scope is not None and scope.source_closure_required:
+            scope.register_provider_payload(
+                messages,
+                source_prefix="orchestrator.compact_verify",
+                selection_reason="compact_verifier_assembly",
+                artifact_ref="Orchestrator._verify_compact_artifact",
+            )
         response = await self.gateway.chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是独立的会话压缩审计器。只输出 JSON：unsupported_claims、severe_omissions、"
-                        "contradictions（字符串数组）及 valid（布尔值）。只有三个数组均为空时 valid 才为 true。"
-                        "不要评价文风，不要补充来源中不存在的信息。"
-                    ),
-                },
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
+            messages,
             provider=provider,
             temperature=0.0,
             max_tokens=800,

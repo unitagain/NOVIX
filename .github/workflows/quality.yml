@@ -6,8 +6,12 @@ on:
   pull_request:
 
 jobs:
-  backend:
+  backend-linux:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
     defaults:
       run:
         working-directory: backend
@@ -15,32 +19,53 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Generated assets check
-        run: python ../scripts/check_generated_assets.py
-      - name: Requirements sync
-        run: python ../scripts/check_requirements_sync.py
-      - name: Compile backend
-        run: python -m compileall app
-      - name: Encoding check
-        run: python ../scripts/check_encoding.py
-      - name: Bilingual docstrings check
-        run: python ../scripts/check_bilingual_docstrings.py
-      - name: Large-file check
-        run: python ../scripts/check_large_files.py
-      - name: Ruff
-        run: ruff check app tests
-      - name: Pytest
+          pip install mypy==1.10.0
+      - name: Backend engineering gate
         env:
           DEBUG: "false"
           HOST: "127.0.0.1"
           PORT: "8000"
           WENSHAPE_LLM_PROVIDER: "openai"
-        run: pytest -q
+        run: python scripts/engineering_gate.py
+
+  backend-windows-critical:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Windows durability and filesystem contracts
+        env:
+          DEBUG: "false"
+          HOST: "127.0.0.1"
+          PORT: "8000"
+          WENSHAPE_LLM_PROVIDER: "openai"
+        run: >-
+          python -m pytest -W error
+          tests/test_p10_turn_runtime.py
+          tests/test_w2_control_plane.py
+          tests/test_w4_operations.py
+          tests/test_p14_production.py
+          tests/test_w8_production_evidence.py
+      - name: Packaged sidecar syntax
+        working-directory: .
+        run: node --check desktop/scripts/build-sidecar.mjs
 
   frontend:
     runs-on: ubuntu-latest

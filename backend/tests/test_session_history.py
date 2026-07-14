@@ -4,7 +4,9 @@
 """
 
 import asyncio
+import json
 
+from app.context_engine.token_accounting import count_provider_payload
 from app.storage.session_history import SessionHistoryStorage
 
 
@@ -92,17 +94,20 @@ def test_compact_advances_epoch_and_replaces_runtime_projection(tmp_path):
     s = _store(tmp_path)
     for i in range(30):
         asyncio.run(s.append("p1", {"role": "user", "content": f"m{i}"}))
-    asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=10, trigger_at=20))
+    first = asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=10, trigger_at=20))
     # 再加 20 条触发二次压缩；运行时只保留新 epoch 的投影，旧 artifact 仍可恢复。
     for i in range(30, 50):
         asyncio.run(s.append("p1", {"role": "user", "content": f"m{i}"}))
-    asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=10, trigger_at=20))
+    second = asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=10, trigger_at=20))
     items = asyncio.run(s.load("p1"))
     summaries = [m for m in items if m.get("type") == "summary"]
     assert len(summaries) == 1
     assert summaries[0]["context_epoch"] == 2
     assert summaries[0]["parent_epoch"] == 1
     assert [m["content"] for m in items if m.get("type") != "summary"][-3:] == ["m47", "m48", "m49"]
+    assert first["lineage_verification"]["depth"] == 0
+    assert second["lineage_verification"]["depth"] == 1
+    assert second["layers"]["previous_compact_artifact_id"] == first["compact_artifact_id"]
 
 
 def test_compact_summarizer_failure_is_safe(tmp_path):
@@ -116,3 +121,157 @@ def test_compact_summarizer_failure_is_safe(tmp_path):
     r = asyncio.run(s.compact("p1", _boom, keep_recent=10, trigger_at=20))
     assert r["compacted"] is False
     assert asyncio.run(s.count("p1")) == 30  # 失败不丢数据
+
+
+def test_compact_preserves_complete_user_assistant_tool_turn(tmp_path):
+    s = _store(tmp_path)
+    first_turn = [
+        {"role": "user", "content": "用户请求" * 80, "event_id": "u1"},
+        {
+            "role": "assistant",
+            "content": "调用工具" * 80,
+            "event_id": "a1",
+            "tool_calls": [{"id": "call-1", "name": "query_canon"}],
+        },
+        {
+            "role": "tool",
+            "content": "工具结果" * 80,
+            "event_id": "t1",
+            "tool_call_id": "call-1",
+            "name": "query_canon",
+        },
+        {"role": "assistant", "content": "最终答复" * 80, "event_id": "a2"},
+    ]
+    second_turn = [
+        {"role": "user", "content": "新请求" * 80, "event_id": "u2"},
+        {"role": "assistant", "content": "新答复" * 80, "event_id": "a3"},
+    ]
+    for message in [*first_turn, *second_turn]:
+        asyncio.run(s.append("p1", message))
+    captured = []
+
+    async def summarize(messages):
+        captured.extend(messages)
+        return "完整保留早期工具回合。"
+
+    result = asyncio.run(s.compact("p1", summarize, keep_recent=1, trigger_at=1))
+    assert result["compacted"] is True
+    assert [item["event_id"] for item in captured] == ["u1", "a1", "t1", "a2"]
+    assert result["summarized_turns"] == 1
+    assert result["preserved_tail_id"] == "turn_u2"
+    artifact = asyncio.run(s.read_compact_artifact("p1", result["compact_artifact_id"]))
+    assert artifact["selected_turn_ids"] == ["turn_u1"]
+    recovered = asyncio.run(s.recover_compact_sources("p1", artifact["id"]))
+    assert [item["event_id"] for item in recovered] == [
+        "u1",
+        "a1",
+        "t1",
+        "a2",
+    ]
+    assert recovered[1]["tool_calls"][0]["id"] == "call-1"
+    assert recovered[2]["tool_call_id"] == "call-1"
+
+
+def test_recent_tail_obeys_turn_count_and_token_budget_deterministically(tmp_path):
+    s = _store(tmp_path)
+    for index in range(5):
+        asyncio.run(
+            s.append(
+                "p1",
+                {"role": "user", "content": f"U{index}-" + "甲" * 400, "event_id": f"u{index}"},
+            )
+        )
+        asyncio.run(
+            s.append(
+                "p1",
+                {"role": "assistant", "content": f"A{index}-" + "乙" * 400, "event_id": f"a{index}"},
+            )
+        )
+    items = asyncio.run(s.load("p1"))
+    two_turn_budget = count_provider_payload(
+        items[-4:],
+        provider="deepseek",
+        model="deepseek-chat",
+    ).upper_bound_tokens
+
+    result = asyncio.run(
+        s.compact(
+            "p1",
+            _fake_summarizer,
+            keep_recent=4,
+            trigger_at=1,
+            recent_token_budget=two_turn_budget,
+            provider="deepseek",
+            model="deepseek-chat",
+        )
+    )
+    assert result["preserved_tail_turns"] == 2
+    assert result["preserved_tail_id"] == "turn_u3"
+    assert result["accounting"]["recent_tail"]["upper_bound_tokens"] <= two_turn_budget
+    assert result["layers"] == {
+        "previous_compact_messages": 0,
+        "previous_compact_artifact_id": "",
+        "selected_raw_messages": 6,
+        "selected_raw_turns": 3,
+        "recent_tail_messages": 4,
+        "recent_tail_turns": 2,
+    }
+
+
+def test_single_oversized_recent_turn_is_preserved_without_splitting(tmp_path):
+    s = _store(tmp_path)
+    asyncio.run(s.append("p1", {"role": "user", "content": "old" * 500, "event_id": "u-old"}))
+    asyncio.run(s.append("p1", {"role": "assistant", "content": "old-a" * 500, "event_id": "a-old"}))
+    asyncio.run(s.append("p1", {"role": "user", "content": "new" * 3000, "event_id": "u-new"}))
+    asyncio.run(s.append("p1", {"role": "assistant", "content": "new-a" * 3000, "event_id": "a-new"}))
+
+    result = asyncio.run(
+        s.compact("p1", _fake_summarizer, keep_recent=2, trigger_at=1, recent_token_budget=10)
+    )
+    assert result["compacted"] is True
+    assert result["tail_budget_overflow"] is True
+    active = asyncio.run(s.load("p1"))
+    assert [item["event_id"] for item in active[1:]] == ["u-new", "a-new"]
+
+
+def test_empty_or_overflow_summary_never_rewrites_projection(tmp_path):
+    s = _store(tmp_path)
+    for index in range(4):
+        asyncio.run(s.append("p1", {"role": "user", "content": f"source-{index}-" + "甲" * 300}))
+    before = asyncio.run(s.load("p1"))
+
+    async def empty(_messages):
+        return ""
+
+    empty_result = asyncio.run(s.compact("p1", empty, keep_recent=1, trigger_at=1))
+    assert empty_result["error"] == "compact_empty_summary"
+    assert asyncio.run(s.load("p1")) == before
+
+    async def overflow(_messages):
+        return "膨胀摘要" * 10000
+
+    overflow_result = asyncio.run(s.compact("p1", overflow, keep_recent=1, trigger_at=1))
+    assert overflow_result["error"] == "compact_summary_overflow"
+    assert asyncio.run(s.load("p1")) == before
+    assert asyncio.run(s.current_context_epoch("p1")) == 0
+
+
+def test_compact_lineage_cycle_blocks_next_epoch(tmp_path):
+    s = _store(tmp_path)
+    for index in range(4):
+        asyncio.run(s.append("p1", {"role": "user", "content": f"m{index}-" + "甲" * 200}))
+    first = asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=1, trigger_at=1))
+    artifact_path = tmp_path / "p1" / "sessions" / "compact" / f"{first['compact_artifact_id']}.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["parent_artifact_id"] = artifact["id"]
+    artifact["parent_epoch"] = artifact["epoch"]
+    artifact_path.write_text(json.dumps(artifact, ensure_ascii=False), encoding="utf-8")
+    for index in range(4, 7):
+        asyncio.run(s.append("p1", {"role": "user", "content": f"m{index}-" + "乙" * 200}))
+    before = asyncio.run(s.load("p1"))
+
+    result = asyncio.run(s.compact("p1", _fake_summarizer, keep_recent=1, trigger_at=1))
+    assert result["error"] == "compact_lineage_verification_failed"
+    assert "lineage_cycle" in result["lineage_verification"]["errors"]
+    assert asyncio.run(s.load("p1")) == before
+    assert asyncio.run(s.current_context_epoch("p1")) == 1

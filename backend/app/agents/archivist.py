@@ -640,7 +640,7 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
         if not chapters:
             return []
         chapter_set = {normalize_chapter_id(ch) for ch in chapters if ch}
-        facts = await self.canon_storage.get_all_facts_raw(project_id)
+        facts = await self.canon_storage.get_eligible_facts_raw(project_id)
         selected = []
         for fact in facts:
             raw_chapter = fact.get("introduced_in") or fact.get("source") or ""
@@ -658,7 +658,7 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
     ) -> List[Dict[str, Any]]:
         if not keywords:
             return []
-        facts = await self.canon_storage.get_all_facts_raw(project_id)
+        facts = await self.canon_storage.get_eligible_facts_raw(project_id)
         scored: List[Tuple[int, Dict[str, Any]]] = []
         for fact in facts:
             if fact.get("id") in exclude_ids:

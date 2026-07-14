@@ -35,6 +35,12 @@ class Fact(BaseModel):
     )
     source_type: str = Field("internal", description="Source class: internal | external | crawler | search")
     trust_label: str = Field("trusted", description="Trust label: trusted | untrusted")
+    source_refs: List[str] = Field(default_factory=list, description="Persisted provenance references")
+    evidence_refs: List[str] = Field(default_factory=list, description="Supporting evidence references")
+    confidence_method: str = Field("declared", description="How confidence was established")
+    confirmed_by: str = Field("", description="Actor that explicitly confirmed the fact")
+    updated_at: str = Field("", description="Last lifecycle update timestamp")
+    schema_version: int = Field(2, ge=1, description="Canon fact schema version")
 
     model_config = ConfigDict(
         json_schema_extra={

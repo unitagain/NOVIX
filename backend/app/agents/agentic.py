@@ -17,10 +17,22 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+import asyncio
 import json
+import re
+import time
 
 from app.utils.logger import get_logger
-from app.error_contract import record_degradation
+from app.error_contract import DomainError, error_envelope, record_degradation, tool_error_text
+from app.agents.runtime_result import AgentRunResult, AgentRunStatus
+from app.context_engine.tool_artifact import (
+    ToolArtifactStore,
+    ToolExecutionResult,
+    ToolExecutionStatus,
+    output_sha256,
+    safe_output_preview,
+)
+from app.context_engine.turn_scope import current_turn_scope
 
 logger = get_logger(__name__)
 
@@ -38,54 +50,23 @@ def _parse_tool_args(arguments: Any) -> Dict[str, Any]:
         return {}
 
 
-async def _emit(on_event: OnEvent, event: Dict[str, Any]) -> None:
+async def _emit(on_event: OnEvent, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not on_event:
-        return
+        return None
     try:
         await on_event(event)
     except Exception as exc:
-        record_degradation("agentic_event_callback", exc)
+        code = record_degradation("agentic_event_callback", exc)
+        return {"type": "event_callback_failure", "code": code, "event_type": str(event.get("type") or "")}
+    return None
 
 
-# Phase 8 代谢：agentic 多轮循环里工具结果会无限累积膨胀上下文；保留最近的、折叠更早的。
-_DEFAULT_TOOL_RESULT_BUDGET = 8000  # 工具结果保留的字符预算（超出的更早结果折叠为占位符）
-_FOLD_PLACEHOLDER = "[早前工具结果已折叠（节省上下文）]"
+def _tool_error_code(output: str) -> str:
+    match = re.search(r"\bcode=([^\s\]]+)", str(output or ""))
+    return str(match.group(1) if match else "tool_execution_failed")
 
 
-def _fold_old_tool_results(msgs: List[Dict[str, Any]], budget: int = _DEFAULT_TOOL_RESULT_BUDGET) -> int:
-    """从后往前累计工具结果字符，超出 budget 的更早结果折叠为占位符（思考.md 的 Context Editing 思想）。
-
-    OpenAI 兼容（role="tool"）与 Anthropic（user 消息内 tool_result 块）两种格式分别处理。
-    就地修改 msgs；返回折叠条数（供观测/测试）。budget<=0 则不折叠。
-    """
-    if not budget or budget <= 0:
-        return 0
-    remaining = int(budget)
-    folded = 0
-    for msg in reversed(msgs):
-        role = msg.get("role")
-        if role == "tool":  # OpenAI 兼容格式
-            content = str(msg.get("content") or "")
-            if not content or content == _FOLD_PLACEHOLDER:
-                continue
-            if remaining >= len(content):
-                remaining -= len(content)
-            else:
-                msg["content"] = _FOLD_PLACEHOLDER
-                folded += 1
-        elif role == "user" and isinstance(msg.get("content"), list):  # Anthropic tool_result 块
-            for block in msg["content"]:
-                if not (isinstance(block, dict) and block.get("type") == "tool_result"):
-                    continue
-                content = str(block.get("content") or "")
-                if not content or content == _FOLD_PLACEHOLDER:
-                    continue
-                if remaining >= len(content):
-                    remaining -= len(content)
-                else:
-                    block["content"] = _FOLD_PLACEHOLDER
-                    folded += 1
-    return folded
+_DEFAULT_TOOL_RESULT_BUDGET = 8000  # compatibility-only; gateway accounting owns runtime folding
 
 
 async def run_agentic_chat(
@@ -100,7 +81,9 @@ async def run_agentic_chat(
     thinking: Optional[Any] = None,
     on_event: OnEvent = None,
     tool_result_budget: int = _DEFAULT_TOOL_RESULT_BUDGET,
-) -> Dict[str, Any]:
+    artifact_store: Optional[ToolArtifactStore] = None,
+    deadline_seconds: Optional[float] = None,
+) -> AgentRunResult:
     """运行"LLM ↔ 工具"循环，直到模型不再请求工具或达到上限，返回最终响应 dict。
 
     Args:
@@ -108,34 +91,136 @@ async def run_agentic_chat(
         provider: profile id。
         messages: 初始消息（system + user）。
         toolset: 提供 .schemas() 与 async .execute(name, arguments) 的工具集。
-        max_iterations: 最大工具轮数；达到上限后做一次"不带工具"的强制产出。
+        max_iterations: 最大 provider/tool 循环次数；达到上限返回 incomplete，不追加请求。
         thinking: 可选，透传给 gateway.chat 的 thinking 配置（默认 None=关）。
         on_event: 可选 async 回调，透传 thinking/工具调用过程（供 Phase 5 透明化复用）。
             事件形如 {"type": "thinking"|"tool_call"|"tool_result", ...}。
 
     Returns:
-        最终的 chat 响应 dict（含 content / usage 等）。
+        统一的 AgentRunResult；保留 ``response.get(...)`` 风格的兼容访问。
 
     说明：消息回放对 OpenAI 兼容 provider 用 `assistant.tool_calls` + `role:"tool"`；
     对 Anthropic 用 `tool_use` / `tool_result` 内容块（按首个响应的 provider 判定）。
     """
+    del tool_result_budget
+    started = time.monotonic()
+    explicit_deadline = (
+        started + float(deadline_seconds)
+        if deadline_seconds is not None and float(deadline_seconds) > 0
+        else None
+    )
     msgs: List[Dict[str, Any]] = list(messages)
     schemas = toolset.schemas()
-    is_anthropic = False
+    scope = current_turn_scope()
+    if scope is not None and scope.runtime is not None:
+        runtime = scope.runtime
+    else:
+        from app.orchestrator.turn_runtime import TurnRuntime
+
+        runtime = TurnRuntime(
+            turn_id="agentic_local",
+            timeout_seconds=max(1.0, float(deadline_seconds or 600.0)),
+        )
+    store = artifact_store
+    if store is None and scope is not None:
+        store = ToolArtifactStore()
+    tool_results: List[ToolExecutionResult] = []
+    degradations: List[Dict[str, Any]] = []
+    last_response: Dict[str, Any] = {}
+    iterations = 0
+
+    def finish(
+        status: AgentRunStatus,
+        *,
+        response: Optional[Dict[str, Any]] = None,
+        error: Optional[Dict[str, Any]] = None,
+        reason: str = "",
+    ) -> AgentRunResult:
+        payload = dict(response or {})
+        return AgentRunResult(
+            status=status.value,
+            content=str(payload.get("content") or ""),
+            response=payload,
+            tool_results=tuple(tool_results),
+            error=error,
+            elapsed_ms=int((time.monotonic() - started) * 1000),
+            iterations=iterations,
+            finish_reason=reason or str(payload.get("finish_reason") or ""),
+            degradations=tuple(degradations),
+        )
+
+    def envelope(exc: BaseException) -> Dict[str, Any]:
+        return error_envelope(exc, trace_id=scope.trace_id if scope is not None else "").to_dict()
+
+    def active_timeout() -> float:
+        remaining = runtime.remaining_seconds
+        if explicit_deadline is not None:
+            remaining = min(remaining, max(0.0, explicit_deadline - time.monotonic()))
+        if remaining <= 0:
+            raise TimeoutError("turn_deadline_exceeded")
+        return remaining
+
+    async def provider_chat(*, tools: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        runtime.ensure_active()
+        timeout = active_timeout()
+        return await runtime.wait_for(
+            gateway.chat(
+                msgs,
+                provider=provider,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                thinking=thinking,
+                timeout_seconds=timeout,
+            ),
+            timeout_seconds=timeout,
+        )
+
+    if scope is not None and scope.source_closure_required:
+        scope.register_source_content(
+            source_id="procedural.writer_tool_schemas",
+            asset_type="procedural_knowledge",
+            content=schemas,
+            selection_reason="agentic_tool_contract",
+            artifact_ref=f"{toolset.__class__.__module__}.{toolset.__class__.__name__}.schemas",
+        )
+        scope.register_provider_payload(
+            [],
+            schemas,
+            source_prefix="agentic.tools",
+            selection_reason="agentic_tool_schema_assembly",
+            artifact_ref="run_agentic_chat:schemas",
+        )
 
     for _ in range(max(1, max_iterations)):
-        resp = await gateway.chat(
-            msgs, provider=provider, temperature=temperature, max_tokens=max_tokens, tools=schemas, thinking=thinking
-        )
+        try:
+            resp = await provider_chat(tools=schemas)
+        except asyncio.CancelledError:
+            raise
+        except RuntimeError as exc:
+            error_payload = envelope(exc)
+            if str(exc) == "turn_cancelled":
+                return finish(AgentRunStatus.CANCELLED, error=error_payload, reason="turn_cancelled")
+            return finish(AgentRunStatus.FAILED, error=error_payload, reason="provider_failure")
+        except TimeoutError as exc:
+            error_payload = envelope(exc)
+            return finish(AgentRunStatus.FAILED, error=error_payload, reason="turn_deadline_exceeded")
+        except Exception as exc:
+            error_payload = envelope(exc)
+            return finish(AgentRunStatus.FAILED, error=error_payload, reason="provider_failure")
+        iterations += 1
+        last_response = dict(resp or {})
         is_anthropic = str(resp.get("provider") or "").lower() == "anthropic"
 
         thought = str(resp.get("thinking") or "").strip()
         if thought:
-            await _emit(on_event, {"type": "thinking", "content": thought})
+            degradation = await _emit(on_event, {"type": "thinking", "content": thought})
+            if degradation:
+                degradations.append(degradation)
 
         tool_calls = resp.get("tool_calls")
         if not tool_calls:
-            return resp
+            return finish(AgentRunStatus.COMPLETED, response=resp)
 
         # 回放 assistant 的工具调用消息（按 provider 选择格式）
         if is_anthropic:
@@ -151,41 +236,203 @@ async def run_agentic_chat(
                         "input": _parse_tool_args(tc.get("arguments")),
                     }
                 )
-            msgs.append({"role": "assistant", "content": content_blocks})
+            assistant_message = {"role": "assistant", "content": content_blocks}
+            msgs.append(assistant_message)
         else:
-            msgs.append(
-                {
-                    "role": "assistant",
-                    "content": resp.get("content") or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.get("id"),
-                            "type": "function",
-                            "function": {"name": tc.get("name"), "arguments": tc.get("arguments") or "{}"},
-                        }
-                        for tc in tool_calls
-                    ],
-                }
+            assistant_message = {
+                "role": "assistant",
+                "content": resp.get("content") or "",
+                "tool_calls": [
+                    {
+                        "id": tc.get("id"),
+                        "type": "function",
+                        "function": {"name": tc.get("name"), "arguments": tc.get("arguments") or "{}"},
+                    }
+                    for tc in tool_calls
+                ],
+            }
+            msgs.append(assistant_message)
+        if scope is not None and scope.source_closure_required:
+            scope.register_source_content(
+                source_id=f"provider.response.{len(msgs) - 1}",
+                asset_type="provider_response",
+                content=assistant_message,
+                selection_reason="agentic_tool_call_replay",
+                artifact_ref="provider_response:tool_calls",
+            )
+            scope.register_provider_payload(
+                [assistant_message],
+                source_prefix="agentic.assistant",
+                selection_reason="agentic_tool_call_replay",
+                artifact_ref="run_agentic_chat:assistant_replay",
             )
 
         # 执行工具并回灌结果（Anthropic 用单条 user 消息聚合 tool_result 块）
         anthropic_results: List[Dict[str, Any]] = []
         for tc in tool_calls:
-            name = tc.get("name")
-            await _emit(on_event, {"type": "tool_call", "name": name, "arguments": tc.get("arguments")})
-            result = await toolset.execute(name, tc.get("arguments"))
+            name = str(tc.get("name") or "")
+            tool_call_id = str(tc.get("id") or "")
+            arguments = tc.get("arguments")
+            try:
+                runtime.ensure_active()
+            except RuntimeError as exc:
+                error_payload = envelope(exc)
+                return finish(AgentRunStatus.CANCELLED, response=resp, error=error_payload, reason="turn_cancelled")
+            except TimeoutError as exc:
+                error_payload = envelope(exc)
+                return finish(
+                    AgentRunStatus.FAILED,
+                    response=resp,
+                    error=error_payload,
+                    reason="turn_deadline_exceeded",
+                )
+            degradation = await _emit(on_event, {"type": "tool_call", "name": name, "arguments": arguments})
+            if degradation:
+                degradations.append(degradation)
+            tool_started = time.monotonic()
+            tool_error: Optional[Dict[str, Any]] = None
+            try:
+                tool_timeout = active_timeout()
+                raw_result = await runtime.wait_for(
+                    toolset.execute(name, arguments),
+                    timeout_seconds=tool_timeout,
+                )
+                runtime.ensure_active()
+                output = str(raw_result or "")
+                status = (
+                    ToolExecutionStatus.FAILED.value
+                    if output.startswith("[tool_error ")
+                    else ToolExecutionStatus.SUCCEEDED.value
+                )
+                if status == ToolExecutionStatus.FAILED.value:
+                    tool_error = error_envelope(
+                        DomainError(code=_tool_error_code(output), degraded=True),
+                        trace_id=scope.trace_id if scope is not None else "",
+                        degraded=True,
+                    ).to_dict()
+            except asyncio.CancelledError:
+                raise
+            except RuntimeError as exc:
+                if str(exc) != "turn_cancelled":
+                    output = tool_error_text(name, exc)
+                    status = ToolExecutionStatus.FAILED.value
+                    tool_error = envelope(exc)
+                else:
+                    cancelled_result = ToolExecutionResult(
+                        tool_call_id=tool_call_id,
+                        tool_name=name,
+                        status=ToolExecutionStatus.CANCELLED.value,
+                        output_preview="",
+                        artifact_ref="",
+                        output_hash="",
+                        error=envelope(exc),
+                        elapsed_ms=int((time.monotonic() - tool_started) * 1000),
+                        recoverable=False,
+                    )
+                    tool_results.append(cancelled_result)
+                    return finish(AgentRunStatus.CANCELLED, response=resp, error=cancelled_result.error, reason="turn_cancelled")
+            except TimeoutError as exc:
+                timed_out = ToolExecutionResult(
+                    tool_call_id=tool_call_id,
+                    tool_name=name,
+                    status=ToolExecutionStatus.TIMED_OUT.value,
+                    output_preview="",
+                    artifact_ref="",
+                    output_hash="",
+                    error=envelope(exc),
+                    elapsed_ms=int((time.monotonic() - tool_started) * 1000),
+                    recoverable=False,
+                )
+                tool_results.append(timed_out)
+                return finish(AgentRunStatus.FAILED, response=resp, error=timed_out.error, reason="turn_deadline_exceeded")
+            except Exception as exc:
+                output = tool_error_text(name, exc)
+                status = ToolExecutionStatus.FAILED.value
+                tool_error = envelope(exc)
+
+            output_hash = output_sha256(output)
+            artifact_ref = ""
+            if store is not None:
+                try:
+                    runtime.ensure_active()
+                    artifact = store.persist(
+                        output,
+                        turn_id=scope.turn_id if scope is not None else runtime.turn_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=name,
+                        status=status,
+                    )
+                    artifact_ref = artifact.artifact_ref
+                    output_hash = artifact.output_hash
+                except (OSError, UnicodeError, TypeError, ValueError) as exc:
+                    code = record_degradation("tool_artifact_persist", exc)
+                    degradations.append({"type": "tool_artifact_failure", "code": code, "tool_call_id": tool_call_id})
+            recoverability = getattr(toolset, "is_result_recoverable", None)
+            declared_recoverable = bool(recoverability(name)) if callable(recoverability) else False
+            recoverable = bool(
+                declared_recoverable and artifact_ref and status == ToolExecutionStatus.SUCCEEDED.value
+            )
+            preview = safe_output_preview(output, artifact_ref=artifact_ref)
+            execution = ToolExecutionResult(
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                status=status,
+                output_preview=preview,
+                artifact_ref=artifact_ref,
+                output_hash=output_hash,
+                error=tool_error,
+                elapsed_ms=int((time.monotonic() - tool_started) * 1000),
+                recoverable=recoverable,
+            )
+            tool_results.append(execution)
+            metadata = execution.replay_metadata()
             if is_anthropic:
-                anthropic_results.append({"type": "tool_result", "tool_use_id": tc.get("id"), "content": result})
+                anthropic_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": preview,
+                        **metadata,
+                    }
+                )
             else:
-                msgs.append({"role": "tool", "tool_call_id": tc.get("id"), "content": result})
-            await _emit(on_event, {"type": "tool_result", "name": name, "result": result})
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": preview,
+                    **metadata,
+                }
+                msgs.append(tool_message)
+                if scope is not None and scope.source_closure_required:
+                    scope.register_provider_payload(
+                        [tool_message],
+                        source_prefix="agentic.tool_result",
+                        selection_reason="agentic_tool_result_replay",
+                        artifact_ref=artifact_ref,
+                    )
+            degradation = await _emit(
+                on_event,
+                {
+                    "type": "tool_result",
+                    "name": name,
+                    "arguments": arguments,
+                    "result": preview,
+                    "tool_result": execution.to_dict(),
+                },
+            )
+            if degradation:
+                degradations.append(degradation)
 
         if is_anthropic and anthropic_results:
-            msgs.append({"role": "user", "content": anthropic_results})
+            tool_message = {"role": "user", "content": anthropic_results}
+            msgs.append(tool_message)
+            if scope is not None and scope.source_closure_required:
+                scope.register_provider_payload(
+                    [tool_message],
+                source_prefix="agentic.tool_result",
+                selection_reason="agentic_tool_result_replay",
+                artifact_ref=str(anthropic_results[-1].get("_source_ref") or ""),
+            )
 
-        # Phase 8 代谢：折叠早期工具结果，避免多轮循环上下文膨胀（保留最近的，更早的占位符化）。
-        _fold_old_tool_results(msgs, tool_result_budget)
-
-    # 达到上限：最后一次不带工具，强制模型产出最终结果
-    logger.info("agentic loop hit max_iterations=%d; final call without tools", max_iterations)
-    return await gateway.chat(msgs, provider=provider, temperature=temperature, max_tokens=max_tokens)
+    logger.info("agentic loop hit max_iterations=%d; returning incomplete", max_iterations)
+    return finish(AgentRunStatus.INCOMPLETE, response=last_response, reason="max_iterations")

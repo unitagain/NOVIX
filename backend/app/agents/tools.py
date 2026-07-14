@@ -15,6 +15,7 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 import asyncio
+import hashlib
 import json
 from typing import Any, Dict, List
 
@@ -153,6 +154,10 @@ class WriterToolset:
     def schemas() -> List[Dict[str, Any]]:
         return writer_tool_schemas()
 
+    @staticmethod
+    def is_result_recoverable(name: str) -> bool:
+        return name in {"lookup_card", "query_canon", "query_relations", "read_chapter", "search_prose"}
+
     async def execute(self, name: str, arguments: Any) -> str:
         """根据工具名分发执行；任何异常都转为可读的工具结果文本，避免中断 agentic 循环。"""
         args = self._parse_args(arguments)
@@ -178,6 +183,7 @@ class WriterToolset:
         except Exception as exc:
             logger.warning("Tool %s failed: %s", name, exc)
             result = tool_error_text(name, exc)
+        self._register_tool_source(name, args, result)
         self._ensure_source_snapshot()
         return result
 
@@ -186,14 +192,39 @@ class WriterToolset:
         from app.context_engine.turn_scope import current_turn_scope
 
         scope = current_turn_scope()
-        plan = scope.active_plan if scope is not None else None
-        if plan is None or not hasattr(plan, "verify_sources"):
+        if scope is None or scope.source_registry is None:
             return
-        verification = plan.verify_sources()
+        verification = scope.source_registry.verify_mutable_sources()
         if verification.get("valid") is True:
             return
         failure = (verification.get("failures") or [{}])[0]
-        raise RuntimeError(f"context_source_revision_unavailable:{failure.get('path') or failure.get('reason')}")
+        raise RuntimeError(
+            f"context_actual_source_revision_unavailable:{failure.get('path') or failure.get('reason')}"
+        )
+
+    @staticmethod
+    def _register_tool_source(name: str, arguments: Dict[str, Any], result: str) -> None:
+        from app.context_engine.turn_scope import current_turn_scope
+
+        scope = current_turn_scope()
+        if scope is None or not scope.source_closure_required:
+            return
+        asset_types = {
+            "lookup_card": "cards",
+            "query_canon": "canon",
+            "query_relations": "relations",
+            "read_chapter": "prose",
+            "search_prose": "prose",
+        }
+        identity = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        identity_sha = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        scope.register_source_content(
+            source_id=f"tool.{name}.{identity_sha}",
+            asset_type=asset_types.get(name, "tool_result"),
+            content=result,
+            selection_reason=f"jit_tool:{name}",
+            artifact_ref=f"writer_tool:{name}",
+        )
 
     @staticmethod
     def _parse_args(arguments: Any) -> Dict[str, Any]:

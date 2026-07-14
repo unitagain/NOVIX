@@ -14,7 +14,8 @@ License: PolyForm Noncommercial License 1.0.0
 from typing import Any, Dict, List, Optional
 
 from app.config import config as app_cfg
-from app.context_engine.token_counter import count_tokens, estimate_tokens_fast
+from app.context_engine.token_accounting import count_provider_payload, count_text_tokens
+from app.context_engine.turn_scope import current_turn_scope
 from app.utils.logger import get_logger
 from app.utils.text import normalize_prose_paragraphs
 
@@ -625,13 +626,24 @@ class WriterAgent(BaseAgent):
             target_word_count=target_word_count,
             language=self.language,
         )
-        fixed_tokens = count_tokens(prompt.system) + count_tokens(prompt.user) + 200
+        try:
+            profile = dict(self.gateway.get_profile_for_agent(self.get_agent_name()) or {})
+        except Exception:
+            profile = {}
+        provider_name = str(profile.get("provider") or profile.get("id") or "")
+        model_name = str(profile.get("model") or "")
+        fixed_accounting = count_provider_payload(
+            [{"role": "system", "content": prompt.system}, {"role": "user", "content": prompt.user}],
+            provider=provider_name,
+            model=model_name,
+        )
+        fixed_tokens = fixed_accounting.upper_bound_tokens
 
         # context 可用预算
         context_budget = max(0, input_limit - fixed_tokens)
 
         # 使用 ContextBudgetPacker 按优先级装填 context_items
-        packer = _ContextBudgetPacker(context_budget)
+        packer = _ContextBudgetPacker(context_budget, provider=provider_name, model=model_name)
         use_compact_context = bool(working_memory and str(working_memory).strip())
 
         # P1: 必选 — 章节目标 + 场景简要
@@ -736,11 +748,45 @@ class WriterAgent(BaseAgent):
                 context_budget,
             )
 
+        self._register_packed_context_sources(packer)
+
         return self.build_messages(
             system_prompt=prompt.system,
             user_prompt=prompt.user,
             context_items=packer.items,
         )
+
+    @staticmethod
+    def _register_packed_context_sources(packer: "_ContextBudgetPacker") -> None:
+        scope = current_turn_scope()
+        if scope is None or not scope.source_closure_required:
+            return
+        asset_types = {
+            "goal": "chapter_goal",
+            "scene_brief": "scene_brief",
+            "working_memory": "memory",
+            "gaps": "memory",
+            "style": "cards",
+            "creative_memory": "memory",
+            "text_chunks": "prose",
+            "evidence": "evidence",
+            "user_answers": "user_message",
+            "user_feedback": "user_message",
+            "character_cards": "cards",
+            "world_cards": "cards",
+            "resident_facts": "canon",
+            "facts": "canon",
+            "character_states": "canon",
+            "summaries": "summaries",
+        }
+        for index, (section, content) in enumerate(zip(packer.sections, packer.items)):
+            scope.register_source_content(
+                source_id=f"writer.context.{section or index}",
+                asset_type=asset_types.get(section, "assembled_context"),
+                content=content,
+                selection_reason="writer_context_budget_selection",
+                artifact_ref=f"WriterAgent._build_draft_messages:{section or index}",
+            )
 
     # ------------------------------------------------------------------
     # Formatting helpers
@@ -900,11 +946,14 @@ class _ContextBudgetPacker:
         dropped_sections: Section names that were dropped due to budget.
     """
 
-    __slots__ = ("budget", "items", "used_tokens", "dropped_sections")
+    __slots__ = ("budget", "provider", "model", "items", "sections", "used_tokens", "dropped_sections")
 
-    def __init__(self, budget: int) -> None:
+    def __init__(self, budget: int, *, provider: str = "", model: str = "") -> None:
         self.budget = budget
+        self.provider = provider
+        self.model = model
         self.items: List[str] = []
+        self.sections: List[str] = []
         self.used_tokens = 0
         self.dropped_sections: List[str] = []
 
@@ -918,12 +967,13 @@ class _ContextBudgetPacker:
         if not text or not text.strip():
             return False
 
-        tokens = estimate_tokens_fast(text)
+        tokens = count_text_tokens(text, provider=self.provider, model=self.model).upper_bound_tokens
         if self.used_tokens + tokens > self.budget:
             if section:
                 self.dropped_sections.append(section)
             return False
 
         self.items.append(text)
+        self.sections.append(section)
         self.used_tokens += tokens
         return True

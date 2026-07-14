@@ -23,10 +23,10 @@ class CorpusSceneStage:
         return await self.backend.generate_candidates(**kwargs)
 
     def normalize_generated(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return self.backend._normalize_llm_generated(*args, **kwargs)
+        return self.backend.normalize_generated(*args, **kwargs)
 
     def select_queries(self, rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
-        return self.backend._select_run_queries(rows, limit=limit)
+        return self.backend.select_run_queries(rows, limit=limit)
 
 
 class CandidateGenerationStage:
@@ -53,13 +53,13 @@ class CandidateGenerationStage:
         )
 
     def resolve_strategy(self, strategy: Any) -> Any:
-        return self.backend._resolve_retrieval_strategy(strategy)
+        return self.backend.resolve_retrieval_strategy(strategy)
 
     def create_strategy_engine(self, spec: Any) -> Any:
-        return self.backend._create_strategy_engine(spec)
+        return self.backend.create_strategy_engine(spec)
 
     async def select_strategy_context(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return await self.backend._select_writer_strategy_context(*args, **kwargs)
+        return await self.backend.select_writer_strategy_context(*args, **kwargs)
 
 
 class JudgeStage:
@@ -76,7 +76,7 @@ class JudgeStage:
         return await self.backend.score_p12_context_ab(**kwargs)
 
     async def pairwise_with_retries(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return await self.backend._score_pairwise_with_retries(*args, **kwargs)
+        return await self.backend.score_pairwise_with_retries(*args, **kwargs)
 
     @staticmethod
     def artifact(
@@ -106,13 +106,13 @@ class StatisticsStage:
         self.backend = backend
 
     async def retrieval(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return await self.backend._run_retrieval(*args, **kwargs)
+        return await self.backend.run_retrieval_stage(*args, **kwargs)
 
     async def run_suite(self, **kwargs: Any) -> Dict[str, Any]:
         return await self.backend.run_suite(**kwargs)
 
     async def no_context_probe(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        return await self.backend._run_no_context_probe(*args, **kwargs)
+        return await self.backend.run_no_context_probe(*args, **kwargs)
 
     def analyze_strategy_ab(self, **kwargs: Any) -> Dict[str, Any]:
         return self.backend.analyze_strategy_ab(**kwargs)
@@ -129,13 +129,13 @@ class LedgerRecoveryStage:
         return self.backend.promote_failures(**kwargs)
 
     def strategy_pair_fingerprint(self, first: Dict[str, Any], second: Dict[str, Any]) -> str:
-        return self.backend._strategy_ab_pair_fingerprint(first, second)
+        return self.backend.strategy_ab_pair_fingerprint(first, second)
 
     def calibration_pairs(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return self.backend._calibration_context_pairs(rows)
+        return self.backend.calibration_context_pairs(rows)
 
     def calibration_pair_fingerprint(self, first: Dict[str, Any], second: Dict[str, Any]) -> str:
-        return self.backend._calibration_pair_fingerprint(first, second)
+        return self.backend.calibration_pair_fingerprint(first, second)
 
 
 class ReportStage:

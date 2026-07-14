@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.context_engine.token_counter import count_tokens
+from app.context_engine.token_accounting import count_text_tokens
 from app.utils.chapter_id import ChapterIDValidator
 
 
@@ -40,7 +40,7 @@ def estimate_context_tokens(context_package: Dict[str, Any]) -> int:
     total = 0
     for key in ["full_facts", "summary_with_events", "summary_only", "title_only", "volume_summaries"]:
         for item in context_package.get(key, []) or []:
-            total += count_tokens(str(item))
+            total += count_text_tokens(str(item)).upper_bound_tokens
     return total
 
 

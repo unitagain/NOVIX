@@ -3,13 +3,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.storage.base import BaseStorage
+from app.utils.permissions import decide_permission
 
 
 ACTION_STATUSES = ("pending", "approved", "rejected", "expired")
@@ -33,15 +32,10 @@ def _parse_dt(value: Any) -> Optional[datetime]:
         return None
 
 
-def _canonical_json(data: Any) -> str:
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-
-
 def target_hash(operation: str, target: Dict[str, Any], payload: Dict[str, Any]) -> str:
     """Hash the action contract so approvals cannot be replayed for another target."""
 
-    raw = _canonical_json({"operation": operation, "target": target or {}, "payload": payload or {}})
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return decide_permission(operation, resource_scope=target, payload=payload).fingerprint
 
 
 class PendingActionStorage(BaseStorage):
@@ -59,10 +53,23 @@ class PendingActionStorage(BaseStorage):
         payload: Optional[Dict[str, Any]] = None,
         reason: str = "",
         expires_in_seconds: int = 86400,
+        trust_context: Optional[Dict[str, Any]] = None,
+        parent_restrictions: Optional[Dict[str, Any]] = None,
+        actor: str = "local_user",
     ) -> Dict[str, Any]:
         now = _utc_now()
         payload = dict(payload or {})
         target = dict(target or {})
+        decision = decide_permission(
+            operation,
+            resource_scope=target,
+            payload=payload,
+            trust_context=trust_context,
+            parent_restrictions=parent_restrictions,
+            actor=actor,
+        )
+        if decision.level.value == "deny":
+            raise PermissionError("permission_denied")
         action = {
             "id": f"act_{int(now.timestamp() * 1000)}_{secrets.token_hex(4)}",
             "operation": str(operation or ""),
@@ -71,7 +78,9 @@ class PendingActionStorage(BaseStorage):
             "reason": str(reason or ""),
             "status": "pending",
             "token": secrets.token_urlsafe(24),
-            "target_hash": target_hash(str(operation or ""), target, payload),
+            "target_hash": decision.fingerprint,
+            "decision": decision.to_dict(),
+            "decision_fingerprint": decision.fingerprint,
             "created_at": _iso(now),
             "updated_at": _iso(now),
             "expires_at": _iso(now + timedelta(seconds=max(60, int(expires_in_seconds or 86400)))),
@@ -119,11 +128,21 @@ class PendingActionStorage(BaseStorage):
         target: Dict[str, Any],
         payload: Optional[Dict[str, Any]] = None,
         actor: str = "local_user",
+        trust_context: Optional[Dict[str, Any]] = None,
+        parent_restrictions: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Validate and approve a pending action. Returns the approved action."""
 
         items = await self.read_jsonl(self._actions_path(project_id))
-        expected_hash = target_hash(str(operation or ""), dict(target or {}), dict(payload or {}))
+        decision = decide_permission(
+            operation,
+            resource_scope=dict(target or {}),
+            payload=dict(payload or {}),
+            trust_context=trust_context,
+            parent_restrictions=parent_restrictions,
+            actor=actor,
+        )
+        expected_hash = decision.fingerprint
         now = _utc_now()
         approved: Optional[Dict[str, Any]] = None
         next_items: List[Dict[str, Any]] = []
@@ -148,6 +167,8 @@ class PendingActionStorage(BaseStorage):
                 raise ValueError("operation_mismatch")
             if str(item.get("target_hash") or "") != expected_hash:
                 raise ValueError("target_hash_mismatch")
+            if str(item.get("decision_fingerprint") or item.get("target_hash") or "") != decision.fingerprint:
+                raise ValueError("decision_fingerprint_mismatch")
             item = dict(item)
             item["status"] = "approved"
             item["updated_at"] = _iso(now)

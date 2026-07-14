@@ -287,7 +287,7 @@ def get_stopwords() -> Set[str]:
                 words = data
             else:
                 words = []
-            file_words = set(str(w).strip() for w in words if str(w).strip())
+            file_words = {str(w).strip() for w in words if str(w).strip()}
             _loaded = set(_DEFAULT_STOPWORDS) | file_words
             logger.debug("Loaded %d stopwords (%d from %s)", len(_loaded), len(file_words), _STOPWORDS_FILE)
             return _loaded

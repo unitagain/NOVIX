@@ -70,6 +70,8 @@ STRATEGY_AB_MIN_TRIALS_PER_SCENE = 2
 STRATEGY_AB_MIN_COMPARABLE_RATE = 0.90
 STRATEGY_AB_MIN_POSITION_CONSISTENCY = 0.95
 STRATEGY_AB_MIN_WIN_CI_LOWER = 0.55
+STRATEGY_AB_MAX_PAIR_LENGTH_DELTA = 0.25
+STRATEGY_AB_MIN_LENGTH_PARITY_RATE = 0.90
 STRATEGY_AB_BOOTSTRAP_SAMPLES = 10_000
 STRATEGY_TOKEN_MULTIPLIERS = {
     "full_stuffing": 1.0,
@@ -270,15 +272,66 @@ def _candidate_semantic_completeness(text: str, *, min_chars: int = 300) -> Dict
 
     value = str(text or "").strip()
     reasons = []
+    warnings = []
     if len(value) < max(1, int(min_chars)):
         reasons.append("candidate_too_short")
-    if any(value.count(opening) != value.count(closing) for opening, closing in (("“", "”"), ("「", "」"), ("『", "』"))):
-        reasons.append("unbalanced_quotes")
+    quote_pairs = (("“", "”"), ("「", "」"), ("『", "』"))
+    if any(value.count(opening) != value.count(closing) for opening, closing in quote_pairs):
+        final_paragraph = re.split(r"\n\s*\n", value)[-1]
+        if any(final_paragraph.count(opening) > final_paragraph.count(closing) for opening, closing in quote_pairs):
+            reasons.append("unbalanced_quotes")
+        else:
+            warnings.append("internal_quote_imbalance")
     if value and not re.search(r"[。！？!?；;…」』”’\"')）】》]$", value):
         reasons.append("non_terminal_ending")
     if re.search(r"(?:密码|如果|但是|可是|因为|所以|以及|然后|说道|问道)\s*$", value):
         reasons.append("dangling_clause")
-    return {"complete": not reasons, "reasons": reasons, "char_count": len(value)}
+    return {"complete": not reasons, "reasons": reasons, "warnings": warnings, "char_count": len(value)}
+
+
+def _project_candidate_to_complete_prefix(
+    text: str,
+    *,
+    max_chars: int = 1500,
+    min_chars: int = 300,
+) -> Dict[str, Any]:
+    """Bound candidate length at a sentence boundary without producing a truncated fragment."""
+
+    value = str(text or "").strip()
+    if len(value) <= max_chars:
+        return {
+            "text": value,
+            "applied": False,
+            "original_char_count": len(value),
+            "projected_char_count": len(value),
+            "max_chars": max_chars,
+            "boundary": "unchanged",
+        }
+    boundary_matches = list(re.finditer(r"[。！？!?；;…](?:[”’\"'）】》]+)?", value[:max_chars]))
+    eligible = [match.end() for match in boundary_matches if match.end() >= min_chars]
+    projected = ""
+    for boundary in reversed(eligible):
+        candidate = value[:boundary].rstrip()
+        if _candidate_semantic_completeness(candidate, min_chars=min_chars)["complete"]:
+            projected = candidate
+            break
+    if not projected:
+        return {
+            "text": value,
+            "applied": False,
+            "original_char_count": len(value),
+            "projected_char_count": len(value),
+            "max_chars": max_chars,
+            "boundary": "unavailable",
+        }
+    return {
+        "text": projected,
+        "applied": True,
+        "original_char_count": len(value),
+        "projected_char_count": len(projected),
+        "max_chars": max_chars,
+        "boundary": "sentence",
+    }
 
 
 def _join_wrapped_text(left: str, right: str) -> str:
@@ -470,6 +523,41 @@ class LongformBenchmarkHarness:
 
     def paths(self, benchmark_id: str) -> BenchmarkPaths:
         return BenchmarkPaths(self.root, str(benchmark_id))
+
+    # Public stage ports. Pipeline owners use these stable contracts instead of
+    # depending on the benchmark implementation's private helpers.
+    def normalize_generated(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return self._normalize_llm_generated(*args, **kwargs)
+
+    def select_run_queries(self, rows: List[Dict[str, Any]], *, limit: int) -> List[Dict[str, Any]]:
+        return self._select_run_queries(rows, limit=limit)
+
+    def resolve_retrieval_strategy(self, strategy: Any) -> Any:
+        return self._resolve_retrieval_strategy(strategy)
+
+    def create_strategy_engine(self, spec: Any) -> Any:
+        return self._create_strategy_engine(spec)
+
+    async def select_writer_strategy_context(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return await self._select_writer_strategy_context(*args, **kwargs)
+
+    async def score_pairwise_with_retries(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return await self._score_pairwise_with_retries(*args, **kwargs)
+
+    async def run_retrieval_stage(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return await self._run_retrieval(*args, **kwargs)
+
+    async def run_no_context_probe(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        return await self._run_no_context_probe(*args, **kwargs)
+
+    def strategy_ab_pair_fingerprint(self, first: Dict[str, Any], second: Dict[str, Any]) -> str:
+        return self._strategy_ab_pair_fingerprint(first, second)
+
+    def calibration_context_pairs(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return self._calibration_context_pairs(rows)
+
+    def calibration_pair_fingerprint(self, first: Dict[str, Any], second: Dict[str, Any]) -> str:
+        return self._calibration_pair_fingerprint(first, second)
 
     def _record_manifest_event(
         self,
@@ -2848,6 +2936,11 @@ class LongformBenchmarkHarness:
         usage_by_role: Dict[str, List[Dict[str, Any]]] = {"A": [], "B": []}
         generated_pairs = 0
         requests_attempted = 0
+        initial_candidate_responses = 0
+        initial_semantically_complete = 0
+        repair_requests_attempted = 0
+        repair_successes = 0
+        length_projections_applied = 0
 
         for brief in usable_scenes:
             chapter_id = str(brief.get("chapter_id") or "")
@@ -2943,6 +3036,7 @@ class LongformBenchmarkHarness:
                         include_context=True,
                         prompt_variant="retrieval_context",
                         include_fact_metadata=True,
+                        structured_output=False,
                     )
                     joined = "\n".join(message.get("content", "") for message in messages)
                     block_reason = _api_safety_block_reason(joined)
@@ -2968,7 +3062,6 @@ class LongformBenchmarkHarness:
                             provider=profile_id,
                             temperature=temperature,
                             max_tokens=max_tokens,
-                            response_format={"type": "json_object"},
                             extra_body=judge_extra_body(profile_id),
                         )
                     except Exception as exc:
@@ -2993,16 +3086,30 @@ class LongformBenchmarkHarness:
 
                     usage = response.get("usage") or {}
                     usage_by_role[role].append(usage)
+                    initial_candidate_responses += 1
                     raw = str(response.get("content") or "")
-                    parsed = self._normalize_calibration_candidate_response(raw)
+                    finish_reason = str(response.get("finish_reason") or "")
+                    if finish_reason == "length":
+                        failures.append(
+                            {
+                                "id": f"SAB-GEN-{_sha256_text(f'{pair_id}|{role}|writer_truncated')[:16]}",
+                                "pair_id": pair_id,
+                                "scene_id": scene_id,
+                                "chapter_id": chapter_id,
+                                "trial": trial,
+                                "strategy_role": role,
+                                "requested_strategy": selection["requested_strategy"],
+                                "reason": "writer_output_truncated",
+                                "finish_reason": finish_reason,
+                                "raw_response_sha256": _sha256_text(raw),
+                                "contains_corpus_text": False,
+                            }
+                        )
+                        continue
+                    parsed = self._normalize_strategy_candidate_response(raw)
                     candidate_text = str(parsed.get("candidate_text") or "")
                     if not candidate_text:
-                        finish_reason = str(response.get("finish_reason") or "")
-                        failure_reason = (
-                            "writer_output_truncated"
-                            if finish_reason == "length"
-                            else parsed.get("reason") or "invalid_candidate_response"
-                        )
+                        failure_reason = parsed.get("reason") or "invalid_candidate_response"
                         failures.append(
                             {
                                 "id": f"SAB-GEN-{_sha256_text(f'{pair_id}|{role}|invalid_response')[:16]}",
@@ -3022,25 +3129,124 @@ class LongformBenchmarkHarness:
                         )
                         continue
 
+                    length_projection = _project_candidate_to_complete_prefix(candidate_text)
+                    candidate_text = str(length_projection["text"])
+                    if length_projection["applied"]:
+                        length_projections_applied += 1
                     semantic_completeness = _candidate_semantic_completeness(candidate_text)
                     if not semantic_completeness["complete"]:
-                        failures.append(
-                            {
-                                "id": f"SAB-GEN-{_sha256_text(f'{pair_id}|{role}|semantic_incomplete')[:16]}",
-                                "pair_id": pair_id,
-                                "scene_id": scene_id,
-                                "chapter_id": chapter_id,
-                                "trial": trial,
-                                "strategy_role": role,
-                                "requested_strategy": selection["requested_strategy"],
-                                "reason": "candidate_semantically_incomplete",
-                                "quality_reasons": semantic_completeness["reasons"],
-                                "candidate_char_count": semantic_completeness["char_count"],
-                                "candidate_sha256": _sha256_text(candidate_text),
-                                "contains_corpus_text": False,
-                            }
+                        initial_response = response
+                        initial_candidate_text = candidate_text
+                        initial_semantic_completeness = semantic_completeness
+                        repair_messages = self._build_calibration_candidate_repair_messages(
+                            generation_messages=messages,
+                            candidate_text=initial_candidate_text,
+                            quality_reasons=semantic_completeness["reasons"],
                         )
-                        continue
+                        try:
+                            requests_attempted += 1
+                            repair_requests_attempted += 1
+                            repair_response = await gateway.chat(
+                                repair_messages,
+                                provider=profile_id,
+                                temperature=0.2,
+                                max_tokens=max_tokens,
+                                extra_body=judge_extra_body(profile_id),
+                            )
+                        except Exception as exc:
+                            if require_available:
+                                raise
+                            failures.append(
+                                {
+                                    "id": f"SAB-GEN-{_sha256_text(f'{pair_id}|{role}|repair_api_failure')[:16]}",
+                                    "pair_id": pair_id,
+                                    "scene_id": scene_id,
+                                    "chapter_id": chapter_id,
+                                    "trial": trial,
+                                    "strategy_role": role,
+                                    "requested_strategy": selection["requested_strategy"],
+                                    "reason": "candidate_repair_api_failure",
+                                    "initial_quality_reasons": initial_semantic_completeness["reasons"],
+                                    "initial_candidate_char_count": initial_semantic_completeness["char_count"],
+                                    "initial_candidate_sha256": _sha256_text(initial_candidate_text),
+                                    "error_code": safe_error_code(exc),
+                                    "failure_scope": benchmark_failure(exc)["failure_scope"],
+                                    "counts_toward_quality": False,
+                                    "contains_corpus_text": False,
+                                }
+                            )
+                            continue
+
+                        repair_usage = repair_response.get("usage") or {}
+                        usage_by_role[role].append(repair_usage)
+                        repair_raw = str(repair_response.get("content") or "")
+                        if str(repair_response.get("finish_reason") or "") == "length":
+                            repair_parsed = {
+                                "candidate_text": "",
+                                "self_check": {},
+                                "generation_quality": "truncated_suffix",
+                                "reason": "candidate_suffix_truncated",
+                                "parse_error": "",
+                            }
+                        else:
+                            repair_parsed = self._normalize_calibration_candidate_suffix_response(
+                                repair_raw,
+                                candidate_text=initial_candidate_text,
+                            )
+                        repaired_candidate_text = str(repair_parsed.get("candidate_text") or "")
+                        repaired_length_projection = _project_candidate_to_complete_prefix(repaired_candidate_text)
+                        repaired_candidate_text = str(repaired_length_projection["text"])
+                        repaired_semantic_completeness = _candidate_semantic_completeness(repaired_candidate_text)
+                        if not repaired_candidate_text or not repaired_semantic_completeness["complete"]:
+                            failures.append(
+                                {
+                                    "id": f"SAB-GEN-{_sha256_text(f'{pair_id}|{role}|repair_failed')[:16]}",
+                                    "pair_id": pair_id,
+                                    "scene_id": scene_id,
+                                    "chapter_id": chapter_id,
+                                    "trial": trial,
+                                    "strategy_role": role,
+                                    "requested_strategy": selection["requested_strategy"],
+                                    "reason": "candidate_repair_failed",
+                                    "initial_quality_reasons": initial_semantic_completeness["reasons"],
+                                    "initial_candidate_char_count": initial_semantic_completeness["char_count"],
+                                    "initial_candidate_sha256": _sha256_text(initial_candidate_text),
+                                    "repair_quality_reasons": repaired_semantic_completeness["reasons"],
+                                    "repair_candidate_char_count": repaired_semantic_completeness["char_count"],
+                                    "repair_candidate_sha256": _sha256_text(repaired_candidate_text),
+                                    "repair_finish_reason": str(repair_response.get("finish_reason") or ""),
+                                    "repair_generation_quality": repair_parsed.get("generation_quality"),
+                                    "repair_parse_error": repair_parsed.get("parse_error"),
+                                    "contains_corpus_text": False,
+                                }
+                            )
+                            continue
+
+                        repair_successes += 1
+                        if repaired_length_projection["applied"]:
+                            length_projections_applied += 1
+                        response = repair_response
+                        raw = repair_raw
+                        parsed = repair_parsed
+                        candidate_text = repaired_candidate_text
+                        semantic_completeness = repaired_semantic_completeness
+                        length_projection = repaired_length_projection
+                        generation_stage = "semantic_repair"
+                        generation_usage = _usage_breakdown([usage, repair_usage])
+                        generation_elapsed_ms = round(
+                            (
+                                float(initial_response.get("elapsed_time") or 0.0)
+                                + float(repair_response.get("elapsed_time") or 0.0)
+                            )
+                            * 1000.0,
+                            3,
+                        )
+                    else:
+                        initial_semantically_complete += 1
+                        initial_semantic_completeness = semantic_completeness
+                        generation_stage = "initial"
+                        generation_usage = usage
+                        generation_elapsed_ms = round(float(response.get("elapsed_time") or 0.0) * 1000.0, 3)
 
                     context_pack_stats = self._calibration_context_pack_stats(selected_facts)
                     resident_context = str(brief.get("resident_context") or "")
@@ -3075,6 +3281,8 @@ class LongformBenchmarkHarness:
                                 "temperature": temperature,
                                 "max_tokens": max_tokens,
                                 "provider_seed_requested": False,
+                                "semantic_repair_policy": "at_most_once",
+                                "semantic_repair_temperature": 0.2,
                             },
                             "scene_brief": str(brief.get("brief") or ""),
                             "prior_summary": str(brief.get("prior_summary") or ""),
@@ -3089,17 +3297,29 @@ class LongformBenchmarkHarness:
                             "candidate_char_count": len(candidate_text),
                             "candidate_storage_complete": True,
                             "candidate_semantically_complete": True,
+                            "candidate_generation_stage": generation_stage,
+                            "initial_semantic_completeness": initial_semantic_completeness,
+                            "candidate_length_projection": {
+                                key: value for key, value in length_projection.items() if key != "text"
+                            },
                             "reference_excerpt": str(brief.get("reference_continuation") or ""),
                             "self_check": parsed.get("self_check") if isinstance(parsed.get("self_check"), dict) else {},
                             "generation_quality": parsed.get("generation_quality"),
-                            "gateway_usage": usage,
-                            "generation_latency_ms": round(float(response.get("elapsed_time") or 0.0) * 1000.0, 3),
+                            "gateway_usage": generation_usage,
+                            "generation_latency_ms": generation_elapsed_ms,
                             "trace_ref": "strategy_output_ab",
                         }
                     )
+                    artifact_response = {
+                        **response,
+                        "usage": {
+                            **generation_usage,
+                            "requests": 2 if generation_stage == "semantic_repair" else 1,
+                        },
+                    }
                     row["candidate_artifact"] = self.pipeline.generation.artifact(
                         artifact_id=str(row.get("id") or ""),
-                        response=response,
+                        response=artifact_response,
                         content=candidate_text,
                     ).to_dict()
                     pair_rows.append(row)
@@ -3162,6 +3382,22 @@ class LongformBenchmarkHarness:
             "pair_ids": complete_pair_ids,
             "requests_attempted": requests_attempted,
             "failures": len(failures),
+            "initial_candidate_responses": initial_candidate_responses,
+            "initial_semantically_complete": initial_semantically_complete,
+            "initial_candidate_validity_rate": round(
+                initial_semantically_complete / initial_candidate_responses, 6
+            )
+            if initial_candidate_responses
+            else 0.0,
+            "repair_requests_attempted": repair_requests_attempted,
+            "repair_successes": repair_successes,
+            "repair_success_rate": round(repair_successes / repair_requests_attempted, 6)
+            if repair_requests_attempted
+            else 1.0,
+            "length_projections_applied": length_projections_applied,
+            "final_pair_validity_rate": round(generated_pairs / (len(usable_scenes) * trials), 6)
+            if usable_scenes
+            else 0.0,
             "append": bool(append),
             "current_total": len(current_candidates),
             "scene_ids": sorted(scene_filter),
@@ -3176,6 +3412,67 @@ class LongformBenchmarkHarness:
             "failure_archive_path": str(failure_archive_path) if failures else None,
         }
         self._record_manifest_event(paths, action="generate-strategy-ab", payload=summary)
+        return summary
+
+    def normalize_strategy_ab_candidates(
+        self,
+        *,
+        benchmark_id: str,
+        source_path: Optional[Path] = None,
+    ) -> Dict[str, Any]:
+        """Apply the current deterministic candidate projection to an existing generation artifact."""
+
+        paths = self.paths(benchmark_id)
+        current_path = paths.generated_dir / "strategy_ab_candidates.jsonl"
+        source = Path(source_path).resolve() if source_path else current_path.resolve()
+        generated_root = paths.generated_dir.resolve()
+        if source != generated_root and generated_root not in source.parents:
+            raise ValueError("strategy_ab_normalize_source_outside_generated_dir")
+        rows = read_jsonl(source)
+        if not rows:
+            raise ValueError("strategy_ab_candidates_missing")
+
+        archive_path = paths.generated_dir / f"strategy_ab_candidates_pre_normalize_{_timestamp_slug()}.jsonl"
+        write_jsonl(archive_path, rows)
+        normalized = []
+        projected = 0
+        invalid = 0
+        for row in rows:
+            candidate_text = str(row.get("candidate_text") or row.get("chapter_text") or "")
+            projection = _project_candidate_to_complete_prefix(candidate_text)
+            final_text = str(projection["text"])
+            completeness = _candidate_semantic_completeness(final_text)
+            projected += int(bool(projection["applied"]))
+            invalid += int(not completeness["complete"])
+            candidate_artifact = dict(row.get("candidate_artifact") or {})
+            if candidate_artifact:
+                candidate_artifact["content_fingerprint"] = _sha256_text(final_text)
+            normalized.append(
+                {
+                    **row,
+                    "candidate_text": final_text,
+                    "chapter_text": final_text,
+                    "candidate_char_count": len(final_text),
+                    "candidate_semantically_complete": bool(completeness["complete"]),
+                    "candidate_length_projection": {
+                        key: value for key, value in projection.items() if key != "text"
+                    },
+                    "candidate_artifact": candidate_artifact,
+                }
+            )
+        write_jsonl(current_path, normalized)
+        summary = {
+            "success": invalid == 0,
+            "benchmark_id": benchmark_id,
+            "candidate_count": len(normalized),
+            "pair_count": len({str(row.get("pair_id") or "") for row in normalized}),
+            "length_projections_applied": projected,
+            "invalid_candidates": invalid,
+            "path": str(current_path),
+            "archive_path": str(archive_path),
+            "source_path": str(source),
+        }
+        self._record_manifest_event(paths, action="normalize-strategy-ab", payload=summary)
         return summary
 
     def _create_strategy_engine(self, spec: RetrievalStrategySpec) -> ContextSelectEngine:
@@ -3648,6 +3945,107 @@ class LongformBenchmarkHarness:
         }
 
     @staticmethod
+    def _build_calibration_candidate_repair_messages(
+        *,
+        generation_messages: List[Dict[str, str]],
+        candidate_text: str,
+        quality_reasons: List[str],
+    ) -> List[Dict[str, str]]:
+        """Build one fresh suffix-completion request for structurally incomplete prose."""
+
+        original_request, _ = parse_json_payload(
+            str((generation_messages[-1] if generation_messages else {}).get("content") or ""),
+            expected_type=dict,
+        )
+        minimum_suffix_chars = max(40, 600 - len(str(candidate_text or "")))
+        repair_request = {
+            "task": "只续写缺失的结尾片段，使 candidate_text 成为可独立评测的完整中文小说场景。",
+            "detected_issues": [str(item) for item in quality_reasons if str(item)],
+            "original_request": original_request if isinstance(original_request, dict) else {},
+            "candidate_text": str(candidate_text or ""),
+            "minimum_suffix_chars": minimum_suffix_chars,
+            "constraints": [
+                "continuation_suffix 必须直接接在 candidate_text 之后，不得复述、改写或返回 candidate_text。",
+                "只解决未完成的对白、从句、动作和场景收尾，不得新增重大事实、人物或反转。",
+                "若 candidate_text 停在未闭合对白中，先自然完成对白并闭合中文引号。",
+                "合并后的正文至少 600 个中文字符，并以明确的句末标点结束。",
+                "只输出需要追加的正文后缀，不要 JSON、字段名、解释或 Markdown。",
+            ],
+        }
+        return [
+            {
+                "role": "system",
+                "content": "你是中文小说候选收尾器。只补写缺失后缀，不重写已有正文；只输出正文后缀。",
+            },
+            {"role": "user", "content": json.dumps(repair_request, ensure_ascii=False)},
+        ]
+
+    @staticmethod
+    def _normalize_calibration_candidate_suffix_response(raw: str, *, candidate_text: str) -> Dict[str, Any]:
+        text = str(raw or "").strip()
+        payload: Dict[str, Any] = {}
+        if _looks_like_json_payload(text):
+            parsed_payload, err = parse_json_payload(text, expected_type=dict)
+            if not isinstance(parsed_payload, dict) or err:
+                return {
+                    "candidate_text": "",
+                    "self_check": {},
+                    "generation_quality": "malformed_suffix_json",
+                    "reason": "malformed_candidate_suffix_json",
+                    "parse_error": err or "json_parse_failed",
+                }
+            payload = parsed_payload
+            suffix = str(payload.get("continuation_suffix") or "")
+            generation_quality = "json_suffix_compat"
+        else:
+            suffix = text
+            generation_quality = "direct_suffix"
+        if not suffix.strip():
+            return {
+                "candidate_text": "",
+                "self_check": payload.get("self_check") if isinstance(payload.get("self_check"), dict) else {},
+                "generation_quality": "missing_candidate_suffix",
+                "reason": "missing_candidate_suffix",
+                "parse_error": "",
+            }
+        return {
+            "candidate_text": f"{str(candidate_text or '')}{suffix}",
+            "self_check": payload.get("self_check") if isinstance(payload.get("self_check"), dict) else {},
+            "generation_quality": generation_quality,
+            "reason": "",
+            "parse_error": "",
+        }
+
+    @staticmethod
+    def _normalize_strategy_candidate_response(raw: str) -> Dict[str, Any]:
+        text = str(raw or "").strip()
+        if not text:
+            return {
+                "candidate_text": "",
+                "self_check": {},
+                "generation_quality": "empty",
+                "reason": "empty_candidate",
+                "parse_error": "empty_response",
+            }
+        if _looks_like_json_payload(text):
+            return LongformBenchmarkHarness._normalize_calibration_candidate_response(text)
+        if text.startswith("```") or text.endswith("```"):
+            return {
+                "candidate_text": "",
+                "self_check": {},
+                "generation_quality": "markdown_wrapped",
+                "reason": "non_prose_candidate_response",
+                "parse_error": "",
+            }
+        return {
+            "candidate_text": text,
+            "self_check": {},
+            "generation_quality": "direct_text",
+            "reason": "",
+            "parse_error": "",
+        }
+
+    @staticmethod
     def _build_calibration_writer_messages(
         *,
         brief: Dict[str, Any],
@@ -3656,12 +4054,11 @@ class LongformBenchmarkHarness:
         include_context: Optional[bool] = None,
         prompt_variant: Optional[str] = None,
         include_fact_metadata: bool = True,
+        structured_output: bool = True,
     ) -> List[Dict[str, str]]:
         full_context = variant == "full_context" if include_context is None else bool(include_context)
-        system = (
-            "你是长篇中文小说续写候选生成器。只写可用于质量评测的正文候选。"
-            "必须输出严格 JSON，不要解释。"
-        )
+        system = "你是长篇中文小说续写候选生成器。只写可用于质量评测的正文候选。"
+        system += "必须输出严格 JSON，不要解释。" if structured_output else "只输出小说正文，不要 JSON、解释或 Markdown。"
         constraints = [
             "优先承接 prior_summary 中已经出现的人物、地点、动作和叙述节奏。",
             "resident_context 只包含当前 scene 之前已经发生的近邻正文；用于消解指代和确认当前状态，不得复写。",
@@ -3669,6 +4066,9 @@ class LongformBenchmarkHarness:
             "保持人物状态、时间线和叙述风格一致。",
             "不要总结任务，不要写评语，只输出正文候选。",
             "不要引入未给出的重大事实反转。",
+            "正文至少 600 个中文字符，使用 5-8 个完整段落；不要因 JSON 输出而压缩正文。",
+            "所有中文对话引号必须成对闭合，不得停在对白、从句或未完成动作中。",
+            "最后一段必须完成当前动作或情绪节拍，并以明确的句末标点结束。",
         ]
         if include_fact_metadata:
             constraints[3:3] = [
@@ -3679,7 +4079,7 @@ class LongformBenchmarkHarness:
                 "subject_entities 标明事实所属人物；禁止把一个人物的经历、关系、身份或动作转移给另一个人物。",
             ]
         user = {
-            "task": "根据给定前文和场景目标续写一段 450-700 字中文小说正文。",
+            "task": "根据给定前文和场景目标续写一个 600-900 字的完整中文小说场景。",
             "variant": prompt_variant or variant,
             "scene_brief": str(brief.get("brief") or ""),
             "prior_summary": str(brief.get("prior_summary") or "") if full_context else _shorten(str(brief.get("prior_summary") or ""), 120),
@@ -3709,14 +4109,15 @@ class LongformBenchmarkHarness:
             if full_context
             else [],
             "constraints": constraints,
-            "required_json_schema": {
-                "candidate_text": "string，450-700 字中文小说正文",
+        }
+        if structured_output:
+            user["required_json_schema"] = {
+                "candidate_text": "string，600-900 字完整中文小说正文",
                 "self_check": {
                     "used_context": ["引用了哪些给定事实或前文信息"],
                     "risk_notes": ["可能不确定或薄弱的地方"],
                 },
-            },
-        }
+            }
         if not full_context:
             user["constraints"].append("上下文有意不足；仍尽量写出自洽续写。")
         return [{"role": "system", "content": system}, {"role": "user", "content": json.dumps(user, ensure_ascii=False)}]
@@ -5613,6 +6014,18 @@ class LongformBenchmarkHarness:
         )
         candidate_validity_rate = candidate_complete_pairs / len(pairs) if pairs else 0.0
         candidate_validity_ready = candidate_validity_rate >= 0.95
+        pair_length_deltas = []
+        for pair in pairs:
+            length_a = len(str(pair["a"].get("candidate_text") or pair["a"].get("chapter_text") or ""))
+            length_b = len(str(pair["b"].get("candidate_text") or pair["b"].get("chapter_text") or ""))
+            denominator = max(1.0, (length_a + length_b) / 2.0)
+            pair_length_deltas.append(abs(length_a - length_b) / denominator)
+        length_parity_rate = (
+            sum(delta <= STRATEGY_AB_MAX_PAIR_LENGTH_DELTA for delta in pair_length_deltas) / len(pair_length_deltas)
+            if pair_length_deltas
+            else 0.0
+        )
+        length_parity_ready = length_parity_rate >= STRATEGY_AB_MIN_LENGTH_PARITY_RATE
         quality_gate = bool(
             sample_size_ready
             and scene_diversity_ready
@@ -5621,6 +6034,7 @@ class LongformBenchmarkHarness:
             and position_consistency >= STRATEGY_AB_MIN_POSITION_CONSISTENCY
             and confidence_interval.get("lower", 0.0) > STRATEGY_AB_MIN_WIN_CI_LOWER
             and candidate_validity_ready
+            and length_parity_ready
         )
         corpus_gate_passed = bool(
             quality_gate
@@ -5643,6 +6057,7 @@ class LongformBenchmarkHarness:
             "position_consistency_ready": position_consistency >= STRATEGY_AB_MIN_POSITION_CONSISTENCY,
             "win_ci_ready": confidence_interval.get("lower", 0.0) > STRATEGY_AB_MIN_WIN_CI_LOWER,
             "candidate_validity_ready": candidate_validity_ready,
+            "candidate_length_parity_ready": length_parity_ready,
             "strategy_fidelity": strategy_fidelity,
             "distinct_execution": distinct_execution,
             "distinct_context": distinct_context,
@@ -5659,6 +6074,8 @@ class LongformBenchmarkHarness:
             if corpus_gate_passed
             else "fix_candidate_generation_quality"
             if not candidate_validity_ready
+            else "fix_candidate_length_control"
+            if not length_parity_ready
             else "expand_output_ab_sample"
             if not sample_size_ready or not scene_diversity_ready or not repeated_trials_ready
             else "investigate_output_ab_failures"
@@ -5702,6 +6119,8 @@ class LongformBenchmarkHarness:
             "sample_size_ready": sample_size_ready,
             "candidate_complete_pairs": candidate_complete_pairs,
             "candidate_validity_rate": candidate_validity_rate,
+            "candidate_length_delta": _numeric_distribution(pair_length_deltas),
+            "candidate_length_parity_rate": length_parity_rate,
             "quality_gate_passed": quality_gate,
             "judge_human_agreement": judge_human_agreement,
             "corpus_gate_passed": corpus_gate_passed,
@@ -5968,6 +6387,9 @@ class LongformBenchmarkHarness:
             float((row.get("context_pack_stats") or {}).get("total_token_estimate") or 0) for row in rows
         ]
         fact_counts = [float((row.get("context_pack_stats") or {}).get("fact_count") or 0) for row in rows]
+        candidate_chars = [
+            float(len(str(row.get("candidate_text") or row.get("chapter_text") or ""))) for row in rows
+        ]
         strategy = str(rows[0].get("retrieval_strategy") or "") if rows else ""
         return {
             "strategy": strategy,
@@ -5981,6 +6403,7 @@ class LongformBenchmarkHarness:
             "end_to_end_latency_ms": _numeric_distribution(end_to_end_latency),
             "context_token_estimate": _numeric_distribution(context_tokens),
             "fact_count": _numeric_distribution(fact_counts),
+            "candidate_chars": _numeric_distribution(candidate_chars),
         }
 
     @staticmethod

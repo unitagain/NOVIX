@@ -48,6 +48,8 @@ class WorkerTaskService:
         budget: Dict[str, Any] | None = None,
         output_schema: Dict[str, Any] | None = None,
         merge_policy: str = MergePolicy.NO_MERGE.value,
+        parent_restrictions: Dict[str, Any] | None = None,
+        trust_context: Dict[str, Any] | None = None,
     ) -> AgentTask:
         """Create and run a worker task from API/service inputs."""
 
@@ -56,6 +58,8 @@ class WorkerTaskService:
             kind=str(kind),
             input={"project_id": project_id, **(input or {})},
             permissions=permissions or [],
+            parent_restrictions=parent_restrictions or {},
+            trust_context=trust_context or {},
             budget=budget or {},
             output_schema=output_schema or {},
             merge_policy=merge_policy,

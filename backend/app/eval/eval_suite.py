@@ -173,6 +173,10 @@ async def run_memory_governance_eval() -> Dict[str, Any]:
             source="writer",
             confidence=0.95,
             source_type="internal",
+            source_refs=["feedback:event-1"],
+            deterministic_source=True,
+            reversible=True,
+            impact="low",
         )
         external_slug = await storage.write_candidate_memory(
             "eval",
@@ -215,7 +219,9 @@ async def run_memory_governance_eval() -> Dict[str, Any]:
             [
                 {
                     "id": "auto-active-low-impact",
-                    "passed": auto_item and auto_item.get("status") == "active",
+                    "passed": auto_item
+                    and auto_item.get("status") == "active"
+                    and auto_item.get("activation") == "auto_active_verified",
                     "status": (auto_item or {}).get("status"),
                     "failure": "high confidence internal low-impact memory was not auto-active",
                 },
@@ -354,6 +360,10 @@ async def run_security_eval() -> Dict[str, Any]:
             source="writer",
             confidence=0.95,
             source_type="internal",
+            source_refs=["feedback:event-2"],
+            deterministic_source=True,
+            reversible=True,
+            impact="low",
         )
         external_memory = await memory.read_memory("eval", external_memory_slug)
         internal_memory = await memory.read_memory("eval", internal_memory_slug)

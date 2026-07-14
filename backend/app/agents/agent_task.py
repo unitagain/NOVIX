@@ -7,16 +7,19 @@ P4 isolated worker contract.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, cast
 
+from app.agents.runtime_result import AgentRunResult, worker_agent_run_result
 from app.context_engine.trace_collector import trace_collector
-from app.error_contract import safe_error_code
+from app.context_engine.turn_scope import current_turn_scope
+from app.error_contract import DomainError, error_envelope, safe_error_code
 from app.context_engine.tool_registry import tool_loadout_for_route, tool_loadout_summary
-from app.utils.permissions import permission_for
+from app.utils.permissions import decide_permission
 from app.utils.trust import detect_prompt_injection, label_untrusted_context, wrap_untrusted_content
 
 
@@ -38,6 +41,7 @@ class AgentTaskStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class MergePolicy(str, Enum):
@@ -59,6 +63,8 @@ class AgentTask:
     kind: str
     input: Dict[str, Any] = field(default_factory=dict)
     permissions: List[str] = field(default_factory=list)
+    parent_restrictions: Dict[str, Any] = field(default_factory=dict)
+    trust_context: Dict[str, Any] = field(default_factory=dict)
     budget: Dict[str, Any] = field(default_factory=dict)
     output_schema: Dict[str, Any] = field(default_factory=dict)
     trace_ref: Optional[str] = None
@@ -68,11 +74,13 @@ class AgentTask:
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "id": self.id,
             "kind": self.kind,
             "input": dict(self.input or {}),
             "permissions": list(self.permissions or []),
+            "parent_restrictions": dict(self.parent_restrictions or {}),
+            "trust_context": dict(self.trust_context or {}),
             "budget": dict(self.budget or {}),
             "output_schema": dict(self.output_schema or {}),
             "trace_ref": self.trace_ref,
@@ -81,6 +89,25 @@ class AgentTask:
             "output": self.output,
             "error": self.error,
         }
+        if self.status in {
+            AgentTaskStatus.COMPLETED.value,
+            AgentTaskStatus.FAILED.value,
+            AgentTaskStatus.CANCELLED.value,
+        }:
+            payload["agent_run_result"] = self.to_agent_run_result().to_dict()
+        return payload
+
+    def to_agent_run_result(self) -> AgentRunResult:
+        error = None
+        if self.error:
+            error = error_envelope(DomainError(code=self.error), trace_id=str(self.trace_ref or "")).to_dict()
+        metrics = dict((self.output or {}).get("metrics") or {})
+        return worker_agent_run_result(
+            status=self.status,
+            output=self.output,
+            error=error,
+            elapsed_ms=int(metrics.get("duration_ms") or 0),
+        )
 
 
 class AgentTaskRunner:
@@ -102,9 +129,10 @@ class AgentTaskRunner:
     async def run(self, task: AgentTask) -> AgentTask:
         """Execute one worker task. Exceptions are captured on the task."""
         started = time.time()
+        scope = current_turn_scope()
         task.status = AgentTaskStatus.RUNNING.value
         task.error = None
-        permission_rows = self._permission_rows(task.permissions)
+        permission_rows = self._permission_rows(task)
         denied = [row for row in permission_rows if row["level"] == "deny"]
         budget_check = self._check_input_budget(task)
         await self._record(task, phase="start", permissions=permission_rows, metrics=budget_check)
@@ -134,14 +162,25 @@ class AgentTaskRunner:
             return task
 
         try:
+            if scope is not None:
+                scope.ensure_active()
             result = handler(task)
-            if asyncio.iscoroutine(result):
+            if inspect.isawaitable(result):
+                awaited = cast(Awaitable[Dict[str, Any]], result)
                 timeout_ms = int((task.budget or {}).get("timeout_ms") or 0)
-                if timeout_ms > 0:
-                    result = await asyncio.wait_for(result, timeout=timeout_ms / 1000)
+                if scope is not None and scope.runtime is not None:
+                    result = await scope.runtime.wait_for(
+                        awaited,
+                        timeout_seconds=timeout_ms / 1000 if timeout_ms > 0 else None,
+                    )
+                elif timeout_ms > 0:
+                    result = await asyncio.wait_for(awaited, timeout=timeout_ms / 1000)
                 else:
-                    result = await result
-            task.output = dict(result or {})
+                    result = await awaited
+            resolved_result = cast(Dict[str, Any], result)
+            if scope is not None:
+                scope.ensure_active()
+            task.output = dict(resolved_result or {})
             task.output.setdefault("permission_requests", permission_rows)
             task.output.setdefault("merge_policy", task.merge_policy)
             output_check = self._check_output_budget(task)
@@ -154,12 +193,27 @@ class AgentTaskRunner:
                 task.output.setdefault("metrics", self._metrics(task, started))
         except asyncio.TimeoutError:
             task.status = AgentTaskStatus.FAILED.value
-            task.error = "budget_timeout"
+            task.error = (
+                "turn_deadline_exceeded"
+                if scope is not None and scope.runtime is not None and scope.runtime.remaining_seconds <= 0
+                else "budget_timeout"
+            )
+            task.output = {"permission_requests": permission_rows}
+        except RuntimeError as exc:
+            if str(exc) == "turn_cancelled":
+                task.status = AgentTaskStatus.CANCELLED.value
+                task.error = "turn_cancelled"
+            else:
+                task.status = AgentTaskStatus.FAILED.value
+                task.error = safe_error_code(exc)
             task.output = {"permission_requests": permission_rows}
         except Exception as exc:
             task.status = AgentTaskStatus.FAILED.value
             task.error = safe_error_code(exc)
             task.output = {"permission_requests": permission_rows}
+        if task.output is None:
+            task.output = {"permission_requests": permission_rows}
+        task.output.setdefault("metrics", self._metrics(task, started))
         await self._record(task, phase="end", permissions=permission_rows, metrics=self._metrics(task, started))
         return task
 
@@ -191,8 +245,23 @@ class AgentTaskRunner:
             return
 
     @staticmethod
-    def _permission_rows(operations: List[str]) -> List[Dict[str, str]]:
-        return [{"operation": str(op), "level": permission_for(str(op))} for op in (operations or [])]
+    def _permission_rows(task: AgentTask) -> List[Dict[str, str]]:
+        return [
+            {
+                "operation": str(operation),
+                "level": decide_permission(
+                    str(operation),
+                    resource_scope={"task_id": task.id, "kind": task.kind},
+                    payload=task.input,
+                    trust_context=task.trust_context,
+                    parent_restrictions=task.parent_restrictions,
+                    # AgentTask handlers produce isolated artifacts; they do not consume
+                    # approval or execute the downstream side effect themselves.
+                    actor="worker_proposal",
+                ).level.value,
+            }
+            for operation in (task.permissions or [])
+        ]
 
     @staticmethod
     def _json_len(value: Any) -> int:

@@ -26,6 +26,7 @@ from app.prompts import (
 from app.schemas.canon import Fact, TimelineEvent, CharacterState
 from app.schemas.draft import ChapterSummary
 from app.schemas.volume import VolumeSummary
+from app.context_engine.turn_scope import register_current_provider_payload
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -139,7 +140,7 @@ class SummaryMixin:
 
         # ② 贵 LLM 评审（仅按需），喂入有界 canon 事实 + 确定性报警
         try:
-            facts = await self.canon_storage.get_all_facts(project_id)
+            facts = await self.canon_storage.get_eligible_facts(project_id)
         except Exception:
             facts = []
         fact_lines = [
@@ -165,8 +166,10 @@ class SummaryMixin:
             from app.agents.intent import _extract_json
 
             provider = self.gateway.get_provider_for_agent(self.get_agent_name())
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            register_current_provider_payload(messages, owner="archivist.consistency_review")
             resp = await self.gateway.chat(
-                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                messages,
                 provider=provider,
                 temperature=0.2,
                 response_format={"type": "json_object"},

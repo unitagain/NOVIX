@@ -32,9 +32,12 @@ from app.config import get_config
 from app.context_engine.memory_record import (
     MEMORY_STATUSES_V2,
     MemoryRecordV2,
+    build_memory_graph,
     encode_string_list,
-    memory_transition_allowed,
-    parse_datetime,
+    normalize_confidence,
+    normalize_memory_status,
+    normalize_trust_label,
+    parse_bool,
     parse_string_list,
     parse_version_refs,
 )
@@ -68,11 +71,7 @@ def _utc_now() -> str:
 
 
 def _clamp_confidence(value: Any, default: float = 1.0) -> float:
-    try:
-        score = float(value)
-    except (TypeError, ValueError):
-        score = default
-    return max(0.0, min(1.0, score))
+    return normalize_confidence(value, default=default)
 
 
 def _bigrams(s: str) -> set:
@@ -110,13 +109,16 @@ def _parse_memory(text: str) -> Dict[str, Any]:
         "type": "preference",
         "scope": "project",
         "source": "legacy",
-        "confidence": 1.0,
-        "status": "active",
+        "confidence": 0.0,
+        "status": "needs_review",
         "updated_at": "",
         "expires_at": "",
-        "source_type": "internal",
-        "trust_label": "trusted",
+        "source_type": "unknown",
+        "trust_label": "unknown",
         "activation": "legacy",
+        "deterministic_source": False,
+        "reversible": False,
+        "impact": "unknown",
         "schema_version": 1,
         "id": "",
         "source_refs": [],
@@ -154,6 +156,9 @@ def _parse_memory(text: str) -> Dict[str, Any]:
                         "source_type",
                         "trust_label",
                         "activation",
+                        "deterministic_source",
+                        "reversible",
+                        "impact",
                         "schema_version",
                         "id",
                         "source_refs",
@@ -171,8 +176,11 @@ def _parse_memory(text: str) -> Dict[str, Any]:
                         meta[key] = value.strip()
             meta["type"] = meta["type"] if meta["type"] in MEMORY_TYPES else "preference"
             meta["scope"] = meta["scope"] if meta["scope"] in MEMORY_SCOPES else "project"
-            meta["status"] = meta["status"] if meta["status"] in MEMORY_STATUSES else "active"
-            meta["confidence"] = _clamp_confidence(meta.get("confidence"), default=1.0)
+            meta["status"] = normalize_memory_status(meta.get("status"))
+            meta["trust_label"] = normalize_trust_label(meta.get("trust_label"))
+            meta["confidence"] = _clamp_confidence(meta.get("confidence"), default=0.0)
+            meta["deterministic_source"] = parse_bool(meta.get("deterministic_source"))
+            meta["reversible"] = parse_bool(meta.get("reversible"))
             for key in ("source_refs", "evidence_refs", "supersedes", "conflicts_with"):
                 meta[key] = parse_string_list(meta.get(key))
             meta["version_refs"] = parse_version_refs(meta.get("version_refs"))
@@ -227,16 +235,69 @@ class CreativeMemoryStorage(BaseStorage):
         last_recalled_at: Optional[str] = None,
         version_refs: Optional[List[Dict[str, Any]]] = None,
         enforce_trust_policy: bool = True,
+        deterministic_source: bool = False,
+        reversible: bool = False,
+        impact: str = "unknown",
+        _lifecycle_override: bool = False,
     ) -> str:
         """写入（覆盖）一条记忆并重建索引；返回规范化后的 slug（Upsert 语义）。"""
         safe = _safe_slug(slug)
         mem_type = mem_type if mem_type in MEMORY_TYPES else "preference"
         scope = scope if scope in MEMORY_SCOPES else "project"
-        trust = trust_metadata(source=source, source_type=source_type, trust_label=trust_label)
-        status = status if status in MEMORY_STATUSES else "active"
-        if enforce_trust_policy and trust["trust_label"] == "untrusted" and status == "active":
-            status = "needs_review"
-        confidence = _clamp_confidence(confidence, default=1.0)
+        resolved_source = str(source or "manual")
+        trust = trust_metadata(source=resolved_source, source_type=source_type, trust_label=trust_label)
+        explicit_trust = normalize_trust_label(trust_label)
+        if _lifecycle_override and explicit_trust == "trusted":
+            trust["trust_label"] = "trusted"
+            trust["source_type"] = str(source_type or trust["source_type"])
+        elif explicit_trust == "unknown" and trust_label is not None:
+            trust["trust_label"] = "unknown"
+            trust["source_type"] = str(source_type or "unknown")
+        elif resolved_source.lower() in {"legacy", "unknown"} and not trust_label:
+            trust["trust_label"] = "unknown"
+            trust["source_type"] = str(source_type or "unknown")
+        status = normalize_memory_status(status)
+        confidence = _clamp_confidence(confidence, default=0.0)
+        source_ref_list = parse_string_list(source_refs)
+        evidence_ref_list = parse_string_list(evidence_refs)
+        supersede_list = parse_string_list(supersedes)
+        conflict_list = parse_string_list(conflicts_with)
+        confirmed_actor = str(confirmed_by or "").strip()
+        confidence_kind = str(confidence_method or "declared").strip().lower()
+        activation_kind = str(activation or "manual").strip().lower()
+        if enforce_trust_policy and not _lifecycle_override and status == "active":
+            if trust["trust_label"] != "trusted":
+                status = "needs_review"
+            elif confidence_kind == "model_declared" and activation_kind != "auto_active_verified" and not confirmed_actor:
+                status = "needs_review"
+            elif str(created_by or "").strip().lower() == "legacy" and not confirmed_actor:
+                status = "needs_review"
+        existing_headers = await self.list_headers(project_id, statuses=["*"])
+        existing_header = next(
+            (item for item in existing_headers if str(item.get("id") or item.get("slug")) == safe),
+            None,
+        )
+        if existing_header is not None and not _lifecycle_override:
+            if normalize_memory_status(existing_header.get("status")) != status:
+                raise ValueError("memory_lifecycle_service_required:status")
+            if parse_string_list(existing_header.get("supersedes")) != supersede_list:
+                raise ValueError("memory_lifecycle_service_required:supersedes")
+            if parse_string_list(existing_header.get("conflicts_with")) != conflict_list:
+                raise ValueError("memory_lifecycle_service_required:conflicts_with")
+        candidate = {
+            "id": safe,
+            "slug": safe,
+            "status": status,
+            "supersedes": supersede_list,
+            "conflicts_with": conflict_list,
+        }
+        graph = build_memory_graph(
+            [item for item in existing_headers if str(item.get("id") or item.get("slug")) != safe] + [candidate]
+        )
+        candidate_errors = [item for item in graph.errors if item.get("id") == safe]
+        if safe in graph.invalid_ids:
+            first = candidate_errors[0] if candidate_errors else graph.errors[0]
+            raise ValueError(f"memory_{first.get('relation')}_{first.get('reason')}:{first.get('ref') or safe}")
         timestamp = _one_line(updated_at or _utc_now())
         content = (
             "---\n"
@@ -246,17 +307,17 @@ class CreativeMemoryStorage(BaseStorage):
             f"description: {_one_line(description)}\n"
             f"type: {mem_type}\n"
             f"scope: {scope}\n"
-            f"source: {_one_line(source or 'manual')}\n"
+            f"source: {_one_line(resolved_source)}\n"
             f"confidence: {confidence:.3f}\n"
             f"status: {status}\n"
-            f"source_refs: {encode_string_list(source_refs or [])}\n"
-            f"evidence_refs: {encode_string_list(evidence_refs or [])}\n"
+            f"source_refs: {encode_string_list(source_ref_list)}\n"
+            f"evidence_refs: {encode_string_list(evidence_ref_list)}\n"
             f"confidence_method: {_one_line(confidence_method or 'declared')}\n"
             f"valid_from: {_one_line(valid_from or '')}\n"
-            f"supersedes: {encode_string_list(supersedes or [])}\n"
-            f"conflicts_with: {encode_string_list(conflicts_with or [])}\n"
+            f"supersedes: {encode_string_list(supersede_list)}\n"
+            f"conflicts_with: {encode_string_list(conflict_list)}\n"
             f"created_by: {_one_line(created_by or 'user')}\n"
-            f"confirmed_by: {_one_line(confirmed_by or '')}\n"
+            f"confirmed_by: {_one_line(confirmed_actor)}\n"
             f"created_at: {_one_line(created_at or timestamp)}\n"
             f"updated_at: {timestamp}\n"
             f"last_recalled_at: {_one_line(last_recalled_at or '')}\n"
@@ -264,7 +325,10 @@ class CreativeMemoryStorage(BaseStorage):
             f"expires_at: {_one_line(expires_at or '')}\n"
             f"source_type: {_one_line(trust['source_type'])}\n"
             f"trust_label: {_one_line(trust['trust_label'])}\n"
-            f"activation: {_one_line(activation or 'manual')}\n"
+            f"activation: {_one_line(activation_kind)}\n"
+            f"deterministic_source: {str(bool(deterministic_source)).lower()}\n"
+            f"reversible: {str(bool(reversible)).lower()}\n"
+            f"impact: {_one_line(impact or 'unknown')}\n"
             "---\n"
             f"{str(body or '').strip()}\n"
         )
@@ -290,9 +354,14 @@ class CreativeMemoryStorage(BaseStorage):
         source_type: Optional[str] = None,
         trust_label: Optional[str] = None,
         source_refs: Optional[List[str]] = None,
+        evidence_refs: Optional[List[str]] = None,
+        conflicts_with: Optional[List[str]] = None,
+        deterministic_source: bool = False,
+        reversible: bool = False,
+        impact: str = "unknown",
         version_refs: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
-        """写入 AI 推断记忆；低风险高置信可直接激活，其余待审。"""
+        """写入 AI 推断记忆；仅可验证、可逆、低影响且有 provenance 的记录可自动激活。"""
         status, activation = self._activation_decision(
             mem_type=mem_type,
             scope=scope,
@@ -300,6 +369,13 @@ class CreativeMemoryStorage(BaseStorage):
             source_type=source_type,
             trust_label=trust_label,
             confidence=confidence,
+            source_refs=source_refs,
+            evidence_refs=evidence_refs,
+            conflicts_with=conflicts_with,
+            confidence_method="model_declared",
+            deterministic_source=deterministic_source,
+            reversible=reversible,
+            impact=impact,
         )
         return await self.write_memory(
             project_id,
@@ -315,9 +391,14 @@ class CreativeMemoryStorage(BaseStorage):
             trust_label=trust_label,
             activation=activation,
             source_refs=source_refs if source_refs is not None else ([source] if source else []),
+            evidence_refs=evidence_refs,
             version_refs=version_refs,
             confidence_method="model_declared",
             created_by="archivist",
+            conflicts_with=conflicts_with,
+            deterministic_source=deterministic_source,
+            reversible=reversible,
+            impact=impact,
         )
 
     async def read_memory(self, project_id: str, slug: str) -> Optional[Dict[str, Any]]:
@@ -348,7 +429,7 @@ class CreativeMemoryStorage(BaseStorage):
             allowed_statuses = set(MEMORY_STATUSES)
         else:
             allowed_statuses = {s for s in statuses if s in MEMORY_STATUSES}
-        out: List[Dict[str, str]] = []
+        out: List[Dict[str, Any]] = []
         for path in sorted(directory.glob("*.md")):
             if path.name == _INDEX_NAME:
                 continue
@@ -357,7 +438,7 @@ class CreativeMemoryStorage(BaseStorage):
             except (OSError, UnicodeError):
                 continue
             meta = _parse_memory(text)
-            if meta.get("status", "active") not in allowed_statuses:
+            if meta.get("status", "needs_review") not in allowed_statuses:
                 continue
             out.append(
                 {
@@ -367,12 +448,15 @@ class CreativeMemoryStorage(BaseStorage):
                     "scope": meta.get("scope", "project"),
                     "source": meta.get("source", "legacy"),
                     "confidence": meta.get("confidence", 1.0),
-                    "status": meta.get("status", "active"),
+                    "status": meta.get("status", "needs_review"),
                     "updated_at": meta.get("updated_at", ""),
                     "expires_at": meta.get("expires_at", ""),
                     "source_type": meta.get("source_type", "internal"),
                     "trust_label": meta.get("trust_label", "trusted"),
                     "activation": meta.get("activation", "legacy"),
+                    "deterministic_source": bool(meta.get("deterministic_source")),
+                    "reversible": bool(meta.get("reversible")),
+                    "impact": meta.get("impact", "unknown"),
                     "schema_version": meta.get("schema_version", 1),
                     "id": meta.get("id") or path.stem,
                     "source_refs": parse_string_list(meta.get("source_refs")),
@@ -411,22 +495,10 @@ class CreativeMemoryStorage(BaseStorage):
     ) -> List[Dict[str, Any]]:
         """Recall valid, trusted and conflict-free memories with explainable ranking."""
         top_k = max(1, int(top_k or 1))
-        await self.expire_due_memories(project_id)
         headers = await self.list_headers(project_id, statuses=["*"])
         if not headers:
             return []
-        active_ids = {str(item.get("id") or item.get("slug")) for item in headers if item.get("status") == "active"}
-        conflict_participants = set()
-        superseded_ids = set()
-        for item in headers:
-            if item.get("status") != "active":
-                continue
-            item_id = str(item.get("id") or item.get("slug"))
-            active_conflicts = set(parse_string_list(item.get("conflicts_with"))).intersection(active_ids)
-            if active_conflicts:
-                conflict_participants.add(item_id)
-                conflict_participants.update(active_conflicts)
-            superseded_ids.update(parse_string_list(item.get("supersedes")))
+        graph = build_memory_graph(headers)
         allowed_scopes = set(scopes or MEMORY_SCOPES)
         scored = []
         for header in headers:
@@ -435,7 +507,11 @@ class CreativeMemoryStorage(BaseStorage):
                 continue
             if as_of and record.scope == "chapter" and record.valid_from and str(record.valid_from) > str(as_of):
                 continue
-            if record.recall_block_reasons(()) or record.id in conflict_participants or record.id in superseded_ids:
+            if record.recall_block_reasons(
+                graph.conflict_participants,
+                superseded_ids=graph.superseded_ids,
+                invalid_ids=graph.invalid_ids,
+            ):
                 continue
             lexical = _recall_score(query, header["name"], header["description"])
             if lexical <= 0:
@@ -458,16 +534,13 @@ class CreativeMemoryStorage(BaseStorage):
         return out
 
     async def expire_due_memories(self, project_id: str) -> List[str]:
-        """Persist deterministic expiration transitions before active recall."""
-        headers = await self.list_headers(project_id, statuses=["active"])
-        expired = [item["slug"] for item in headers if parse_datetime(item.get("expires_at")) and MemoryRecordV2.from_mapping(item).is_expired()]
-        for slug in expired:
-            await self.set_memory_status(project_id, slug, "expired")
-        return expired
+        """Compatibility entry point delegated to the lifecycle owner."""
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).expire_due(project_id)
 
     async def read_index(self, project_id: str) -> str:
         """读取 MEMORY.md 索引文本（常驻上下文用）；不存在返回空串。"""
-        await self.expire_due_memories(project_id)
         path = self._index_path(project_id)
         if self._index_is_stale(project_id):
             await self._rebuild_index(project_id)
@@ -477,6 +550,64 @@ class CreativeMemoryStorage(BaseStorage):
             return await self.read_text(path)
         except Exception:
             return ""
+
+    async def migrate_legacy_records(self, project_id: str) -> int:
+        """Compatibility entry point delegated to the lifecycle owner."""
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).migrate_legacy(project_id)
+
+    async def _migrate_legacy_records(self, project_id: str) -> int:
+        """Persist conservative schema-v2 normalization; repeated runs are no-ops."""
+        directory = self._memory_dir(project_id)
+        if not directory.exists():
+            return 0
+        migrated = 0
+        for path in sorted(directory.glob("*.md")):
+            if path.name == _INDEX_NAME:
+                continue
+            raw = await self.read_text(path)
+            meta = _parse_memory(raw)
+            status_match = re.search(r"(?im)^status:\s*([^\s]+)\s*$", raw)
+            raw_status = str(status_match.group(1) if status_match else "")
+            schema_version = int(meta.get("schema_version") or 1)
+            valid_status = raw_status in MEMORY_STATUSES
+            if schema_version >= 2 and valid_status:
+                continue
+            target_status = normalize_memory_status(raw_status)
+            await self.write_memory(
+                project_id,
+                path.stem,
+                meta.get("description", ""),
+                meta.get("body", ""),
+                meta.get("type", "preference"),
+                scope=meta.get("scope", "project"),
+                source=meta.get("source") or "legacy",
+                confidence=meta.get("confidence", 0.0),
+                status=target_status,
+                expires_at=meta.get("expires_at") or None,
+                source_type=meta.get("source_type") or "unknown",
+                trust_label=meta.get("trust_label") or "unknown",
+                activation="legacy_migrated",
+                source_refs=parse_string_list(meta.get("source_refs")),
+                evidence_refs=parse_string_list(meta.get("evidence_refs")),
+                confidence_method=meta.get("confidence_method") or "legacy",
+                valid_from=meta.get("valid_from") or None,
+                supersedes=parse_string_list(meta.get("supersedes")),
+                conflicts_with=parse_string_list(meta.get("conflicts_with")),
+                created_by=meta.get("created_by") or "legacy",
+                confirmed_by=meta.get("confirmed_by") or None,
+                created_at=meta.get("created_at") or None,
+                last_recalled_at=meta.get("last_recalled_at") or None,
+                version_refs=parse_version_refs(meta.get("version_refs")),
+                enforce_trust_policy=False,
+                deterministic_source=bool(meta.get("deterministic_source")),
+                reversible=bool(meta.get("reversible")),
+                impact=str(meta.get("impact") or "unknown"),
+                _lifecycle_override=True,
+            )
+            migrated += 1
+        return migrated
 
     async def delete_memory(self, project_id: str, slug: str) -> bool:
         """删除一条记忆并重建索引。"""
@@ -493,13 +624,26 @@ class CreativeMemoryStorage(BaseStorage):
         return False
 
     async def set_memory_status(self, project_id: str, slug: str, status: str) -> bool:
-        """更新记忆状态；用于 confirm/reject/supersede，保留来源链和正文。"""
-        if status not in MEMORY_STATUSES:
+        """Compatibility entry point delegated to the lifecycle owner."""
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).transition(project_id, slug, status)
+
+    async def _apply_status_transition(
+        self,
+        project_id: str,
+        slug: str,
+        status: str,
+        *,
+        confirmed_by: Optional[str] = None,
+        trust_label_override: Optional[str] = None,
+    ) -> bool:
+        """Persist an already-approved lifecycle transition."""
+        target = normalize_memory_status(status, default="")
+        if not target:
             return False
         existing = await self.read_memory(project_id, slug)
         if not existing:
-            return False
-        if not memory_transition_allowed(str(existing.get("status") or "active"), status):
             return False
         await self.write_memory(
             project_id,
@@ -510,10 +654,10 @@ class CreativeMemoryStorage(BaseStorage):
             scope=existing.get("scope", "project"),
             source=existing.get("source") or "legacy",
             confidence=_clamp_confidence(existing.get("confidence"), default=1.0),
-            status=status,
+            status=target,
             expires_at=existing.get("expires_at") or None,
             source_type=existing.get("source_type") or None,
-            trust_label=existing.get("trust_label") or None,
+            trust_label=trust_label_override or existing.get("trust_label") or None,
             activation=existing.get("activation") or "manual",
             source_refs=parse_string_list(existing.get("source_refs")),
             evidence_refs=parse_string_list(existing.get("evidence_refs")),
@@ -522,18 +666,36 @@ class CreativeMemoryStorage(BaseStorage):
             supersedes=parse_string_list(existing.get("supersedes")),
             conflicts_with=parse_string_list(existing.get("conflicts_with")),
             created_by=existing.get("created_by") or "legacy",
-            confirmed_by=existing.get("confirmed_by") or None,
+            confirmed_by=confirmed_by or existing.get("confirmed_by") or None,
             created_at=existing.get("created_at") or None,
             last_recalled_at=existing.get("last_recalled_at") or None,
+            version_refs=parse_version_refs(existing.get("version_refs")),
             enforce_trust_policy=False,
+            deterministic_source=bool(existing.get("deterministic_source")),
+            reversible=bool(existing.get("reversible")),
+            impact=str(existing.get("impact") or "unknown"),
+            _lifecycle_override=True,
         )
         return True
 
     async def supersede_memory(self, project_id: str, old_slug: str, new_slug: str, **new_record: Any) -> str:
-        """Create the replacement and retire the previous record under one project lock."""
+        """Compatibility entry point delegated to the lifecycle owner."""
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).supersede(project_id, old_slug, new_slug, **new_record)
+
+    async def _apply_supersede(
+        self,
+        project_id: str,
+        old_slug: str,
+        new_slug: str,
+        new_record: Dict[str, Any],
+    ) -> str:
+        """Persist an already-validated supersession."""
         old = await self.read_memory(project_id, old_slug)
         if not old:
             raise ValueError("memory_not_found")
+        inherited_refs = [*parse_string_list(old.get("source_refs")), f"memory:{old_slug}"]
         replacement = await self.write_memory(
             project_id,
             new_slug,
@@ -548,60 +710,102 @@ class CreativeMemoryStorage(BaseStorage):
             conflicts_with=parse_string_list(new_record.get("conflicts_with")),
             confirmed_by=str(new_record.get("confirmed_by") or "user"),
             confidence_method=str(new_record.get("confidence_method") or "confirmed"),
+            source_refs=parse_string_list(new_record.get("source_refs")) or inherited_refs,
+            evidence_refs=parse_string_list(new_record.get("evidence_refs")) or parse_string_list(old.get("evidence_refs")),
+            source_type=str(new_record.get("source_type") or old.get("source_type") or "internal"),
+            trust_label=str(new_record.get("trust_label") or old.get("trust_label") or "trusted"),
+            activation="manual_confirmed",
             enforce_trust_policy=False,
+            deterministic_source=bool(new_record.get("deterministic_source", old.get("deterministic_source", False))),
+            reversible=bool(new_record.get("reversible", True)),
+            impact=str(new_record.get("impact") or "low"),
+            _lifecycle_override=True,
         )
-        await self.set_memory_status(project_id, old_slug, "superseded")
+        await self._apply_status_transition(project_id, old_slug, "superseded")
         return replacement
 
     async def set_memory_conflicts(self, project_id: str, slug: str, conflicts_with: List[str]) -> bool:
-        existing = await self.read_memory(project_id, slug)
-        if not existing:
+        """Compatibility entry point delegated to the lifecycle owner."""
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).set_conflicts(project_id, slug, conflicts_with)
+
+    async def _apply_conflict_set(self, project_id: str, slug: str, conflicts_with: List[str]) -> bool:
+        """Persist a symmetric conflict relation approved by the lifecycle owner."""
+        headers = await self.list_headers(project_id, statuses=["*"])
+        by_id = {str(item.get("id") or item.get("slug")): item for item in headers}
+        if slug not in by_id:
             return False
-        await self.write_memory(
-            project_id,
-            slug,
-            existing.get("description", ""),
-            existing.get("body", ""),
-            existing.get("type", "preference"),
-            scope=existing.get("scope", "project"),
-            source=existing.get("source", "legacy"),
-            confidence=existing.get("confidence", 1.0),
-            status=existing.get("status", "active"),
-            expires_at=existing.get("expires_at") or None,
-            source_type=existing.get("source_type") or None,
-            trust_label=existing.get("trust_label") or None,
-            activation=existing.get("activation") or "manual",
-            source_refs=parse_string_list(existing.get("source_refs")),
-            evidence_refs=parse_string_list(existing.get("evidence_refs")),
-            confidence_method=existing.get("confidence_method") or "legacy",
-            valid_from=existing.get("valid_from") or None,
-            supersedes=parse_string_list(existing.get("supersedes")),
-            conflicts_with=conflicts_with,
-            created_by=existing.get("created_by") or "legacy",
-            confirmed_by=existing.get("confirmed_by") or None,
-            created_at=existing.get("created_at") or None,
-            enforce_trust_policy=False,
-        )
+        previous = set(parse_string_list(by_id[slug].get("conflicts_with")))
+        targets = set(parse_string_list(conflicts_with))
+        affected = previous | targets | {slug}
+        for item_id in sorted(affected):
+            existing = await self.read_memory(project_id, item_id)
+            if not existing:
+                continue
+            links = set(parse_string_list(existing.get("conflicts_with")))
+            if item_id == slug:
+                links = set(targets)
+            elif item_id in targets:
+                links.add(slug)
+            else:
+                links.discard(slug)
+            await self.write_memory(
+                project_id,
+                item_id,
+                existing.get("description", ""),
+                existing.get("body", ""),
+                existing.get("type", "preference"),
+                scope=existing.get("scope", "project"),
+                source=existing.get("source", "legacy"),
+                confidence=existing.get("confidence", 0.0),
+                status=existing.get("status", "needs_review"),
+                expires_at=existing.get("expires_at") or None,
+                source_type=existing.get("source_type") or None,
+                trust_label=existing.get("trust_label") or None,
+                activation=existing.get("activation") or "manual",
+                source_refs=parse_string_list(existing.get("source_refs")),
+                evidence_refs=parse_string_list(existing.get("evidence_refs")),
+                confidence_method=existing.get("confidence_method") or "legacy",
+                valid_from=existing.get("valid_from") or None,
+                supersedes=parse_string_list(existing.get("supersedes")),
+                conflicts_with=sorted(links),
+                created_by=existing.get("created_by") or "legacy",
+                confirmed_by=existing.get("confirmed_by") or None,
+                created_at=existing.get("created_at") or None,
+                last_recalled_at=existing.get("last_recalled_at") or None,
+                version_refs=parse_version_refs(existing.get("version_refs")),
+                enforce_trust_policy=False,
+                deterministic_source=bool(existing.get("deterministic_source")),
+                reversible=bool(existing.get("reversible")),
+                impact=str(existing.get("impact") or "unknown"),
+                _lifecycle_override=True,
+            )
         return True
 
     async def confirm_memory(self, project_id: str, slug: str) -> bool:
         """把候选记忆确认为 active。"""
-        return await self.set_memory_status(project_id, slug, "active")
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).confirm(project_id, slug)
 
     async def reject_memory(self, project_id: str, slug: str) -> bool:
         """拒绝候选记忆，保留文件以便追溯。"""
-        return await self.set_memory_status(project_id, slug, "rejected")
+        from app.services.memory_lifecycle_service import MemoryLifecycleService
+
+        return await MemoryLifecycleService(self).reject(project_id, slug)
 
     async def governance_metrics(self, project_id: str) -> Dict[str, Any]:
         """Return memory governance health metrics for product/ops surfaces."""
-        expired_transitions = await self.expire_due_memories(project_id)
         headers = await self.list_headers(project_id, statuses=["*"])
+        expired_due = [item for item in headers if MemoryRecordV2.from_mapping(item).is_expired()]
         review_items = [item for item in headers if item.get("status") == "needs_review"]
-        auto_active = [item for item in headers if item.get("activation") == "auto_active"]
+        auto_active = [item for item in headers if str(item.get("activation") or "").startswith("auto_active")]
         auto_rejected = [
             item
             for item in headers
-            if item.get("activation") == "auto_active" and item.get("status") in {"rejected", "superseded"}
+            if str(item.get("activation") or "").startswith("auto_active")
+            and item.get("status") in {"rejected", "superseded"}
         ]
         ages = []
         now = datetime.now(timezone.utc)
@@ -632,7 +836,7 @@ class CreativeMemoryStorage(BaseStorage):
             "auto_active_count": len(auto_active),
             "auto_active_reverted": len(auto_rejected),
             "auto_active_revert_rate": (len(auto_rejected) / len(auto_active)) if auto_active else 0.0,
-            "expired_transitions": len(expired_transitions),
+            "expired_due": len(expired_due),
             "confidence_calibration": calibration,
         }
 
@@ -655,6 +859,13 @@ class CreativeMemoryStorage(BaseStorage):
         source_type: Optional[str],
         trust_label: Optional[str],
         confidence: float,
+        source_refs: Optional[List[str]],
+        evidence_refs: Optional[List[str]],
+        conflicts_with: Optional[List[str]],
+        confidence_method: str,
+        deterministic_source: bool,
+        reversible: bool,
+        impact: str,
     ) -> tuple[str, str]:
         trust = trust_metadata(source=source, source_type=source_type, trust_label=trust_label)
         cfg = self._activation_config()
@@ -664,9 +875,17 @@ class CreativeMemoryStorage(BaseStorage):
             return "needs_review", "review_required"
         if mem_type not in cfg["allowed_types"] or scope not in cfg["allowed_scopes"]:
             return "needs_review", "review_required"
+        if str(confidence_method or "").strip().lower() == "model_declared" and not deterministic_source:
+            return "needs_review", "review_required"
+        if not deterministic_source or not reversible or str(impact or "").strip().lower() != "low":
+            return "needs_review", "review_required"
+        if not parse_string_list(source_refs) and not parse_string_list(evidence_refs):
+            return "needs_review", "review_required"
+        if parse_string_list(conflicts_with):
+            return "needs_review", "review_required"
         if _clamp_confidence(confidence, default=0.0) < cfg["min_confidence"]:
             return "needs_review", "review_required"
-        return "active", "auto_active"
+        return "active", "auto_active_verified"
 
     async def _rebuild_index(self, project_id: str) -> None:
         """扫描所有记忆 header，重建 MEMORY.md 索引（每条一行，符合 JIT 目录原则）。"""
@@ -677,9 +896,17 @@ class CreativeMemoryStorage(BaseStorage):
     async def _rebuild_index_unlocked(self, project_id: str) -> None:
         """Rebuild the derived index while the transaction lock is held."""
 
-        headers = await self.list_headers(project_id)
+        headers = await self.list_headers(project_id, statuses=["*"])
+        graph = build_memory_graph(headers)
         lines = ["# 创作记忆索引 / Creative Memory Index", ""]
         for header in headers:
+            record = MemoryRecordV2.from_mapping(header)
+            if record.recall_block_reasons(
+                graph.conflict_participants,
+                superseded_ids=graph.superseded_ids,
+                invalid_ids=graph.invalid_ids,
+            ):
+                continue
             lines.append(f"- [{header['name']}] {header['description']} ({header['type']})")
         await self._atomic_write(self._index_path(project_id), "\n".join(lines) + "\n")
 

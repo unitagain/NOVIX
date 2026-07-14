@@ -13,12 +13,12 @@ from app.llm_gateway.provider_registry import ProviderRegistry
 from app.llm_gateway.telemetry import GatewayTelemetryPort
 from app.orchestrator.application_ports import OrchestratorApplicationPorts
 from app.orchestrator.orchestrator import Orchestrator
-from scripts.architecture_profile import architecture_violations, build_architecture_profile
+from scripts.architecture_profile import _external_private_accesses, architecture_violations, build_architecture_profile
 
 
 def test_architecture_has_no_dependency_cycles_or_external_private_accesses():
     profile = build_architecture_profile()
-    assert profile["schema_version"] == 2
+    assert profile["schema_version"] == 3
     assert profile["dependency_cycle_count"] == 0
     assert profile["dependency_cycles"] == []
     assert profile["external_private_accesses"] == []
@@ -33,6 +33,19 @@ def test_architecture_check_rejects_cycles_and_private_accesses():
             "external_private_accesses": ["tests/test_example.py:1:private_attribute:gateway._owner"],
         }
     ) == ["dependency_cycles:1", "external_private_accesses:1"]
+
+
+def test_architecture_private_owner_check_follows_import_alias_and_assignment(tmp_path: Path):
+    source = tmp_path / "alias.py"
+    source.write_text(
+        "from app.llm_gateway.gateway import LLMGateway as Gateway\n"
+        "first = Gateway()\n"
+        "second = first\n"
+        "second._execute_chat\n",
+        encoding="utf-8",
+    )
+    violations = _external_private_accesses([tmp_path])
+    assert any("second._execute_chat" in item for item in violations)
 
 
 def test_orchestrator_exposes_owned_application_ports(tmp_path: Path):
@@ -69,6 +82,8 @@ def test_runtime_and_benchmark_share_provider_usage_contract():
         "completion_tokens": 10,
         "total_tokens": 26,
         "elapsed_seconds": 0.0,
+        "status": "reported",
+        "requested_max_tokens": 0,
     }
 
 

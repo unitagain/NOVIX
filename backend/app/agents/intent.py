@@ -24,6 +24,7 @@ import json
 import re
 from typing import Any, Dict, Optional
 
+from app.context_engine.turn_scope import register_current_provider_payload
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -95,8 +96,10 @@ async def _llm_classify(gateway, provider: str, message: str) -> Optional[Dict[s
         '只输出 JSON：{"action":"write|edit","scope":"document","reason":"≤20字理由"}，不要其它文字。'
     )
     user = f"用户输入：{str(message or '').strip()}\n本章已有草稿。请判定 action。"
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    register_current_provider_payload(messages, owner="intent.classify")
     resp = await gateway.chat(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages,
         provider=provider,
         temperature=0.0,
         response_format={"type": "json_object"},

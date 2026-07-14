@@ -1,32 +1,32 @@
 # -*- coding: utf-8 -*-
-"""
-文枢 WenShape - 深度上下文感知的智能体小说创作系统
-WenShape - Deep Context-Aware Agent-Based Novel Writing System
-
-Copyright © 2025-2026 WenShape Team
-License: PolyForm Noncommercial License 1.0.0
-
-模块说明 / Module Description:
-  P0/P3 · 权限分级（声明式策略）。
-  把操作按风险分级：allow（只读，直接放行）| ask（改稿/写入，需确认）| deny（高危 AI 自主操作直接阻断）。
-  策略集中声明，供工具调用 / 路由在各写入点门控（"越权写入被拦截"）。
-  单用户本地工具语境下，"权限"= 防 AI 自主执行危险操作（删章/覆盖 canon）的安全闸。
-"""
+"""统一的权限、信任与副作用决策契约。"""
 
 from __future__ import annotations
 
-# 操作 → 风险等级。未列出的操作默认 ask（保守：未知操作不直接放行）。
+import hashlib
+import json
+from dataclasses import asdict, dataclass, field
+from enum import Enum
+from typing import Any, Mapping
+
+
+class PermissionLevel(str, Enum):
+    ALLOW = "allow"
+    ASK = "ask"
+    DENY = "deny"
+
+
 PERMISSION_POLICY = {
-    # 只读检索 / 评审：直接放行
     "lookup_card": "allow",
     "query_canon": "allow",
     "query_relations": "allow",
     "read_chapter": "allow",
     "search_prose": "allow",
     "review": "allow",
-    # 改稿 / canon 写入：需确认
+    "write_content": "ask",
     "write_chapter": "ask",
     "edit_chapter": "ask",
+    "edit_lines": "ask",
     "add_fact": "ask",
     "confirm_facts": "ask",
     "reject_facts": "ask",
@@ -36,7 +36,9 @@ PERMISSION_POLICY = {
     "confirm_memory": "ask",
     "reject_memory": "ask",
     "supersede_memory": "ask",
-    # 删除 / 覆盖：高危 AI 自主操作默认阻断；显式人工流程应走单独 API/确认闸。
+    "fanfiction_search": "ask",
+    "external_file_read": "ask",
+    "third_party_tool": "ask",
     "delete_project": "deny",
     "delete_chapter": "deny",
     "delete_fact": "deny",
@@ -45,24 +47,118 @@ PERMISSION_POLICY = {
     "bulk_update_canon": "deny",
 }
 
-_VALID_LEVELS = {"allow", "ask", "deny"}
+_RANK = {PermissionLevel.ALLOW: 0, PermissionLevel.ASK: 1, PermissionLevel.DENY: 2}
+_BACKGROUND_ACTORS = {"agent", "background", "worker", "scheduler", "system_background"}
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def stable_fingerprint(value: Any) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _level(value: Any, *, default: PermissionLevel = PermissionLevel.ASK) -> PermissionLevel:
+    try:
+        return PermissionLevel(str(value or "").lower())
+    except ValueError:
+        return default
+
+
+def strictest(*levels: Any) -> PermissionLevel:
+    """按 deny > ask > allow 合并权限。"""
+
+    normalized = (_level(level) for level in levels)
+    return max(normalized, key=lambda item: _RANK[item], default=PermissionLevel.ASK)
+
+
+@dataclass(frozen=True)
+class PermissionDecision:
+    operation: str
+    resource_scope: Mapping[str, Any] = field(default_factory=dict)
+    payload_fingerprint: str = ""
+    trust_context: Mapping[str, Any] = field(default_factory=dict)
+    parent_restrictions: Mapping[str, Any] = field(default_factory=dict)
+    actor: str = "local_user"
+    level: PermissionLevel = PermissionLevel.ASK
+    reasons: tuple[str, ...] = ()
+
+    @property
+    def fingerprint(self) -> str:
+        data = asdict(self)
+        data["level"] = self.level.value
+        return stable_fingerprint(data)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["level"] = self.level.value
+        data["fingerprint"] = self.fingerprint
+        return data
+
+
+def decide_permission(
+    operation: str,
+    *,
+    resource_scope: Mapping[str, Any] | None = None,
+    payload: Any = None,
+    payload_fingerprint: str = "",
+    trust_context: Mapping[str, Any] | None = None,
+    parent_restrictions: Mapping[str, Any] | None = None,
+    actor: str = "local_user",
+    base_permission: str | None = None,
+    read_only: bool = False,
+    external: bool = False,
+) -> PermissionDecision:
+    """生成不可变权限决策；所有 metadata 与执行门禁均应调用此 owner。"""
+
+    operation = str(operation or "")
+    trust = dict(trust_context or {})
+    parent = dict(parent_restrictions or {})
+    actor = str(actor or "local_user")
+    levels: list[Any] = [base_permission or PERMISSION_POLICY.get(operation, PermissionLevel.ASK.value)]
+    reasons = ["policy"]
+    parent_level = parent.get("level") or parent.get("permission") or parent.get(operation)
+    if parent_level:
+        levels.append(parent_level)
+        reasons.append("parent_permission")
+    if external or parent.get("external") or parent.get("egress") == "deny":
+        levels.append(PermissionLevel.DENY if parent.get("egress") == "deny" else PermissionLevel.ASK)
+        reasons.append("external_or_egress")
+    untrusted = bool(trust.get("consumed_untrusted") or trust.get("trust_label") in {"untrusted", "unknown"})
+    if untrusted and not read_only:
+        levels.append(PermissionLevel.ASK)
+        reasons.append("untrusted_write")
+    if parent.get("trust_label") in {"untrusted", "unknown"} and not read_only:
+        levels.append(PermissionLevel.ASK)
+        reasons.append("parent_trust")
+    level = strictest(*levels)
+    if actor.lower() in _BACKGROUND_ACTORS and level is PermissionLevel.ASK:
+        level = PermissionLevel.DENY
+        reasons.append("approval_unavailable")
+    return PermissionDecision(
+        operation=operation,
+        resource_scope=dict(resource_scope or {}),
+        payload_fingerprint=payload_fingerprint or stable_fingerprint(payload if payload is not None else {}),
+        trust_context=trust,
+        parent_restrictions=parent,
+        actor=actor,
+        level=level,
+        reasons=tuple(reasons),
+    )
 
 
 def permission_for(operation: str) -> str:
-    """返回操作的权限等级：allow | ask | deny。未知操作保守默认 ask。"""
-    return PERMISSION_POLICY.get(str(operation or ""), "ask")
+    return decide_permission(operation).level.value
 
 
 def is_allowed(operation: str) -> bool:
-    """只读操作（allow）可直接放行，无需确认。"""
-    return permission_for(operation) == "allow"
+    return permission_for(operation) == PermissionLevel.ALLOW.value
 
 
 def requires_confirmation(operation: str) -> bool:
-    """ask 操作必须显式确认才能执行；deny 操作应直接阻断。"""
-    return permission_for(operation) == "ask"
+    return permission_for(operation) == PermissionLevel.ASK.value
 
 
 def is_denied(operation: str) -> bool:
-    """deny 操作不应由 AI 自主执行。"""
-    return permission_for(operation) == "deny"
+    return permission_for(operation) == PermissionLevel.DENY.value

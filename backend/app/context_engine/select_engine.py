@@ -456,7 +456,7 @@ class ContextSelectEngine:
                     fact_id = str(getattr(fact, "id", "") or "").strip() or f"F{idx + 1:04d}"
                     introduced_in = str(getattr(fact, "introduced_in", "") or "").strip()
                     context_prefix = str(getattr(fact, "context_prefix", "") or "").strip()
-                    status = str(getattr(fact, "status", "confirmed") or "confirmed")
+                    status = str(getattr(fact, "status", "needs_review") or "needs_review")
                 except (AttributeError, TypeError, ValueError):
                     continue
                 if not statement:
@@ -481,10 +481,6 @@ class ContextSelectEngine:
                 # Distance decay is deferred (stored as _decay) and applied after fusion,
                 # so it doesn't distort the lexical/semantic rank fusion.
                 decay = self._calculate_distance_decay(current_chapter, introduced_in)
-                # Phase 14 / 自审：needs_review（AI 待确认）事实降权，confirmed 优先——
-                # 避免未经作者确认的抽取事实污染检索 / 写作（"不污染主 canon" 的检索层落地）。
-                if status == "needs_review":
-                    decay *= 0.6
                 fact_meta: Dict[str, Any] = {**base_meta, "_decay": decay, "_lex": s}
                 if index_text != statement:
                     fact_meta["_index_text"] = index_text  # 供语义嵌入使用；返回前清理

@@ -25,6 +25,13 @@ class PayloadAccountingPort:
         model = str(getattr(target_provider, "model", "") or "")
         context_limit = get_model_context_window(model)
         scope = current_turn_scope()
+        if scope is not None and scope.source_closure_required:
+            verification = scope.source_registry.verify_payload(messages, tools) if scope.source_registry else {}
+            if verification.get("valid") is not True:
+                missing = (verification.get("missing") or [{}])[0]
+                raise RuntimeError(
+                    f"context_unregistered_payload:{missing.get('kind') or 'source'}:{missing.get('index', '')}"
+                )
         if scope is not None and scope.active_plan is not None:
             planned_budget = getattr(scope.active_plan, "budget", {}) or {}
             context_limit = int(planned_budget.get("context_limit_tokens") or context_limit)
@@ -41,6 +48,14 @@ class PayloadAccountingPort:
         )
         if accounting.upper_bound_tokens > input_budget:
             raise ValueError(f"context_budget_exceeded:{accounting.upper_bound_tokens}>{input_budget}")
+        if scope is not None and scope.source_closure_required:
+            scope.register_provider_payload(
+                fitted,
+                tools,
+                source_prefix="payload_accounting.final",
+                selection_reason="validated_provider_payload_projection",
+                artifact_ref="payload_accounting:final",
+            )
         payload = {
             "messages": fitted,
             "tools": tools or [],

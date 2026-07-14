@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from app.context_engine.turn_scope import register_current_provider_payload
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -85,8 +86,10 @@ async def generate_plan(
         '"chapter":"章节ID（edit/analyze 必须用已存在章节；write 新章留空）","title":"可选标题"}]}，不要其它文字。'
     )
     try:
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        register_current_provider_payload(messages, owner="planner.generate_plan")
         resp = await gateway.chat(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            messages,
             provider=provider,
             temperature=0.2,
             response_format={"type": "json_object"},

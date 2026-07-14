@@ -115,6 +115,12 @@ class WritingActionToolset:
         tools.extend(writing_action_schemas())
         return tools
 
+    def is_result_recoverable(self, name: str) -> bool:
+        if name in {"write_content", "edit_lines"}:
+            return False
+        checker = getattr(self.retrieval, "is_result_recoverable", None)
+        return bool(checker(name)) if callable(checker) else False
+
     async def execute(self, name: str, arguments: Any) -> str:
         """分发执行写作动作；未知名委托给检索工具。任何异常转为可读文本，避免中断 agentic 循环。"""
         args = self._parse_args(arguments)

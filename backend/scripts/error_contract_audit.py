@@ -18,6 +18,8 @@ SAFE_FUNCTIONS = {
 }
 SAFE_METHODS = {"_handle_error"}
 EXTERNAL_SINK_METHODS = {"append", "extend", "send_json", "send_text", "write_text", "write_bytes"}
+SERIALIZER_SINKS = {"dump", "dumps", "jsonable_encoder", "model_dump", "to_json"}
+RESPONSE_SINKS = {"HTTPException", "JSONResponse", "PlainTextResponse", "Response"}
 OBSERVABILITY_METHODS = {
     "debug",
     "error",
@@ -51,11 +53,10 @@ def _external_sink(node: ast.AST) -> bool:
     if isinstance(node, (ast.Assign, ast.AnnAssign)):
         targets: Iterable[ast.AST] = getattr(node, "targets", ())
         return any(isinstance(target, (ast.Attribute, ast.Subscript)) for target in targets)
-    return (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr in EXTERNAL_SINK_METHODS
-    )
+    if not isinstance(node, ast.Call):
+        return False
+    name = _call_name(node)
+    return name in EXTERNAL_SINK_METHODS | SERIALIZER_SINKS | RESPONSE_SINKS
 
 
 def _is_broad(handler: ast.ExceptHandler) -> bool:

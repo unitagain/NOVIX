@@ -109,9 +109,15 @@ async def test_memory_auto_activation_external_review_and_pending_confirm(govern
         "preference",
         source="session_feedback",
         confidence=0.95,
+        source_refs=["feedback:event-1"],
+        deterministic_source=True,
+        reversible=True,
+        impact="low",
     )
     active = (await client.get(f"/projects/{project_id}/memory")).json()["items"]
-    assert any(item["slug"] == "dialogue-style" and item["activation"] == "auto_active" for item in active)
+    assert any(
+        item["slug"] == "dialogue-style" and item["activation"] == "auto_active_verified" for item in active
+    )
 
     await memory.write_candidate_memory(
         project_id,

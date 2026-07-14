@@ -223,6 +223,13 @@ def _parser() -> argparse.ArgumentParser:
     p_generate_strategy_ab.add_argument("--scene-id", action="append", default=[])
     p_generate_strategy_ab.add_argument("--append", action="store_true")
 
+    p_normalize_strategy_ab = sub.add_parser(
+        "normalize-strategy-ab",
+        help="Apply current deterministic length projection to existing strategy candidates",
+    )
+    p_normalize_strategy_ab.add_argument("--benchmark-id", required=True)
+    p_normalize_strategy_ab.add_argument("--source", default=None)
+
     p_preflight_strategy_ab = sub.add_parser(
         "preflight-strategy-ab",
         help="Check strategy fidelity and context distinctness without API calls",
@@ -472,6 +479,11 @@ async def _main() -> int:
             require_available=args.require_available,
             scene_ids=args.scene_id,
             append=args.append,
+        )
+    elif command == "normalize-strategy-ab":
+        result = harness.normalize_strategy_ab_candidates(
+            benchmark_id=args.benchmark_id,
+            source_path=Path(args.source) if args.source else None,
         )
     elif command == "refresh-strategy-references":
         result = harness.refresh_strategy_references(benchmark_id=args.benchmark_id)

@@ -540,7 +540,7 @@ class FanfictionMixin:
         pattern = r"^(%s):\s*" % "|".join([re.escape(label) for label in labels])
         paragraphs = [p.strip() for p in re.split(r"\n{2,}", body) if p.strip()]
         labeled_paragraphs = sum(1 for p in paragraphs if re.match(pattern, p, flags=re.IGNORECASE))
-        found = set(m.group(1).strip().lower() for m in re.finditer(pattern, body, flags=re.IGNORECASE | re.MULTILINE))
+        found = {m.group(1).strip().lower() for m in re.finditer(pattern, body, flags=re.IGNORECASE | re.MULTILINE)}
         return {"unique": found, "labeled_paragraphs": labeled_paragraphs}
 
     def _is_low_quality_fanfiction_description(self, text: str) -> bool:

@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Phase 14 自审补 · needs_review 事实检索降权回归测试。
+"""H4 confirmed-only canon retrieval regression test.
 
-验证：检索中 needs_review（AI 待确认）事实被降权，confirmed 优先——
-"不污染主 canon" 的检索层落地。两条事实词法分相同，排序由 status 降权决定。无网络 / 无 key。
+验证 needs_review（AI 待确认）事实不会作为已确立 canon 进入模型检索上下文。
 """
 
 import asyncio
@@ -21,7 +20,7 @@ class _StatusFactStorage:
         ]
 
 
-def test_needs_review_fact_ranked_below_confirmed():
+def test_needs_review_fact_is_excluded_from_canon_recall():
     engine = ContextSelectEngine()  # 纯词法
     results = asyncio.run(
         engine.retrieval_select(
@@ -30,4 +29,4 @@ def test_needs_review_fact_ranked_below_confirmed():
     )
     ids = [r.id for r in results]
     assert ids[0] == "FC"  # confirmed 排在 needs_review 之前
-    assert "FN" in ids  # needs_review 仍可被检索（降权而非剔除）
+    assert "FN" not in ids

@@ -11,7 +11,10 @@ License: PolyForm Noncommercial License 1.0.0
   LLM Error Classification - Classifies errors as retryable or non-retryable for intelligent retry handling.
 """
 
-from typing import Tuple
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Mapping, Tuple
 
 from app.error_contract import DomainError, ErrorCategory, normalize_error_code
 
@@ -51,6 +54,13 @@ NON_RETRYABLE_PATTERNS = (
     "billing",
     "quota exceeded",
     "insufficient_quota",
+    "insufficient balance",
+    "out of credits",
+    "40408",
+    "token 已经用完",
+    "余额不足",
+    "额度不足",
+    "额度已用完",
     "account",
 )
 
@@ -92,6 +102,108 @@ RETRYABLE_PATTERNS = (
 )
 
 
+@dataclass(frozen=True)
+class ProviderErrorContract:
+    provider: str
+    status: int | None
+    provider_code: str
+    category: str
+    retryable: bool
+    retry_after: float | None
+    safe_detail: str = "LLM provider request failed"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "status": self.status,
+            "provider_code": self.provider_code,
+            "category": self.category,
+            "retryable": self.retryable,
+            "retry_after": self.retry_after,
+            "safe_detail": self.safe_detail,
+        }
+
+
+def _headers(error: Exception) -> Mapping[str, Any]:
+    response = getattr(error, "response", None)
+    return getattr(response, "headers", None) or getattr(error, "headers", None) or {}
+
+
+def _retry_after(error: Exception) -> float | None:
+    value = next((value for key, value in _headers(error).items() if str(key).lower() == "retry-after"), None)
+    if value is None:
+        value = getattr(error, "retry_after", None)
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            parsed = parsedate_to_datetime(str(value))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return max(0.0, (parsed - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def normalize_provider_error(error: Exception, *, provider: str = "unknown") -> ProviderErrorContract:
+    if isinstance(error, LLMError):
+        return error.contract
+    response = getattr(error, "response", None)
+    status = getattr(error, "status_code", None) or getattr(response, "status_code", None)
+    body = getattr(error, "body", None)
+    provider_code = getattr(error, "code", None)
+    if not provider_code and isinstance(body, Mapping):
+        nested = body.get("error")
+        detail: Mapping[Any, Any] = nested if isinstance(nested, Mapping) else body
+        provider_code = detail.get("code") or detail.get("type")
+    provider_code = normalize_error_code(provider_code, "")
+    text = f"{provider_code} {error}".lower()
+    category = "provider"
+    retryable = False
+    if status in {401, 403} or any(marker in text for marker in ("auth", "api_key", "unauthorized", "forbidden")):
+        category = "authentication" if status == 401 else "permission"
+    elif status == 429 and any(marker in text for marker in ("quota", "billing", "credit", "balance")):
+        category = "billing"
+    elif any(marker in text for marker in ("context_length", "context length", "maximum context", "token limit")):
+        category = "context_overflow"
+    elif any(marker in text for marker in ("content_policy", "moderation", "safety")):
+        category = "policy"
+    elif status in {400, 404, 409, 422} or any(marker in text for marker in ("invalid_request", "invalid model")):
+        category = "invalid_request"
+    elif status == 429:
+        category, retryable = "rate_limit", True
+    elif status is not None and 500 <= int(status) <= 599:
+        category, retryable = "server", True
+    elif isinstance(error, (TimeoutError, ConnectionError)):
+        category, retryable = "timeout" if isinstance(error, TimeoutError) else "connection", True
+    elif any(marker in text for marker in ("quota", "billing", "credit", "balance", "40408")):
+        category = "billing"
+    elif any(marker in text for marker in ("auth", "api key", "api_key", "unauthorized")):
+        category = "authentication"
+    elif any(marker in text for marker in ("content policy", "content_policy", "moderation", "safety")):
+        category = "policy"
+    else:
+        for pattern in NON_RETRYABLE_PATTERNS:
+            if pattern in text:
+                category = "provider"
+                break
+        else:
+            for pattern in RETRYABLE_PATTERNS:
+                if pattern in text:
+                    category, retryable = "transient", True
+                    break
+    return ProviderErrorContract(
+        provider=normalize_error_code(provider, "unknown"),
+        status=int(status) if status is not None else None,
+        provider_code=provider_code,
+        category=category,
+        retryable=retryable,
+        retry_after=_retry_after(error),
+    )
+
+
 def classify_error(error: Exception) -> Tuple[bool, str]:
     """
     将错误分类为可重试或不可重试
@@ -122,6 +234,11 @@ def classify_error(error: Exception) -> Tuple[bool, str]:
         >>> classify_error(ValueError("invalid_api_key"))
         (False, 'auth_error')
     """
+    if isinstance(error, LLMError):
+        return error.contract.retryable, error.contract.category
+    structured = normalize_provider_error(error)
+    if structured.status is not None or structured.provider_code or structured.category != "provider":
+        return structured.retryable, structured.category
     error_str = str(error).lower()
     error_type = type(error).__name__.lower()
 
@@ -150,12 +267,10 @@ def classify_error(error: Exception) -> Tuple[bool, str]:
         if pattern in error_str:
             return True, f"retryable:{pattern}"
 
-    # Default: retry unknown errors (conservative approach)
-    # 默认：重试未知错误（保守方法）
-    return True, "unknown_error"
+    return False, "unknown_error"
 
 
-def get_retry_delay(attempt: int, base_delays: list = None, max_delay: float = 60.0) -> float:
+def get_retry_delay(attempt: int, base_delays: list[float] | None = None, max_delay: float = 60.0) -> float:
     """
     计算带指数退避和抖动的重试延迟
 
@@ -209,6 +324,19 @@ def get_retry_delay(attempt: int, base_delays: list = None, max_delay: float = 6
     return delay + jitter
 
 
+def provider_retry_delay(
+    contract: ProviderErrorContract,
+    attempt: int,
+    base_delays: list[float] | None = None,
+    max_delay: float = 60.0,
+) -> float:
+    """优先服从 provider retry-after，否则使用本地退避。"""
+
+    if contract.retry_after is not None:
+        return contract.retry_after
+    return get_retry_delay(attempt, base_delays, max_delay)
+
+
 class LLMError(DomainError):
     """
     结构化 LLM 错误，携带提供商/分类信息以便精准报告
@@ -224,15 +352,38 @@ class LLMError(DomainError):
         status_code: int | None = None,
         is_retryable: bool = False,
         original: Exception | None = None,
+        contract: ProviderErrorContract | None = None,
     ):
+        if contract is None and original is None:
+            normalized = normalize_error_code(reason, "provider")
+            if "auth" in normalized or "api_key" in normalized:
+                category = "authentication"
+            elif "permission" in normalized or "forbidden" in normalized:
+                category = "permission"
+            elif "quota" in normalized or "billing" in normalized:
+                category = "billing"
+            else:
+                category = normalized
+            contract = ProviderErrorContract(
+                provider=normalize_error_code(provider, "unknown"),
+                status=status_code,
+                provider_code="",
+                category=category,
+                retryable=is_retryable,
+                retry_after=None,
+            )
+        contract = contract or normalize_provider_error(original or Exception(message), provider=provider)
+        provider = contract.provider
+        status_code = contract.status
+        is_retryable = contract.retryable
         normalized_reason = normalize_error_code(reason, "provider_error")
-        if "auth" in normalized_reason or "api_key" in normalized_reason:
+        if contract.category == "authentication" or "auth" in normalized_reason or "api_key" in normalized_reason:
             category = ErrorCategory.AUTHENTICATION
-        elif "permission" in normalized_reason or "forbidden" in normalized_reason:
+        elif contract.category == "permission" or "permission" in normalized_reason or "forbidden" in normalized_reason:
             category = ErrorCategory.PERMISSION
-        elif "rate" in normalized_reason or "429" in normalized_reason or "quota" in normalized_reason:
+        elif contract.category in {"rate_limit", "billing"} or "rate" in normalized_reason or "429" in normalized_reason or "quota" in normalized_reason:
             category = ErrorCategory.RATE_LIMIT
-        elif "timeout" in normalized_reason or "deadline" in normalized_reason:
+        elif contract.category == "timeout" or "timeout" in normalized_reason or "deadline" in normalized_reason:
             category = ErrorCategory.TIMEOUT
         else:
             category = ErrorCategory.PROVIDER
@@ -249,14 +400,15 @@ class LLMError(DomainError):
         self.status_code = status_code
         self.is_retryable = is_retryable
         self.original = original
+        self.contract = contract
 
     def to_dict(self) -> dict:
         """Return a privacy-safe, JSON-serializable public representation."""
         return {
             "code": self.code,
             "detail": self.safe_detail,
-            "provider": self.provider,
-            "reason": normalize_error_code(self.reason, "provider_error"),
-            "status_code": self.status_code,
-            "is_retryable": self.is_retryable,
+            **self.contract.to_dict(),
+            "reason": self.contract.category,
+            "status_code": self.contract.status,
+            "is_retryable": self.contract.retryable,
         }

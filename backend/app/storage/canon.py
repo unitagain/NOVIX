@@ -5,13 +5,41 @@ Canon Storage
 Manage facts, timeline events, and character states.
 """
 
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 import re
+from app.context_engine.memory_record import parse_string_list
 from app.storage.base import BaseStorage
 from app.storage.indexed_cache import get_index_cache
 from app.utils.chapter_id import parse_chapter_number, ChapterIDValidator
 from app.utils.trust import trust_metadata
 from app.schemas.canon import Fact, TimelineEvent, CharacterState
+
+
+CANON_FACT_STATUSES = {"confirmed", "needs_review", "inferred", "rejected"}
+CANON_FACT_TRANSITIONS = {
+    "needs_review": {"confirmed", "rejected"},
+    "inferred": {"confirmed", "needs_review", "rejected"},
+    "confirmed": {"needs_review", "rejected"},
+    "rejected": set(),
+}
+
+
+def _canon_status(value: Any, *, default: str = "needs_review") -> str:
+    status = str(value or "").strip().lower()
+    return status if status in CANON_FACT_STATUSES else default
+
+
+def _safe_confidence(value: Any, *, default: float = 0.0) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = default
+    return max(0.0, min(1.0, confidence))
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class CanonStorage(BaseStorage):
@@ -60,7 +88,16 @@ class CanonStorage(BaseStorage):
                 "statement": statement,
                 "source": "C0",
                 "introduced_in": "C0",
-                "confidence": 1.0,
+                "confidence": 0.0,
+                "status": "needs_review",
+                "source_type": "unknown",
+                "trust_label": "unknown",
+                "source_refs": [],
+                "evidence_refs": [],
+                "confidence_method": "legacy",
+                "confirmed_by": "",
+                "updated_at": "",
+                "schema_version": 2,
                 "title": self._derive_fact_title(statement),
                 "content": statement,
             }
@@ -69,7 +106,7 @@ class CanonStorage(BaseStorage):
         source = item.get("source") or item.get("chapter") or item.get("introduced_in") or ""
         introduced_in = item.get("introduced_in") or item.get("source") or item.get("chapter") or source
         fact_id = item.get("id") or item.get("fact_id") or f"F{index + 1:04d}"
-        confidence = item.get("confidence", 1.0)
+        confidence = _safe_confidence(item.get("confidence"), default=0.0)
         content = item.get("content") or statement
         title = item.get("title") or item.get("name") or self._derive_fact_title(statement)
         return {
@@ -78,10 +115,16 @@ class CanonStorage(BaseStorage):
             "source": source or introduced_in or "C0",
             "introduced_in": introduced_in or source or "C0",
             "confidence": confidence,
-            "status": item.get("status") or "confirmed",
+            "status": _canon_status(item.get("status")),
             "context_prefix": item.get("context_prefix") or item.get("context") or "",
-            "source_type": item.get("source_type") or "internal",
-            "trust_label": item.get("trust_label") or "trusted",
+            "source_type": item.get("source_type") or "unknown",
+            "trust_label": item.get("trust_label") if item.get("trust_label") in {"trusted", "untrusted"} else "unknown",
+            "source_refs": parse_string_list(item.get("source_refs")),
+            "evidence_refs": parse_string_list(item.get("evidence_refs")),
+            "confidence_method": item.get("confidence_method") or "legacy",
+            "confirmed_by": item.get("confirmed_by") or "",
+            "updated_at": item.get("updated_at") or "",
+            "schema_version": 2,
             "title": title,
             "content": content,
             "summary_ref": item.get("summary_ref"),
@@ -107,6 +150,29 @@ class CanonStorage(BaseStorage):
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         items = await self.read_jsonl(file_path)
         return [self._normalize_fact_item(item, idx) for idx, item in enumerate(items)]
+
+    async def get_eligible_facts(self, project_id: str) -> List[Fact]:
+        """Return only explicitly established, provenance-bound canon truth."""
+        items = await self.get_all_facts_raw(project_id)
+        return [Fact(**item) for item in self._eligible_fact_items(items)]
+
+    async def get_eligible_facts_raw(self, project_id: str) -> List[Dict[str, Any]]:
+        """Raw form of established canon for evidence/context services."""
+        return self._eligible_fact_items(await self.get_all_facts_raw(project_id))
+
+    @staticmethod
+    def _eligible_fact_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        eligible: List[Dict[str, Any]] = []
+        for item in items:
+            if item.get("status") != "confirmed":
+                continue
+            if item.get("trust_label") != "trusted" and not item.get("confirmed_by"):
+                continue
+            source = str(item.get("source") or "").strip().lower()
+            if not parse_string_list(item.get("source_refs")) and source in {"", "c0", "legacy", "unknown"}:
+                continue
+            eligible.append(item)
+        return eligible
 
     async def get_fact(self, project_id: str, fact_id: str) -> Optional[Fact]:
         """Get a fact by ID (O(1) with index cache)."""
@@ -152,10 +218,13 @@ class CanonStorage(BaseStorage):
         """Update an existing fact by ID."""
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         items = await self.read_jsonl(file_path)
+        requested_status_change = "status" in fact_data
         fact_data = self._enforce_fact_trust_policy(fact_data)
         updated = False
         for idx, item in enumerate(items):
             if item.get("id") == fact_data.get("id"):
+                if requested_status_change and _canon_status(item.get("status")) != _canon_status(fact_data.get("status")):
+                    return False
                 items[idx] = {**item, **fact_data}
                 updated = True
                 break
@@ -169,14 +238,28 @@ class CanonStorage(BaseStorage):
     def _enforce_fact_trust_policy(self, fact_data: Dict[str, Any]) -> Dict[str, Any]:
         """External/untrusted facts always enter review, never confirmed automatically."""
         item = dict(fact_data or {})
+        explicit_trust = str(item.get("trust_label") or "").strip().lower()
         trust = trust_metadata(
             source=item.get("source"),
             source_type=item.get("source_type"),
             trust_label=item.get("trust_label"),
         )
+        if explicit_trust not in {"trusted", "untrusted"} and item.get("trust_label") is not None:
+            trust["trust_label"] = "unknown"
+            trust["source_type"] = str(item.get("source_type") or "unknown")
         item["source_type"] = trust["source_type"]
         item["trust_label"] = trust["trust_label"]
-        if trust["trust_label"] == "untrusted":
+        item["status"] = _canon_status(item.get("status"))
+        item["confidence"] = _safe_confidence(item.get("confidence"), default=0.0)
+        item["source_refs"] = parse_string_list(item.get("source_refs"))
+        item["evidence_refs"] = parse_string_list(item.get("evidence_refs"))
+        item["confidence_method"] = str(item.get("confidence_method") or "declared")
+        item["confirmed_by"] = str(item.get("confirmed_by") or "")
+        item["updated_at"] = str(item.get("updated_at") or _utc_now())
+        item["schema_version"] = 2
+        if trust["trust_label"] == "untrusted" and not item["confirmed_by"]:
+            item["status"] = "needs_review"
+        if item["confidence_method"] == "model_declared" and not item["confirmed_by"]:
             item["status"] = "needs_review"
         return item
 
@@ -190,13 +273,24 @@ class CanonStorage(BaseStorage):
 
     async def set_fact_status(self, project_id: str, fact_ids, status: str) -> int:
         """批量更新事实状态；返回变更条数。"""
+        target = _canon_status(status, default="")
+        if not target:
+            return 0
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         items = await self.read_jsonl(file_path)
         ids = {str(i) for i in (fact_ids or [])}
         changed = 0
         for item in items:
-            if str(item.get("id")) in ids and item.get("status") != status:
-                item["status"] = status
+            current = _canon_status(item.get("status"))
+            if (
+                str(item.get("id")) in ids
+                and current != target
+                and target in CANON_FACT_TRANSITIONS.get(current, set())
+            ):
+                item["status"] = target
+                if target == "confirmed":
+                    item["confirmed_by"] = "user"
+                item["updated_at"] = _utc_now()
                 changed += 1
         if changed:
             await self.write_jsonl(file_path, items)
@@ -209,7 +303,7 @@ class CanonStorage(BaseStorage):
         if not wanted:
             return []
         items = await self.get_all_facts_raw(project_id)
-        return [item for item in items if str(item.get("status") or "confirmed") in wanted]
+        return [item for item in items if _canon_status(item.get("status")) in wanted]
 
     async def delete_fact(self, project_id: str, fact_id: str) -> bool:
         """Delete a fact by ID."""
@@ -301,32 +395,28 @@ class CanonStorage(BaseStorage):
         return deleted
 
     async def normalize_fact_records(self, project_id: str) -> int:
-        """Normalize chapter fields for all facts. Returns updated count."""
+        """Idempotently normalize chapter, lifecycle, trust and provenance fields."""
         file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
         items = await self.read_jsonl(file_path)
         updated = 0
         normalized_items = []
-        for item in items:
-            if not isinstance(item, dict):
-                normalized_items.append(item)
-                continue
-            source = item.get("source")
-            introduced = item.get("introduced_in")
-            chapter_ref = item.get("chapter_ref") or item.get("chapterRef") or item.get("chapter_id")
+        for index, item in enumerate(items):
+            normalized = self._normalize_fact_item(item, index)
+            next_item = {**item, **normalized} if isinstance(item, dict) else normalized
+            source = next_item.get("source")
+            introduced = next_item.get("introduced_in")
+            chapter_ref = next_item.get("chapter_ref") or next_item.get("chapterRef") or next_item.get("chapter_id")
             normalized_source = self._extract_chapter_id(source) if source else ""
             normalized_intro = self._extract_chapter_id(introduced) if introduced else ""
             normalized_ref = self._extract_chapter_id(chapter_ref) if chapter_ref else ""
             canonical = normalized_intro or normalized_source or normalized_ref
             if canonical:
-                next_item = dict(item)
                 next_item["source"] = canonical
                 next_item["introduced_in"] = canonical
                 next_item["chapter_ref"] = canonical
-                if next_item != item:
-                    updated += 1
-                normalized_items.append(next_item)
-            else:
-                normalized_items.append(item)
+            if next_item != item:
+                updated += 1
+            normalized_items.append(next_item)
         if updated > 0:
             await self.write_jsonl(file_path, normalized_items)
         return updated
@@ -643,7 +733,7 @@ class CanonStorage(BaseStorage):
         conflicts: List[str] = []
 
         # Compare facts / 对比事实
-        existing_facts = await self.get_all_facts(project_id)
+        existing_facts = await self.get_eligible_facts(project_id)
         for nf in new_facts:
             for ef in existing_facts:
                 if self._maybe_contradict(nf.statement, ef.statement):

@@ -69,7 +69,7 @@ class GeminiProvider(BaseLLMProvider):
                 "prompt_tokens": usage.prompt_tokens if usage else 0,
                 "completion_tokens": usage.completion_tokens if usage else 0,
                 "total_tokens": usage.total_tokens if usage else 0,
-            },
+            } if usage else None,
             "model": response.model,
             "finish_reason": response.choices[0].finish_reason,
         }

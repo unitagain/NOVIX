@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from app.utils.permissions import permission_for
+from app.utils.permissions import decide_permission
 
 
 _EXTERNAL_HINTS = (
@@ -19,7 +19,6 @@ _EXTERNAL_HINTS = (
     "http://",
     "https://",
 )
-_WRITE_HINTS = ("write", "edit", "save", "confirm", "reject", "delete", "update", "add", "supersede", "overwrite", "bulk")
 _INJECTION_PATTERNS = (
     r"ignore\s+(all\s+)?(previous|prior|above)\s+(instructions|rules|messages)",
     r"disregard\s+(previous|prior|above)\s+(instructions|rules|messages)",
@@ -129,15 +128,10 @@ def permission_with_trust(
 ) -> str:
     """Apply P8 trust boundary permission downgrades."""
 
-    base = base_permission or permission_for(operation)
-    if base == "deny":
-        return "deny"
-    if external:
-        return "ask"
-    if read_only:
-        return base
-    op = str(operation or "").lower()
-    is_write = base == "ask" or any(hint in op for hint in _WRITE_HINTS)
-    if consumed_untrusted and is_write:
-        return "ask"
-    return base
+    return decide_permission(
+        operation,
+        trust_context={"consumed_untrusted": consumed_untrusted},
+        base_permission=base_permission,
+        read_only=read_only,
+        external=external,
+    ).level.value

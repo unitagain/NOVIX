@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class RevisionConflict(RuntimeError):
@@ -87,6 +87,7 @@ class SQLiteControlStore:
                     kind TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     idempotency_key TEXT NOT NULL UNIQUE,
+                    request_fingerprint TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL,
                     attempt INTEGER NOT NULL DEFAULT 0,
                     max_attempts INTEGER NOT NULL,
@@ -99,6 +100,9 @@ class SQLiteControlStore:
                     cancel_requested INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT NOT NULL DEFAULT '',
                     result_json TEXT
+                    ,deadline_at REAL NOT NULL DEFAULT 0
+                    ,side_effect_started INTEGER NOT NULL DEFAULT 0
+                    ,side_effect_fingerprint TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_claim
@@ -127,6 +131,15 @@ class SQLiteControlStore:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                 (SCHEMA_VERSION, time.time()),
             )
+            columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(jobs)")}
+            if "request_fingerprint" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''")
+            if "deadline_at" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN deadline_at REAL NOT NULL DEFAULT 0")
+            if "side_effect_started" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN side_effect_started INTEGER NOT NULL DEFAULT 0")
+            if "side_effect_fingerprint" not in columns:
+                connection.execute("ALTER TABLE jobs ADD COLUMN side_effect_fingerprint TEXT NOT NULL DEFAULT ''")
 
     def begin_project_write(self, project_id: str) -> int:
         now = time.time()
@@ -416,21 +429,25 @@ class SQLiteControlStore:
         *,
         idempotency_key: str,
         max_attempts: int,
+        request_fingerprint: str,
+        deadline_at: float,
     ) -> Dict[str, Any]:
         with self.transaction() as connection:
             existing = connection.execute("SELECT * FROM jobs WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+            if existing and str(existing["request_fingerprint"] or "") not in {"", str(request_fingerprint)}:
+                raise ValueError("job_idempotency_key_payload_mismatch")
             if existing and existing["status"] not in {"failed", "dead_letter", "cancelled"}:
                 return _job_row(existing)
             now = time.time()
             if existing:
                 connection.execute(
                     """
-                    UPDATE jobs SET kind=?, payload_json=?, status='queued', attempt=0, max_attempts=?,
+                    UPDATE jobs SET kind=?, payload_json=?, request_fingerprint=?, status='queued', attempt=0, max_attempts=?,
                         updated_at=?, available_at=?, lease_owner='', lease_expires_at=0,
-                        lease_generation=lease_generation+1, cancel_requested=0, last_error='', result_json=NULL
+                        lease_generation=lease_generation+1, cancel_requested=0, last_error='', result_json=NULL, deadline_at=?
                     WHERE idempotency_key=?
                     """,
-                    (str(kind), _json(payload), max(1, int(max_attempts)), now, now, idempotency_key),
+                    (str(kind), _json(payload), str(request_fingerprint), max(1, int(max_attempts)), now, now, float(deadline_at), idempotency_key),
                 )
                 job_id = existing["id"]
             else:
@@ -438,11 +455,11 @@ class SQLiteControlStore:
                 connection.execute(
                     """
                     INSERT INTO jobs(
-                        id, kind, payload_json, idempotency_key, status, attempt, max_attempts,
-                        created_at, updated_at, available_at
-                    ) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?)
+                        id, kind, payload_json, idempotency_key, request_fingerprint, status, attempt, max_attempts,
+                        created_at, updated_at, available_at, deadline_at
+                    ) VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
                     """,
-                    (job_id, str(kind), _json(payload), str(idempotency_key), max(1, int(max_attempts)), now, now, now),
+                    (job_id, str(kind), _json(payload), str(idempotency_key), str(request_fingerprint), max(1, int(max_attempts)), now, now, now, float(deadline_at)),
                 )
             return _job_row(connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone())
 
@@ -454,9 +471,10 @@ class SQLiteControlStore:
                 """
                 SELECT id FROM jobs
                 WHERE status IN ('queued', 'retry') AND available_at <= ? AND cancel_requested = 0
+                    AND (deadline_at = 0 OR deadline_at > ?)
                 ORDER BY available_at, created_at LIMIT 1
                 """,
-                (now,),
+                (now, now),
             ).fetchone()
             if not candidate:
                 return None
@@ -542,6 +560,17 @@ class SQLiteControlStore:
             ).fetchone()
             return bool(row and row["cancel_requested"])
 
+    def mark_job_side_effect(self, job_id: str, worker_id: str, generation: int, fingerprint: str) -> bool:
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE jobs SET side_effect_started=1, side_effect_fingerprint=?, updated_at=?
+                WHERE id=? AND status='running' AND lease_owner=? AND lease_generation=?
+                """,
+                (str(fingerprint), time.time(), job_id, worker_id, int(generation)),
+            )
+            return cursor.rowcount == 1
+
     def recover_expired_jobs(self) -> int:
         with self.transaction() as connection:
             return self._recover_expired(connection)
@@ -549,19 +578,26 @@ class SQLiteControlStore:
     @staticmethod
     def _recover_expired(connection: sqlite3.Connection) -> int:
         now = time.time()
+        connection.execute(
+            """
+            UPDATE jobs SET status='dead_letter', last_error='job_deadline_exceeded', updated_at=?
+            WHERE status IN ('queued', 'retry') AND deadline_at > 0 AND deadline_at <= ?
+            """,
+            (now, now),
+        )
         rows = connection.execute(
-            "SELECT id, attempt, max_attempts, cancel_requested FROM jobs WHERE status='running' AND lease_expires_at <= ?",
+            "SELECT id, attempt, max_attempts, cancel_requested, side_effect_started FROM jobs WHERE status='running' AND lease_expires_at <= ?",
             (now,),
         ).fetchall()
         for row in rows:
             if row["cancel_requested"]:
-                status = "cancelled"
+                status = "cancelled_uncertain" if row["side_effect_started"] else "cancelled"
             else:
                 status = "dead_letter" if int(row["attempt"]) >= int(row["max_attempts"]) else "retry"
             connection.execute(
                 """
                 UPDATE jobs SET status=?, lease_owner='', lease_expires_at=0, available_at=?,
-                    last_error='lease_expired', updated_at=? WHERE id=?
+                    lease_generation=lease_generation+1, last_error='lease_expired', updated_at=? WHERE id=?
                 """,
                 (status, now, now, row["id"]),
             )
@@ -705,6 +741,7 @@ def _job_row(row: sqlite3.Row) -> Dict[str, Any]:
         "kind": row["kind"],
         "payload": json.loads(row["payload_json"] or "{}"),
         "idempotency_key": row["idempotency_key"],
+        "request_fingerprint": row["request_fingerprint"],
         "status": row["status"],
         "attempt": int(row["attempt"]),
         "max_attempts": int(row["max_attempts"]),
@@ -717,6 +754,9 @@ def _job_row(row: sqlite3.Row) -> Dict[str, Any]:
         "cancel_requested": bool(row["cancel_requested"]),
         "last_error": row["last_error"],
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
+        "deadline_at": float(row["deadline_at"]),
+        "side_effect_started": bool(row["side_effect_started"]),
+        "side_effect_fingerprint": row["side_effect_fingerprint"],
     }
 
 

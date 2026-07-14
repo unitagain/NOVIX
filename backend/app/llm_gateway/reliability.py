@@ -62,7 +62,10 @@ class RequestDeadline:
             raise
         if limit is not None:
             timeout = min(timeout, max(0.001, float(limit)))
-        return await asyncio.wait_for(awaitable, timeout=timeout)
+        try:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError("request_deadline_exceeded") from exc
 
     async def sleep(self, delay: float) -> None:
         await self.wait_for(asyncio.sleep(max(0.0, float(delay))))

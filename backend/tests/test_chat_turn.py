@@ -53,6 +53,9 @@ def test_chat_turn_agent_is_default_path(tmp_path):
     assert "latency_ms" in r["context_plan"]["budget"]
     assert "tool_calls" in r["context_plan"]["budget"]
     assert "llm_requests" in r["context_plan"]["budget"]
+    source_reconciliation = r["context_plan"]["reconciliation"]["sources"]
+    assert {"planned", "actual", "unexpected", "not_selected", "summary"} <= source_reconciliation.keys()
+    assert "model_assignment" in source_reconciliation["summary"]["actual_types"]
     assert (tmp_path / "p" / r["trace_ref"]).exists()
 
 

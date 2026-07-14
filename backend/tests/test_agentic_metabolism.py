@@ -1,97 +1,158 @@
 # -*- coding: utf-8 -*-
-"""Phase 8 · agentic 循环代谢（工具结果折叠）回归测试。
-
-验证多轮 agentic 循环里早期工具结果被折叠为占位符（避免上下文膨胀），最近结果保留。
-覆盖 OpenAI 兼容（role="tool"）与 Anthropic（user 内 tool_result 块）两种回放格式。
-无网络 / 无 key：用脚本化 FakeGateway + FakeToolset。
-"""
+"""H2 provider-owned tool-result folding regression tests."""
 
 import asyncio
 import copy
 
-from app.agents.agentic import run_agentic_chat, _fold_old_tool_results, _FOLD_PLACEHOLDER
+from app.agents.agentic import run_agentic_chat
+from app.context_engine.token_accounting import fold_payload_to_budget, tool_result_fold_placeholder
+from app.context_engine.tool_artifact import ToolArtifactStore
 
 
-def test_fold_openai_keeps_recent_folds_old():
-    """OpenAI 格式：预算内的最近结果保留，更早的折叠为占位符。"""
-    msgs = [
-        {"role": "tool", "tool_call_id": "1", "content": "A" * 5000},
-        {"role": "tool", "tool_call_id": "2", "content": "B" * 5000},
+def _artifact_refs(monkeypatch, tmp_path, *outputs):
+    root = tmp_path / "tool_artifacts"
+    monkeypatch.setattr(ToolArtifactStore, "default_root", staticmethod(lambda: root))
+    store = ToolArtifactStore()
+    return [
+        store.persist(output, turn_id="turn", tool_call_id=str(index), tool_name="q", status="succeeded").artifact_ref
+        for index, output in enumerate(outputs, start=1)
     ]
-    folded = _fold_old_tool_results(msgs, budget=6000)
-    assert folded == 1
-    assert msgs[1]["content"] == "B" * 5000  # 最近的保留
-    assert msgs[0]["content"] == _FOLD_PLACEHOLDER  # 更早的折叠
 
 
-def test_fold_anthropic_tool_result_blocks():
-    """Anthropic 格式：user 消息内 tool_result 块同样被折叠。"""
-    msgs = [
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "1", "content": "A" * 5000}]},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "2", "content": "B" * 5000}]},
+def test_payload_accounting_folds_old_recoverable_openai_result(monkeypatch, tmp_path):
+    refs = _artifact_refs(monkeypatch, tmp_path, "A" * 5000, "B" * 5000)
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "1",
+            "content": "A" * 5000,
+            "_recoverable": True,
+            "_source_ref": refs[0],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "2",
+            "content": "B" * 5000,
+            "_recoverable": True,
+            "_source_ref": refs[1],
+        },
     ]
-    folded = _fold_old_tool_results(msgs, budget=6000)
-    assert folded == 1
-    assert msgs[1]["content"][0]["content"] == "B" * 5000
-    assert msgs[0]["content"][0]["content"] == _FOLD_PLACEHOLDER
+    fitted, accounting, degradation = fold_payload_to_budget(
+        messages,
+        tools=None,
+        provider="openai",
+        model="gpt-4o",
+        budget=1600,
+    )
+    assert fitted[0]["content"] == tool_result_fold_placeholder(refs[0])
+    assert fitted[1]["content"] == "B" * 5000
+    assert all(not any(str(key).startswith("_") for key in message) for message in fitted)
+    assert degradation[0]["source_ref"] == refs[0]
+    assert degradation[0]["recoverable"] is True
+    assert accounting.upper_bound_tokens <= 1600
 
 
-def test_fold_disabled_when_budget_zero():
-    """budget<=0：关闭折叠，内容原样保留（能力降级，零行为变化）。"""
-    msgs = [{"role": "tool", "content": "A" * 5000}, {"role": "tool", "content": "B" * 5000}]
-    assert _fold_old_tool_results(msgs, budget=0) == 0
-    assert msgs[0]["content"] == "A" * 5000
-
-
-def test_fold_idempotent_does_not_refold_placeholder():
-    """已折叠的占位符不会被重复计数（幂等）。"""
-    msgs = [
-        {"role": "tool", "content": _FOLD_PLACEHOLDER},
-        {"role": "tool", "content": "B" * 5000},
+def test_payload_accounting_folds_recoverable_anthropic_block(monkeypatch, tmp_path):
+    refs = _artifact_refs(monkeypatch, tmp_path, "A" * 5000, "B" * 5000)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "1",
+                    "content": "A" * 5000,
+                    "_recoverable": True,
+                    "_source_ref": refs[0],
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "2",
+                    "content": "B" * 5000,
+                    "_recoverable": True,
+                    "_source_ref": refs[1],
+                }
+            ],
+        },
     ]
-    assert _fold_old_tool_results(msgs, budget=6000) == 0
+    fitted, _, degradation = fold_payload_to_budget(
+        messages,
+        tools=None,
+        provider="anthropic",
+        model="claude-sonnet-4-5",
+        budget=1000,
+    )
+    assert fitted[0]["content"][0]["content"] == tool_result_fold_placeholder(refs[0])
+    assert fitted[1]["content"][0]["content"] == "B" * 5000
+    assert degradation[0]["source_ref"] == refs[0]
+
+
+def test_payload_accounting_never_folds_nonrecoverable_prose():
+    messages = [
+        {"role": "user", "content": "正文" * 3000},
+        {"role": "tool", "content": "不可恢复结果" * 1000, "_recoverable": False},
+    ]
+    fitted, accounting, degradation = fold_payload_to_budget(
+        messages,
+        tools=None,
+        provider="deepseek",
+        model="deepseek-chat",
+        budget=100,
+    )
+    assert fitted[0]["content"] == "正文" * 3000
+    assert fitted[1]["content"] == "不可恢复结果" * 1000
+    assert degradation == []
+    assert accounting.upper_bound_tokens > 100
 
 
 class _FakeToolset:
     @staticmethod
     def schemas():
-        return [{"type": "function", "function": {"name": "q", "description": "x", "parameters": {"type": "object"}}}]
+        return [{"type": "function", "function": {"name": "q", "description": "x", "parameters": {}}}]
 
-    async def execute(self, name, arguments):
-        return "X" * 5000  # 长结果，触发跨轮折叠
+    @staticmethod
+    def is_result_recoverable(_name):
+        return True
+
+    async def execute(self, _name, _arguments):
+        return "X" * 5000
 
 
 class _FakeGateway:
-    """脚本化网关：按调用次序返回预设响应，并记录每次收到的 msgs 快照。"""
-
     def __init__(self, scripted):
         self.scripted = scripted
         self.calls = []
 
-    async def chat(self, msgs, **kwargs):
-        self.calls.append(copy.deepcopy(msgs))
-        idx = min(len(self.calls) - 1, len(self.scripted) - 1)
-        return self.scripted[idx]
+    async def chat(self, messages, **_kwargs):
+        self.calls.append(copy.deepcopy(messages))
+        index = min(len(self.calls) - 1, len(self.scripted) - 1)
+        return self.scripted[index]
 
 
-def test_run_agentic_chat_folds_across_rounds():
-    """端到端：多轮工具调用后，最终一次 chat 收到的 msgs 里早期工具结果已折叠。"""
-    resp_tool = {"provider": "openai", "content": "", "tool_calls": [{"id": "1", "name": "q", "arguments": "{}"}]}
-    resp_final = {"provider": "openai", "content": "done", "tool_calls": None}
-    gw = _FakeGateway([resp_tool, resp_tool, resp_final])
+def test_agentic_loop_does_not_own_runtime_folding():
+    tool_response = {
+        "provider": "openai",
+        "content": "",
+        "tool_calls": [{"id": "1", "name": "q", "arguments": "{}"}],
+    }
+    final_response = {"provider": "openai", "content": "done", "tool_calls": None}
+    gateway = _FakeGateway([tool_response, tool_response, final_response])
 
     result = asyncio.run(
         run_agentic_chat(
-            gw,
+            gateway,
             "openai",
             [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
             _FakeToolset(),
-            tool_result_budget=6000,
+            tool_result_budget=1,
         )
     )
+
     assert result["content"] == "done"
-    # 第 3 次 chat（resp_final）收到的 msgs：累计两条 5000 字结果 > 6000，最早一条应被折叠
-    last_msgs = gw.calls[-1]
-    tool_contents = [m["content"] for m in last_msgs if m.get("role") == "tool"]
-    assert tool_contents.count(_FOLD_PLACEHOLDER) == 1
-    assert ("X" * 5000) in tool_contents  # 最近一条仍保留
+    tool_contents = [message["content"] for message in gateway.calls[-1] if message.get("role") == "tool"]
+    assert tool_contents == ["X" * 5000, "X" * 5000]

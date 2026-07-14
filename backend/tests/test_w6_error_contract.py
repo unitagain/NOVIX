@@ -17,10 +17,10 @@ from app.error_contract import (
     classify_benchmark_failure_record,
     error_envelope,
 )
+from scripts.error_contract_audit import audit
 from app.jobs.durable_queue import DurableTaskQueue
 from app.llm_gateway.errors import LLMError
 from app.main import global_exception_handler
-from scripts.error_contract_audit import audit
 
 
 def test_error_envelope_is_stable_and_does_not_expose_internal_message():

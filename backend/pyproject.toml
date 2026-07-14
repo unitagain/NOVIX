@@ -21,4 +21,38 @@ line-length = 120
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E9", "F63", "F7", "F82", "F401", "F841", "E741"]
+select = ["E9", "F63", "F7", "F82", "F401", "F841", "E741", "B006", "B008", "B018", "C401", "C408"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/routers/*.py" = ["B008"]  # FastAPI dependency declarations intentionally call Body/Depends in defaults.
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "skip"
+show_error_codes = true
+warn_unused_configs = true
+files = [
+    "app/context_engine/models.py",
+    "app/context_engine/token_accounting.py",
+    "app/context_engine/source_snapshot.py",
+    "app/context_engine/tool_artifact.py",
+    "app/context_engine/memory_record.py",
+    "app/context_engine/select_engine.py",
+    "app/agents/runtime_result.py",
+    "app/agents/agent_task.py",
+    "app/control_plane/store.py",
+    "app/jobs/durable_queue.py",
+    "app/utils/permissions.py",
+    "app/storage/canon.py",
+    "app/storage/creative_memory.py",
+    "app/services/memory_lifecycle_service.py",
+    "app/orchestrator/application_ports.py",
+    "app/eval/longform_pipeline.py",
+    "app/llm_gateway/capabilities.py",
+    "app/llm_gateway/contracts.py",
+    "app/llm_gateway/errors.py",
+    "app/llm_gateway/payload_accounting.py",
+    "app/llm_gateway/reliability.py",
+    "app/llm_gateway/telemetry.py",
+]

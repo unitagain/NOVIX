@@ -228,9 +228,9 @@ def estimate_tokens(text: str) -> int:
 
     使用 token_counter 模块的精确计数
     """
-    from app.context_engine.token_counter import count_tokens
+    from app.context_engine.token_accounting import count_text_tokens
 
-    return count_tokens(text)
+    return count_text_tokens(text).tokens
 
 
 def count_tokens_accurate(text: str) -> int:
@@ -238,6 +238,6 @@ def count_tokens_accurate(text: str) -> int:
     更精确的 Token 计数
     More accurate token counting
     """
-    from app.context_engine.token_counter import count_tokens
+    from app.context_engine.token_accounting import count_text_tokens
 
-    return count_tokens(text)
+    return count_text_tokens(text).tokens

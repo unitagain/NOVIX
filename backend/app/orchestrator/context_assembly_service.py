@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.config import config
+from app.context_engine.turn_scope import current_turn_scope
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,67 @@ class ContextAssemblyService:
             if reserve > 0:
                 requested_max = min(requested_max, reserve)
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        scope = current_turn_scope()
+        if scope is not None and scope.source_closure_required:
+            source_rows = [
+                {
+                    "source_id": "prompt.writer.system",
+                    "asset_type": "prompt",
+                    "content": system,
+                    "selection_reason": "writer_system_prompt",
+                    "artifact_ref": "ContextAssemblyService.build_writer_system",
+                },
+                {
+                    "source_id": "input.user_message",
+                    "asset_type": "user_message",
+                    "content": str(message or ""),
+                    "selection_reason": "author_instruction",
+                    "artifact_ref": "session_chat:message",
+                },
+                {
+                    "source_id": "target.chapter",
+                    "asset_type": "chapter",
+                    "content": str(chapter or ""),
+                    "selection_reason": "target_chapter",
+                    "artifact_ref": "session_chat:chapter",
+                },
+                {
+                    "source_id": "config.writer_runtime",
+                    "asset_type": "project_config",
+                    "content": {
+                        "agentic_max_iterations": int(config.get("retrieval", {}).get("agentic_max_iterations", 4)),
+                        "language": self.language,
+                        "target_word_count": int(target_word_count),
+                    },
+                    "selection_reason": "writer_runtime_configuration",
+                    "artifact_ref": "config.yaml:retrieval",
+                },
+                {
+                    "source_id": "prompt.writer.user",
+                    "asset_type": "prompt",
+                    "content": user,
+                    "selection_reason": "writer_user_prompt_projection",
+                    "artifact_ref": "ContextAssemblyService.build_writer_user",
+                },
+            ]
+            if current_text:
+                source_rows.append(
+                    {
+                        "source_id": "draft.current",
+                        "asset_type": "draft",
+                        "content": current_text,
+                        "selection_reason": "edit_baseline",
+                        "artifact_ref": f"draft:{chapter}",
+                    }
+                )
+            for row in source_rows:
+                scope.register_source_content(**row)
+            scope.register_provider_payload(
+                messages,
+                source_prefix="writer.initial",
+                selection_reason="writer_initial_assembly",
+                artifact_ref="ContextAssemblyService.assemble_writer_request",
+            )
         payload = {
             "messages": messages,
             "temperature": 0.7,

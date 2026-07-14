@@ -154,7 +154,7 @@ def test_persistent_idempotency_blocks_restart_reissue(tmp_path):
 def test_durable_queue_idempotency_lease_retry_and_dead_letter(tmp_path):
     queue = DurableTaskQueue(tmp_path / "queue")
     first = asyncio.run(queue.enqueue("work", {"value": 1}, idempotency_key="same", max_attempts=2))
-    second = asyncio.run(queue.enqueue("work", {"value": 2}, idempotency_key="same", max_attempts=2))
+    second = asyncio.run(queue.enqueue("work", {"value": 1}, idempotency_key="same", max_attempts=2))
     assert first["id"] == second["id"]
     claimed = asyncio.run(queue.claim("worker"))
     claimed["lease_expires_at"] = 0

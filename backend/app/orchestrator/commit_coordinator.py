@@ -29,14 +29,14 @@ class CommitCoordinator:
         runtime = scope.runtime if scope is not None else None
         if runtime is not None and runtime.state not in {TurnState.COMMITTING, TurnState.COMPLETED}:
             runtime.transition(TurnState.COMMITTING)
-        kwargs = dict(
-            project_id=project_id,
-            chapter=chapter,
-            version=version,
-            content=content,
-            word_count=word_count,
-            pending_confirmations=pending_confirmations or [],
-        )
+        kwargs = {
+            "project_id": project_id,
+            "chapter": chapter,
+            "version": version,
+            "content": content,
+            "word_count": word_count,
+            "pending_confirmations": pending_confirmations or [],
+        }
         if expected_revision is not None:
             kwargs["expected_revision"] = expected_revision
         return await self.draft_storage.save_draft(**kwargs)
@@ -53,11 +53,7 @@ class CommitCoordinator:
         runtime = scope.runtime if scope is not None else None
         if runtime is not None and runtime.state not in {TurnState.COMMITTING, TurnState.COMPLETED}:
             runtime.transition(TurnState.COMMITTING)
-        kwargs = dict(
-            project_id=project_id,
-            chapter=chapter,
-            content=content,
-        )
+        kwargs = {"project_id": project_id, "chapter": chapter, "content": content}
         if expected_revision is not None:
             kwargs["expected_revision"] = expected_revision
         await self.draft_storage.save_final_draft(**kwargs)

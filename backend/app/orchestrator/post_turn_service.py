@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Dict, List
 
+from app.context_engine.turn_scope import current_turn_scope
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,6 +33,7 @@ class PostTurnService:
         keep_recent: int = 40,
         trigger_at: int = 120,
         trigger_tokens: int = 24000,
+        recent_token_budget: int = 8000,
     ) -> Dict[str, Any]:
         extracted: List[str] = []
         pending_memories: List[Dict[str, Any]] = []
@@ -59,12 +61,18 @@ class PostTurnService:
                 logger.warning("preference extraction during compact failed: %s", exc)
             return summary
 
+        scope = current_turn_scope()
+        active_plan = scope.active_plan if scope is not None else None
+        provider_plan = getattr(active_plan, "provider", {}) or {}
         result = await self.session_history.compact(
             project_id,
             summarizer,
             keep_recent=keep_recent,
             trigger_at=trigger_at,
             trigger_tokens=trigger_tokens,
+            recent_token_budget=recent_token_budget,
+            provider=str(provider_plan.get("provider") or provider_plan.get("profile_id") or ""),
+            model=str(provider_plan.get("model") or ""),
             provenance=provenance,
             semantic_verifier=self.verify_compact,
         )

@@ -21,7 +21,14 @@ class StorageCandidateSource:
 
     @staticmethod
     async def facts(storage: Any, project_id: str) -> List[Any]:
-        return list(await storage.get_all_facts(project_id) or [])
+        getter = getattr(storage, "get_eligible_facts", None)
+        if callable(getter):
+            return list(await getter(project_id) or [])
+        return [
+            fact
+            for fact in list(await storage.get_all_facts(project_id) or [])
+            if str(getattr(fact, "status", "needs_review") or "needs_review") == "confirmed"
+        ]
 
     @staticmethod
     async def character_names(storage: Any, project_id: str) -> List[str]:

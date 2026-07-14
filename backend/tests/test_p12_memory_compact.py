@@ -44,6 +44,7 @@ def test_expired_and_conflicting_memories_never_enter_recall(tmp_path):
     asyncio.run(store.write_memory("p", "formal", "对白使用正式书面语", "决定 A"))
     asyncio.run(store.write_memory("p", "casual", "对白使用自然口语", "决定 B"))
     asyncio.run(store.set_memory_conflicts("p", "formal", ["casual"]))
+    assert asyncio.run(store.expire_due_memories("p")) == ["expired"]
 
     hits = asyncio.run(store.recall("p", "对白使用", top_k=10))
     assert hits == []
@@ -97,6 +98,11 @@ def test_compact_artifact_epoch_verification_and_recovery(tmp_path):
     artifact = asyncio.run(store.read_compact_artifact("p", result["compact_artifact_id"]))
     recovered = asyncio.run(store.recover_compact_sources("p", result["compact_artifact_id"]))
     assert artifact["constraints"] == ["不得让凶手提前现身"]
+    assert len(artifact["selected_turn_ids"]) == 8
+    assert artifact["preserved_tail_id"]
+    assert artifact["source_token_estimate"] > artifact["summary_token_estimate"] > 0
+    assert artifact["accounting_estimator"] == artifact["source_accounting"]["tokenizer"]
+    assert artifact["source_accounting"]["calibration_policy_adjusted"] is False
     assert len(recovered) == 8
     rebuilt = CompactArtifactV2(**artifact)
     assert CompactVerifier.verify(rebuilt, recovered)["valid"] is True
@@ -140,7 +146,13 @@ def test_compact_semantic_verifier_blocks_commit(tmp_path):
 
 def test_p12_context_variants_hard_filter_memory_and_expose_recovery():
     memories = [
-        {"slug": "valid", "status": "active", "description": "有效偏好"},
+        {
+            "slug": "valid",
+            "status": "active",
+            "description": "有效偏好",
+            "source": "author",
+            "trust_label": "trusted",
+        },
         {"slug": "rejected", "status": "rejected", "description": "错误偏好"},
     ]
     payload = assemble_p12_context(
@@ -149,7 +161,7 @@ def test_p12_context_variants_hard_filter_memory_and_expose_recovery():
         memories=memories,
     )
     assert [item["slug"] for item in payload["creative_memory"]] == ["valid"]
-    assert payload["memory_excluded"][0]["reasons"] == ["status:rejected"]
+    assert "status:rejected" in payload["memory_excluded"][0]["reasons"]
     assert payload["p12_context_fingerprint"]
 
     recovered = assemble_p12_context(

@@ -26,7 +26,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from app.context_engine.compact_artifact import CompactArtifactV2, CompactVerifier
+from app.context_engine.compact_artifact import (
+    CompactArtifactV2,
+    CompactVerifier,
+    compact_summary_payload,
+    stable_message_hash,
+)
+from app.context_engine.token_accounting import TokenAccounting, count_provider_payload, count_text_tokens
 from app.error_contract import safe_error_code
 from app.storage.base import BaseStorage
 from app.storage.file_lock import get_file_lock
@@ -34,7 +40,7 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_ALLOWED_ROLES = {"user", "assistant", "system"}
+_ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
 
 
 class SessionHistoryStorage(BaseStorage):
@@ -67,6 +73,11 @@ class SessionHistoryStorage(BaseStorage):
         mtype = message.get("type")
         if mtype:
             item["type"] = str(mtype)
+        for key in ("turn_id", "tool_call_id", "name"):
+            if message.get(key):
+                item[key] = str(message[key])
+        if isinstance(message.get("tool_calls"), list):
+            item["tool_calls"] = list(message["tool_calls"])
         return item
 
     async def append(self, project_id: str, message: Dict[str, Any]) -> Dict[str, Any]:
@@ -104,51 +115,105 @@ class SessionHistoryStorage(BaseStorage):
         keep_recent: int = 40,
         trigger_at: int = 120,
         trigger_tokens: int = 24000,
+        recent_token_budget: int = 8000,
+        provider: str = "",
+        model: str = "",
         provenance: Optional[Dict[str, Any]] = None,
         semantic_verifier: Optional[
             Callable[[CompactArtifactV2, List[Dict[str, Any]]], Awaitable[Dict[str, Any]]]
         ] = None,
     ) -> Dict[str, Any]:
-        """长对话压缩。
+        """Compact complete turns while preserving a count- and token-bounded raw tail."""
 
-        消息数 ≤ max(trigger_at, keep_recent) → 不动（返回 compacted=False）。否则把"最旧的、
-        非近 keep_recent 条、且非既有摘要"的消息交给 summarizer 压成一条 summary 系统消息，重写为
-        ``头部既有摘要 + 新摘要 + 近 keep_recent 条``。summarizer 失败/空摘要 → 安全不动（不丢数据）。
-
-        Args:
-            summarizer: async (old_messages) -> summary_text，由调用方注入（LLM 或规则压缩）。
-        """
         path = self._path(project_id)
         items = await self.read_jsonl(path)
-        token_estimate = sum(max(1, len(str(item.get("content") or "")) // 4) for item in items)
-        count_pressure = len(items) > max(trigger_at, keep_recent)
-        token_pressure = trigger_tokens > 0 and token_estimate > trigger_tokens
-        if not count_pressure and not token_pressure:
-            return {"compacted": False, "total": len(items), "token_estimate": token_estimate}
-
-        split = len(items) - keep_recent
         materialized = [self._with_recovery_id(item, index) for index, item in enumerate(items)]
-        older, recent = materialized[:split], materialized[split:]
-        to_compress = older
-        if not to_compress:
-            return {"compacted": False, "total": len(items)}
+        previous_compact = [item for item in materialized if item.get("type") == "summary"]
+        raw_messages = [item for item in materialized if item.get("type") != "summary"]
+        turns = self._group_complete_turns(raw_messages)
+        total_accounting = count_provider_payload(materialized, provider=provider, model=model)
+        count_pressure = len(turns) > max(1, int(trigger_at))
+        token_pressure = trigger_tokens > 0 and total_accounting.upper_bound_tokens > trigger_tokens
+        if not count_pressure and not token_pressure:
+            return {
+                "compacted": False,
+                "total": len(items),
+                "turns": len(turns),
+                "accounting": {"total": total_accounting.to_dict()},
+            }
 
-        source_messages = to_compress
-        await self._ensure_event_archive(project_id, items)
+        recent_turns, tail_accounting, tail_overflow = self._select_recent_turns(
+            turns,
+            keep_recent=max(1, int(keep_recent)),
+            token_budget=max(0, int(recent_token_budget)),
+            provider=provider,
+            model=model,
+        )
+        older_turns = turns[: len(turns) - len(recent_turns)]
+        recent = [message for turn in recent_turns for message in turn["messages"]]
+        source_messages = [message for turn in older_turns for message in turn["messages"]]
+        if not source_messages:
+            return {
+                "compacted": False,
+                "total": len(items),
+                "turns": len(turns),
+                "error": "recent_tail_consumes_all_source",
+                "tail_budget_overflow": tail_overflow,
+                "accounting": {
+                    "total": total_accounting.to_dict(),
+                    "recent_tail": tail_accounting.to_dict(),
+                },
+            }
+
+        await self._ensure_event_archive(project_id, raw_messages)
+        summary_inputs = [*previous_compact, *source_messages]
 
         try:
-            summary = await summarizer(to_compress)
+            summary = await summarizer(summary_inputs)
         except Exception as exc:
             logger.warning("conversation compact summarizer failed: %s", exc)
-            return {"compacted": False, "total": len(items), "error": safe_error_code(exc)}
+            return {
+                "compacted": False,
+                "total": len(items),
+                "error": safe_error_code(exc),
+                "accounting": {"total": total_accounting.to_dict(), "recent_tail": tail_accounting.to_dict()},
+            }
         if not summary or (isinstance(summary, str) and not summary.strip()):
-            return {"compacted": False, "total": len(items)}
+            return {"compacted": False, "total": len(items), "error": "compact_empty_summary"}
+
+        effective_provider = str((provenance or {}).get("provider") or provider or "")
+        effective_model = str((provenance or {}).get("model") or model or "")
+        source_accounting = count_provider_payload(
+            source_messages,
+            provider=effective_provider,
+            model=effective_model,
+        )
+        summary_accounting = count_text_tokens(
+            compact_summary_payload(summary),
+            provider=effective_provider,
+            model=effective_model,
+        )
+        if summary_accounting.upper_bound_tokens >= source_accounting.upper_bound_tokens:
+            return {
+                "compacted": False,
+                "total": len(items),
+                "error": "compact_summary_overflow",
+                "accounting": {
+                    "source": source_accounting.to_dict(),
+                    "summary": summary_accounting.to_dict(),
+                    "recent_tail": tail_accounting.to_dict(),
+                },
+            }
 
         state = await self._read_compact_state(project_id)
         parent_epoch = int(state.get("epoch") or 0) or None
         epoch = int(parent_epoch or 0) + 1
         artifact_id = f"compact_epoch_{epoch:06d}"
         recovery_refs = [str(item["event_id"]) for item in source_messages]
+        selected_turn_ids = [str(turn["turn_id"]) for turn in older_turns]
+        preserved_tail_id = str(recent_turns[0]["turn_id"]) if recent_turns else ""
+        parent_artifact_id = str(state.get("artifact_id") or "")
+        parent_artifact = await self.read_compact_artifact(project_id, parent_artifact_id) if parent_artifact_id else None
         artifact = CompactArtifactV2.from_summary(
             artifact_id=artifact_id,
             epoch=epoch,
@@ -156,10 +221,14 @@ class SessionHistoryStorage(BaseStorage):
             summary=summary,
             source_messages=source_messages,
             recovery_refs=recovery_refs,
-            parent_artifact_id=str(state.get("artifact_id") or ""),
+            parent_artifact_id=parent_artifact_id,
             provenance=provenance,
+            selected_turn_ids=selected_turn_ids,
+            preserved_tail_id=preserved_tail_id,
+            source_accounting=source_accounting.to_dict(),
+            summary_accounting=summary_accounting.to_dict(),
         )
-        verification = CompactVerifier.verify(artifact, source_messages)
+        verification = CompactVerifier.verify(artifact, source_messages, parent_artifact=parent_artifact)
         if not verification["valid"]:
             return {
                 "compacted": False,
@@ -167,10 +236,18 @@ class SessionHistoryStorage(BaseStorage):
                 "error": "compact_verification_failed",
                 "verification": verification,
             }
+        lineage_verification = await self._verify_compact_lineage(project_id, artifact)
+        if lineage_verification.get("valid") is not True:
+            return {
+                "compacted": False,
+                "total": len(items),
+                "error": "compact_lineage_verification_failed",
+                "lineage_verification": lineage_verification,
+            }
         semantic_verification: Dict[str, Any] = {"available": False, "valid": True}
         if semantic_verifier is not None:
             try:
-                semantic_verification = dict(await semantic_verifier(artifact, source_messages) or {})
+                semantic_verification = dict(await semantic_verifier(artifact, summary_inputs) or {})
             except Exception as exc:
                 logger.warning("conversation compact semantic verifier failed: %s", exc)
                 return {
@@ -193,12 +270,18 @@ class SessionHistoryStorage(BaseStorage):
             "content": self._render_artifact(artifact),
             "ts": int(time.time() * 1000),
             "event_id": f"summary_{artifact_id}",
-            "compacted_count": len(to_compress),
+            "compacted_count": len(source_messages),
+            "compacted_turn_count": len(older_turns),
             "compact_artifact_id": artifact.id,
             "context_epoch": artifact.epoch,
             "parent_epoch": artifact.parent_epoch,
             "source_sha256": artifact.source_range["sha256"],
             "recovery_refs": artifact.recovery_refs,
+            "selected_turn_ids": artifact.selected_turn_ids,
+            "preserved_tail_id": artifact.preserved_tail_id,
+            "source_token_estimate": artifact.source_token_estimate,
+            "summary_token_estimate": artifact.summary_token_estimate,
+            "accounting_estimator": artifact.accounting_estimator,
         }
         file_lock = get_file_lock()
         async with self.content_transaction(project_id):
@@ -226,14 +309,32 @@ class SessionHistoryStorage(BaseStorage):
             "compacted": True,
             "before": len(current),
             "after": len(new_items),
-            "summarized": len(to_compress),
+            "summarized": len(source_messages),
+            "summarized_turns": len(older_turns),
+            "preserved_tail_turns": len(recent_turns),
+            "preserved_tail_id": preserved_tail_id,
+            "tail_budget_overflow": tail_overflow,
             "preserved_concurrent_appends": len(appended),
             "context_epoch": epoch,
             "compact_artifact_id": artifact.id,
             "source_snapshot_sha256": artifact.source_range["sha256"],
             "verification": verification,
+            "lineage_verification": lineage_verification,
             "semantic_verification": semantic_verification,
-            "token_estimate": token_estimate,
+            "layers": {
+                "previous_compact_messages": len(previous_compact),
+                "previous_compact_artifact_id": parent_artifact_id,
+                "selected_raw_messages": len(source_messages),
+                "selected_raw_turns": len(older_turns),
+                "recent_tail_messages": len(recent),
+                "recent_tail_turns": len(recent_turns),
+            },
+            "accounting": {
+                "total": total_accounting.to_dict(),
+                "source": source_accounting.to_dict(),
+                "summary": summary_accounting.to_dict(),
+                "recent_tail": tail_accounting.to_dict(),
+            },
         }
 
     async def read_compact_artifact(self, project_id: str, artifact_id: str) -> Optional[Dict[str, Any]]:
@@ -249,7 +350,7 @@ class SessionHistoryStorage(BaseStorage):
         artifact = await self.read_compact_artifact(project_id, artifact_id)
         if not artifact:
             return []
-        refs = set(str(item) for item in artifact.get("recovery_refs") or [])
+        refs = {str(item) for item in artifact.get("recovery_refs") or []}
         events = await self.read_jsonl(self._event_path(project_id))
         return [item for item in events if str(item.get("event_id") or "") in refs]
 
@@ -264,6 +365,93 @@ class SessionHistoryStorage(BaseStorage):
             return dict(json.loads(await self.read_text(path)) or {})
         except (OSError, ValueError, json.JSONDecodeError):
             return {}
+
+    @staticmethod
+    def _group_complete_turns(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Group legacy or explicit-turn messages without splitting tool exchanges."""
+
+        turns: List[Dict[str, Any]] = []
+        current: Optional[Dict[str, Any]] = None
+        for message in messages:
+            explicit_turn_id = str(message.get("turn_id") or "")
+            role = str(message.get("role") or "user")
+            starts_turn = current is None or role == "user"
+            if explicit_turn_id and current is not None and explicit_turn_id != current["turn_id"]:
+                starts_turn = True
+            if starts_turn:
+                event_id = str(message.get("event_id") or f"legacy_{len(turns):06d}")
+                current = {
+                    "turn_id": explicit_turn_id or f"turn_{event_id}",
+                    "messages": [],
+                }
+                turns.append(current)
+            current["messages"].append(message)
+        return turns
+
+    @staticmethod
+    def _select_recent_turns(
+        turns: List[Dict[str, Any]],
+        *,
+        keep_recent: int,
+        token_budget: int,
+        provider: str,
+        model: str,
+    ) -> tuple[List[Dict[str, Any]], TokenAccounting, bool]:
+        """Select a deterministic newest suffix constrained by turns and tokens."""
+
+        candidates = turns[-max(1, keep_recent) :]
+        selected: List[Dict[str, Any]] = []
+        accounting = count_provider_payload([], provider=provider, model=model)
+        for turn in reversed(candidates):
+            proposed = [turn, *selected]
+            proposed_messages = [message for item in proposed for message in item["messages"]]
+            proposed_accounting = count_provider_payload(proposed_messages, provider=provider, model=model)
+            if selected and token_budget > 0 and proposed_accounting.upper_bound_tokens > token_budget:
+                break
+            selected = proposed
+            accounting = proposed_accounting
+        overflow = bool(token_budget > 0 and accounting.upper_bound_tokens > token_budget)
+        return selected, accounting, overflow
+
+    async def _verify_compact_lineage(
+        self,
+        project_id: str,
+        artifact: CompactArtifactV2,
+    ) -> Dict[str, Any]:
+        """Verify parent availability, acyclic epochs, and archived source hashes."""
+
+        errors: List[str] = []
+        seen = {artifact.id}
+        parent_id = str(artifact.parent_artifact_id or "")
+        expected_epoch = int(artifact.parent_epoch or 0)
+        events = await self.read_jsonl(self._event_path(project_id))
+        events_by_id = {str(item.get("event_id") or ""): item for item in events if item.get("event_id")}
+        depth = 0
+        while parent_id:
+            depth += 1
+            if parent_id in seen:
+                errors.append("lineage_cycle")
+                break
+            seen.add(parent_id)
+            parent = await self.read_compact_artifact(project_id, parent_id)
+            if not parent:
+                errors.append("parent_artifact_missing")
+                break
+            if int(parent.get("epoch") or 0) != expected_epoch:
+                errors.append("parent_epoch_mismatch")
+                break
+            refs = [str(item) for item in parent.get("recovery_refs") or []]
+            missing = [ref for ref in refs if ref not in events_by_id]
+            if missing:
+                errors.append("parent_recovery_ref_missing")
+                break
+            recovered = [events_by_id[ref] for ref in refs]
+            if stable_message_hash(recovered) != str((parent.get("source_range") or {}).get("sha256") or ""):
+                errors.append("parent_source_hash_mismatch")
+                break
+            parent_id = str(parent.get("parent_artifact_id") or "")
+            expected_epoch = int(parent.get("parent_epoch") or 0)
+        return {"valid": not errors, "errors": errors, "depth": depth, "artifacts": sorted(seen)}
 
     async def _ensure_event_archive(self, project_id: str, active_items: List[Dict[str, Any]]) -> None:
         path = self._event_path(project_id)

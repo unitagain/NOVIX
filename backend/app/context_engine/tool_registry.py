@@ -11,8 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Sequence
 
-from app.utils.permissions import permission_for
-from app.utils.trust import permission_with_trust
+from app.utils.permissions import decide_permission
 
 
 @dataclass(frozen=True)
@@ -29,17 +28,19 @@ class ToolSpec:
     permission: str = ""
 
     def to_loadout(self, *, consumed_untrusted: bool = False) -> Dict[str, Any]:
-        base_permission = self.permission or permission_for(self.name)
+        decision = decide_permission(
+            self.name,
+            resource_scope={"scope": self.scope},
+            trust_context={"consumed_untrusted": consumed_untrusted},
+            base_permission=self.permission or None,
+            read_only=self.read_only,
+            external=self.external,
+        )
         return {
             "name": self.name,
             "description": self.description,
-            "permission": permission_with_trust(
-                self.name,
-                consumed_untrusted=consumed_untrusted,
-                base_permission=base_permission,
-                read_only=self.read_only,
-                external=self.external,
-            ),
+            "permission": decision.level.value,
+            "permission_decision": decision.to_dict(),
             "context_cost": self.context_cost,
             "scope": self.scope,
             "enabled_for": list(self.enabled_for),
@@ -219,7 +220,10 @@ def tool_loadout(
                 {
                     "name": key,
                     "description": "Unregistered tool; conservative permission applies.",
-                    "permission": permission_with_trust(key, consumed_untrusted=consumed_untrusted),
+                    "permission": decide_permission(
+                        key,
+                        trust_context={"consumed_untrusted": consumed_untrusted},
+                    ).level.value,
                     "context_cost": 120,
                     "scope": "unknown",
                     "enabled_for": [],

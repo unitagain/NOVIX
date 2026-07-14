@@ -16,19 +16,16 @@ from typing import List, Dict, Any, Optional
 from app.llm_gateway import LLMGateway
 from app.storage import CardStorage, CanonStorage, DraftStorage
 from app.context_engine.trace_collector import trace_collector, TraceEventType
-from app.context_engine.token_counter import count_tokens, get_model_context_window
+from app.context_engine.token_accounting import count_provider_payload, count_text_tokens
+from app.context_engine.token_counter import get_model_context_window
 from app.prompts import base_agent_system_prompt, format_context_message
 from app.utils.llm_output import parse_json_payload
+from app.context_engine.turn_scope import current_turn_scope
 from app.utils.json_metrics import record_json_result
 from app.utils.logger import get_logger
 from app.error_contract import record_degradation
 
 logger = get_logger(__name__)
-
-# 安全边际：预留给 messages 格式开销（角色标记、分隔符等）
-# Safety margin for message formatting overhead (role tokens, separators, etc.)
-_MESSAGE_OVERHEAD_TOKENS = 200
-
 
 class BaseAgent(ABC):
     """
@@ -142,6 +139,14 @@ class BaseAgent(ABC):
         if temperature is None:
             temperature = self.gateway.get_temperature_for_agent(agent_name)
 
+        scope = current_turn_scope()
+        if scope is not None and scope.source_closure_required:
+            scope.register_provider_payload(
+                messages,
+                source_prefix=f"agent.{agent_name}.final",
+                selection_reason="base_agent_final_request",
+                artifact_ref=f"{self.__class__.__module__}.{self.__class__.__name__}.call_llm",
+            )
         response = await self.gateway.chat(
             messages=messages,
             provider=provider,
@@ -253,6 +258,14 @@ class BaseAgent(ABC):
         if temperature is None:
             temperature = self.gateway.get_temperature_for_agent(agent_name)
 
+        scope = current_turn_scope()
+        if scope is not None and scope.source_closure_required:
+            scope.register_provider_payload(
+                messages,
+                source_prefix=f"agent.{agent_name}.stream",
+                selection_reason="base_agent_stream_request",
+                artifact_ref=f"{self.__class__.__module__}.{self.__class__.__name__}.call_llm_stream",
+            )
         has_chunk = False
         try:
             async for chunk in self.gateway.stream_chat(
@@ -289,8 +302,17 @@ class BaseAgent(ABC):
             2. Context message (if provided, may be trimmed)
             3. User message
         """
-        # 计算不可裁剪部分的 token 数（系统提示词 + 用户指令 + 格式开销）
-        fixed_tokens = count_tokens(system_prompt) + count_tokens(user_prompt) + _MESSAGE_OVERHEAD_TOKENS
+        try:
+            profile = dict(self.gateway.get_profile_for_agent(self.get_agent_name()) or {})
+        except Exception:
+            profile = {}
+        provider_name = str(profile.get("provider") or profile.get("id") or "")
+        model_name = str(profile.get("model") or "")
+        fixed_tokens = count_provider_payload(
+            [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+            provider=provider_name,
+            model=model_name,
+        ).upper_bound_tokens
 
         # 获取模型输入 token 上限
         input_limit = self._get_input_token_limit()
@@ -299,6 +321,8 @@ class BaseAgent(ABC):
         trimmed_items = self._trim_context_items(
             context_items or [],
             max_context_tokens=input_limit - fixed_tokens,
+            provider=provider_name,
+            model=model_name,
         )
 
         messages = [{"role": "system", "content": system_prompt}]
@@ -307,6 +331,38 @@ class BaseAgent(ABC):
             messages.append({"role": "user", "content": format_context_message(trimmed_items, language=self.language)})
 
         messages.append({"role": "user", "content": user_prompt})
+
+        scope = current_turn_scope()
+        if scope is not None and scope.source_closure_required:
+            agent_name = self.get_agent_name()
+            scope.register_source_content(
+                source_id=f"prompt.{agent_name}.system",
+                asset_type="prompt",
+                content=system_prompt,
+                selection_reason="agent_system_prompt",
+                artifact_ref=f"{self.__class__.__module__}.{self.__class__.__name__}.build_messages",
+            )
+            for index, item in enumerate(trimmed_items):
+                scope.register_source_content(
+                    source_id=f"context.{agent_name}.{index}",
+                    asset_type="assembled_context",
+                    content=item,
+                    selection_reason="token_budget_selected_context",
+                    artifact_ref=f"agent_context:{agent_name}",
+                )
+            scope.register_source_content(
+                source_id=f"prompt.{agent_name}.user",
+                asset_type="user_message",
+                content=user_prompt,
+                selection_reason="agent_user_prompt",
+                artifact_ref=f"{self.__class__.__module__}.{self.__class__.__name__}.build_messages",
+            )
+            scope.register_provider_payload(
+                messages,
+                source_prefix=f"agent.{agent_name}",
+                selection_reason="base_agent_message_assembly",
+                artifact_ref=f"{self.__class__.__module__}.{self.__class__.__name__}.build_messages",
+            )
 
         return messages
 
@@ -343,6 +399,9 @@ class BaseAgent(ABC):
     def _trim_context_items(
         context_items: List[str],
         max_context_tokens: int,
+        *,
+        provider: str = "",
+        model: str = "",
     ) -> List[str]:
         """
         按 token 预算裁剪 context_items，从末尾（低优先级）开始移除。
@@ -370,7 +429,9 @@ class BaseAgent(ABC):
             return []
 
         # 快速路径：计算全量 token，如果不超限直接返回
-        item_tokens = [count_tokens(str(item)) for item in context_items]
+        item_tokens = [
+            count_text_tokens(str(item), provider=provider, model=model).upper_bound_tokens for item in context_items
+        ]
         total = sum(item_tokens)
         if total <= max_context_tokens:
             return list(context_items)

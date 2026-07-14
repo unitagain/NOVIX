@@ -12,7 +12,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from app.context_engine.source_snapshot import capture_source_snapshot, verify_source_snapshot
+from app.context_engine.source_snapshot import SourceDescriptor, capture_source_snapshot, verify_source_snapshot
 from app.context_engine.token_counter import get_model_context_window
 from app.context_engine.tool_registry import tool_loadout_for_route
 
@@ -162,6 +162,8 @@ class ContextPlanV2:
                 "reason": "source_verification_unavailable_for_legacy_plan",
                 "failures": [],
             }
+        if not self.snapshot:
+            return {"valid": True, "checked": 0, "failures": []}
         return verify_source_snapshot(Path(self.project_root), (_thaw(item) for item in self.snapshot))
 
     def to_dict(self) -> Dict[str, Any]:
@@ -218,44 +220,25 @@ def build_context_plan_v2(
     output_reserve = max(4096 if route_path == "agentic_writer" else 512, int(target_word_count or 0) * 2)
     output_reserve = min(output_reserve, max(512, context_limit // 2))
     loadout = tool_loadout_for_route(route_path, auto_execute_plan=auto_execute_plan)
-    snapshot = capture_source_snapshot(
-        project_root,
-        chapter_id=chapter_id,
-        context_epoch=context_epoch,
-    )
+    snapshot: List[Dict[str, Any]] = []
     degradation: List[Dict[str, str]] = []
     if fallback_reason:
         degradation.append({"type": "route", "status": "fallback", "reason": fallback_reason})
-    sources = _sources_for_route(route_path, has_draft=bool(chapter_id), chapter=chapter_id)
-    snapshot_fingerprint = _stable_hash(snapshot)
-    memory_rows = [row for row in snapshot if row.get("asset_type") == "memory"]
-    compact_rows = [
-        row
-        for row in snapshot
-        if row.get("path") == "sessions/compact/state.json" or row.get("artifact_id")
-    ]
+    sources = _sources_for_route(
+        route_path,
+        has_draft=bool(chapter_id),
+        chapter=chapter_id,
+        provider_profile=profile,
+        tool_loadout=loadout,
+    )
+    source_registry_fingerprint = _stable_hash(sources)
     version_refs: List[Dict[str, Any]] = [
         {
-            "asset_type": "source_snapshot",
-            "revision": snapshot_fingerprint,
-            "context_epoch": max(0, int(context_epoch or 0)),
-        },
-        {
-            "asset_type": "memory",
-            "revision": _stable_hash(memory_rows),
+            "asset_type": "planned_source_registry",
+            "revision": source_registry_fingerprint,
             "context_epoch": max(0, int(context_epoch or 0)),
         },
     ]
-    if compact_rows:
-        compact = compact_rows[-1]
-        version_refs.append(
-            {
-                "asset_type": "compact",
-                "revision": compact.get("content_sha256"),
-                "artifact_id": compact.get("artifact_id") or "",
-                "context_epoch": max(0, int(context_epoch or 0)),
-            }
-        )
     plan_payload = {
         "turn_id": turn_id,
         "context_epoch": context_epoch,
@@ -274,6 +257,8 @@ def build_context_plan_v2(
             "as_of": chapter_id,
             "compression": "tool_result_folding_then_session_compact",
             "overflow": "fold_recoverable_tool_results_then_reject",
+            "source_closure_required": True,
+            "source_registry_owner": "app.context_engine.source_snapshot.SourceRegistry",
         },
         "version_refs": version_refs,
     }
@@ -304,7 +289,7 @@ def build_context_plan_v2(
         degradation=degradation,
         version_refs=version_refs,
         fingerprints={
-            "source_snapshot": snapshot_fingerprint,
+            "planned_sources": source_registry_fingerprint,
             "plan": _stable_hash(plan_payload),
         },
         project_root=str(Path(project_root).resolve()),
@@ -316,41 +301,169 @@ def _sources_for_route(
     *,
     has_draft: bool,
     chapter: str,
+    provider_profile: Optional[Dict[str, Any]] = None,
+    tool_loadout: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    sources: List[Dict[str, Any]] = [
-        {"type": "user_message", "role": "instruction", "required": True, "trust_label": "trusted"}
+    sources: List[SourceDescriptor] = [
+        SourceDescriptor.planned(
+            source_id="input.user_message",
+            asset_type="user_message",
+            selection_reason="author_instruction",
+            required=True,
+        ),
+        SourceDescriptor.planned(
+            source_id="prompt.runtime",
+            asset_type="prompt",
+            selection_reason="route_prompt",
+            required=True,
+        ),
+        SourceDescriptor.planned(
+            source_id="payload.provider_message",
+            asset_type="provider_message",
+            selection_reason="provider_payload_fragment",
+            required=True,
+        ),
+        SourceDescriptor.planned(
+            source_id="config.project",
+            asset_type="project_config",
+            selection_reason="runtime_configuration",
+        ),
+        SourceDescriptor.planned(
+            source_id="project.cards",
+            asset_type="cards",
+            selection_reason="project_setting_context",
+        ),
+        SourceDescriptor.planned(
+            source_id="project.summaries",
+            asset_type="summaries",
+            selection_reason="long_range_continuity",
+        ),
+        SourceDescriptor.planned(
+            source_id="project.scene_brief",
+            asset_type="scene_brief",
+            selection_reason="chapter_execution_context",
+        ),
+        SourceDescriptor.planned(
+            source_id="project.volume_order",
+            asset_type="volume_order",
+            selection_reason="chapter_order_grounding",
+        ),
+        SourceDescriptor.planned(
+            source_id="model.assignment",
+            asset_type="model_assignment",
+            selection_reason="agent_provider_assignment",
+            content=dict(provider_profile or {}),
+            artifact_ref="llm_config:agent_assignment",
+            required=True,
+        ),
     ]
     if chapter:
-        sources.append({"type": "chapter", "id": chapter, "role": "target", "required": True, "trust_label": "trusted"})
+        sources.append(
+            SourceDescriptor.planned(
+                source_id="target.chapter",
+                asset_type="chapter",
+                selection_reason="target_chapter",
+                content=chapter,
+                required=True,
+            )
+        )
     if has_draft:
         sources.append(
-            {"type": "draft", "id": chapter, "role": "edit_baseline", "required": True, "trust_label": "trusted"}
+            SourceDescriptor.planned(
+                source_id="draft.current",
+                asset_type="draft",
+                selection_reason="edit_baseline",
+                required=True,
+            )
         )
 
     if route_path == "agentic_writer":
         sources.extend(
             [
-                {"type": "canon", "role": "tool_jit", "required": False, "trust_label": "trusted"},
-                {"type": "relations", "role": "tool_jit", "required": False, "trust_label": "trusted"},
-                {"type": "prose", "role": "tool_jit", "required": False, "trust_label": "trusted"},
-                {"type": "memory", "role": "preference_jit", "required": False, "trust_label": "trusted"},
-                {"type": "memory_pack", "role": "chapter_snapshot", "required": False, "trust_label": "trusted"},
+                SourceDescriptor.planned(
+                    source_id="procedural.writer_tools",
+                    asset_type="procedural_knowledge",
+                    selection_reason="route_tool_loadout",
+                    content=list(tool_loadout or []),
+                    artifact_ref="tool_registry:agentic_writer",
+                    required=True,
+                ),
+                SourceDescriptor.planned(
+                    source_id="payload.tool_schema",
+                    asset_type="tool_schema",
+                    selection_reason="provider_tool_contract",
+                    required=True,
+                ),
+                SourceDescriptor.planned(source_id="jit.cards", asset_type="cards", selection_reason="tool_jit"),
+                SourceDescriptor.planned(source_id="jit.canon", asset_type="canon", selection_reason="tool_jit"),
+                SourceDescriptor.planned(
+                    source_id="jit.relations", asset_type="relations", selection_reason="tool_jit"
+                ),
+                SourceDescriptor.planned(source_id="jit.prose", asset_type="prose", selection_reason="tool_jit"),
+                SourceDescriptor.planned(source_id="jit.memory", asset_type="memory", selection_reason="tool_jit"),
+                SourceDescriptor.planned(
+                    source_id="jit.tool_result", asset_type="tool_result", selection_reason="agentic_replay"
+                ),
+                SourceDescriptor.planned(
+                    source_id="jit.provider_response",
+                    asset_type="provider_response",
+                    selection_reason="agentic_replay",
+                ),
             ]
         )
     elif route_path == "plan_workflow":
         sources.extend(
             [
-                {"type": "plan_store", "role": "progress", "required": True, "trust_label": "trusted"},
-                {"type": "canon", "role": "research", "required": False, "trust_label": "trusted"},
-                {"type": "summaries", "role": "planning_context", "required": False, "trust_label": "trusted"},
+                SourceDescriptor.planned(
+                    source_id="plan.current", asset_type="plan_store", selection_reason="plan_progress", required=True
+                ),
+                SourceDescriptor.planned(source_id="plan.canon", asset_type="canon", selection_reason="research"),
+                SourceDescriptor.planned(
+                    source_id="plan.summaries", asset_type="summaries", selection_reason="planning_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="plan.volume_order", asset_type="volume_order", selection_reason="chapter_grounding"
+                ),
             ]
         )
     elif route_path == "fallback_workflow":
         sources.extend(
             [
-                {"type": "legacy_workflow", "role": "fallback", "required": True, "trust_label": "trusted"},
-                {"type": "canon", "role": "context_mixin", "required": False, "trust_label": "trusted"},
-                {"type": "memory_pack", "role": "context_mixin", "required": False, "trust_label": "trusted"},
+                SourceDescriptor.planned(
+                    source_id="fallback.scene_brief",
+                    asset_type="scene_brief",
+                    selection_reason="writing_context",
+                    required=True,
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.summaries", asset_type="summaries", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.cards", asset_type="cards", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.canon", asset_type="canon", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.memory", asset_type="memory", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.volume_order", asset_type="volume_order", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.chapter_goal", asset_type="chapter_goal", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.prose", asset_type="prose", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.evidence", asset_type="evidence", selection_reason="writing_context"
+                ),
+                SourceDescriptor.planned(
+                    source_id="fallback.assembled",
+                    asset_type="assembled_context",
+                    selection_reason="agent_message_projection",
+                ),
             ]
         )
-    return sources
+    return [source.to_dict() for source in sources]
