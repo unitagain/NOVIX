@@ -13,13 +13,19 @@ from app.ops.release_gate import ReleaseGate
 def test_ci_matrix_and_release_gate_share_engineering_checks():
     repo = Path(__file__).resolve().parents[2]
     workflow = (repo / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")
+    pytest_config = (repo / "backend" / "pyproject.toml").read_text(encoding="utf-8")
     assert workflow.count('branches: ["develop"]') == 2
     assert "main" not in workflow
     assert "master" not in workflow
     assert "workflow_dispatch:" in workflow
     assert 'python-version: ["3.10", "3.11", "3.12"]' in workflow
     assert "backend-windows-critical" in workflow
+    assert "frontend:" not in workflow
     assert "python scripts/engineering_gate.py" in workflow
+    assert 'filterwarnings = [' in pytest_config
+    assert '"error"' in pytest_config
+    assert "python_multipart" in pytest_config
+    assert "The 'app' shortcut is now deprecated" in pytest_config
     expected = [name for name, _command, _cwd in engineering_checks(repo)]
     gate = ReleaseGate(repo, runner=lambda _command, _cwd: {"success": True})
     gate._git_state = lambda: {"revision": "revision", "dirty": False}

@@ -14,7 +14,7 @@ def engineering_checks(repo_root: Path) -> list[EngineeringCheck]:
     return [
         ("ruff", ["python", "-m", "ruff", "check", "app", "tests", "scripts"], backend),
         ("type_contract", ["python", "scripts/type_contract_check.py"], backend),
-        ("pytest", ["python", "-m", "pytest", "-W", "error"], backend),
+        ("pytest", ["python", "-m", "pytest"], backend),
         ("pip_check", ["python", "-m", "pip", "check"], backend),
         ("error_contract", ["python", "scripts/error_contract_audit.py"], backend),
         ("architecture", ["python", "scripts/architecture_profile.py", "--check"], backend),

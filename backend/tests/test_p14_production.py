@@ -265,7 +265,7 @@ def test_release_gate_combines_commands_and_campaign(tmp_path):
     assert report["code_revision"] == "revision"
     assert report["fingerprint"]
     commands = {item["name"]: item["command"] for item in report["checks"]}
-    assert commands["pytest"] == ["python", "-m", "pytest", "-W", "error"]
+    assert commands["pytest"] == ["python", "-m", "pytest"]
     assert commands["error_contract"] == ["python", "scripts/error_contract_audit.py"]
     assert commands["architecture"] == ["python", "scripts/architecture_profile.py", "--check"]
 

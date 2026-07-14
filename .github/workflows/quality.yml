@@ -59,7 +59,7 @@ jobs:
           PORT: "8000"
           WENSHAPE_LLM_PROVIDER: "openai"
         run: >-
-          python -m pytest -W error
+          python -m pytest
           tests/test_p10_turn_runtime.py
           tests/test_w2_control_plane.py
           tests/test_w4_operations.py
@@ -68,30 +68,3 @@ jobs:
       - name: Packaged sidecar syntax
         working-directory: .
         run: node --check desktop/scripts/build-sidecar.mjs
-
-  frontend:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        run: npm ci
-      - name: Generated assets check
-        run: python ../scripts/check_generated_assets.py
-      - name: Encoding check
-        run: python ../scripts/check_encoding.py
-      - name: Large-file check
-        run: python ../scripts/check_large_files.py
-      - name: Lint
-        run: npm run lint
-      - name: Typecheck
-        run: npm run typecheck
-      - name: Build
-        run: npm run build

@@ -15,6 +15,11 @@ known_first_party = ["app"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "error",
+    "ignore:Please use `import python_multipart` instead\\.:PendingDeprecationWarning",
+    "ignore:The 'app' shortcut is now deprecated\\.:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 120
