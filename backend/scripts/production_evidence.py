@@ -22,8 +22,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=BACKEND_ROOT / ".runtime" / "w8" / "production_manifest.json")
     parser.add_argument("--runtime-smoke", type=Path)
     args = parser.parse_args()
-    mapping = {
-        "soak": "soak.json",
+    required_mapping = {
         "crash_matrix": "crash_matrix.json",
         "migration_matrix": "migration_matrix.json",
         "telemetry_budget": "telemetry_budget.json",
@@ -31,19 +30,22 @@ def main() -> int:
     }
     checks = {}
     artifacts = []
-    for name, filename in mapping.items():
+    for name, filename in required_mapping.items():
         path = args.evidence_dir / filename
         if path.is_file():
             checks[name] = json.loads(path.read_text(encoding="utf-8-sig"))
             artifacts.append(path)
         else:
             checks[name] = {"success": False, "reason": "evidence_missing"}
+    soak_path = args.evidence_dir / "soak.json"
+    if soak_path.is_file():
+        checks["soak"] = json.loads(soak_path.read_text(encoding="utf-8-sig"))
+        artifacts.append(soak_path)
     if args.runtime_smoke and args.runtime_smoke.is_file():
         runtime_smoke = json.loads(args.runtime_smoke.read_text(encoding="utf-8-sig"))
-        checks["soak"] = {
-            **checks["soak"],
+        checks["runtime_smoke"] = {
             "runtime_smoke": runtime_smoke,
-            "success": bool(checks["soak"].get("success") and runtime_smoke.get("success")),
+            "success": bool(runtime_smoke.get("success")),
         }
         artifacts.append(args.runtime_smoke)
     for filename in ("sbom.cyclonedx.json", "package-tree.json", "package_runtime_smoke.json"):

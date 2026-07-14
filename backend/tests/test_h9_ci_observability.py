@@ -10,6 +10,11 @@ from app.ops.production_evidence import ProductionEvidenceBundle, REQUIRED_CHECK
 from app.ops.release_gate import ReleaseGate
 
 
+def test_open_source_release_evidence_does_not_require_provider_soak():
+    assert "soak" not in REQUIRED_CHECKS
+    assert REQUIRED_CHECKS == {"crash_matrix", "migration_matrix", "telemetry_budget", "package_security"}
+
+
 def test_ci_matrix_and_release_gate_share_engineering_checks():
     repo = Path(__file__).resolve().parents[2]
     workflow = (repo / ".github" / "workflows" / "quality.yml").read_text(encoding="utf-8")

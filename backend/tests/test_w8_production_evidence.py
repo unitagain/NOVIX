@@ -173,7 +173,7 @@ def test_production_manifest_keeps_large_evidence_in_hash_bound_artifacts(tmp_pa
     artifact = tmp_path / "package_security.json"
     artifact.write_text("{}", encoding="utf-8")
     checks = {name: {"success": True} for name in REQUIRED_CHECKS}
-    checks["soak"].update({"samples": [{"memory": index} for index in range(100)], "cycles": 100})
+    checks["soak"] = {"success": True, "samples": [{"memory": index} for index in range(100)], "cycles": 100}
     checks["package_security"].update(
         {
             "package_tree": {"files": [{"path": str(index)} for index in range(100)], "file_count": 100},

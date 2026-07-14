@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 
 
-REQUIRED_CHECKS = {"soak", "crash_matrix", "migration_matrix", "telemetry_budget", "package_security"}
+REQUIRED_CHECKS = {"crash_matrix", "migration_matrix", "telemetry_budget", "package_security"}
 
 
 class ProductionEvidenceBundle:
