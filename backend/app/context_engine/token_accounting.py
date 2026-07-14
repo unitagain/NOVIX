@@ -54,6 +54,40 @@ def token_estimator_calibration(provider: str = "", model: str = "") -> Dict[str
     }
 
 
+def token_error_bound_recommendation(
+    provider: str,
+    model: str,
+    *,
+    current_error_bound: float,
+    minimum_samples: int = 32,
+    floor: float = 0.10,
+) -> Dict[str, Any]:
+    """Recommend, but never apply, a one-way safety-margin reduction from evidence."""
+    evidence = token_estimator_calibration(provider, model)
+    samples = int(evidence.get("samples") or 0)
+    p95 = evidence.get("p95_relative_error")
+    current = max(float(floor), float(current_error_bound))
+    if samples < max(1, int(minimum_samples)) or p95 is None:
+        return {
+            "status": "insufficient_evidence",
+            "samples": samples,
+            "minimum_samples": max(1, int(minimum_samples)),
+            "current_error_bound": current,
+            "recommended_error_bound": current,
+            "applied": False,
+        }
+    recommended = min(current, max(float(floor), float(p95) * 1.25))
+    return {
+        "status": "recommendation_available" if recommended < current else "keep_current",
+        "samples": samples,
+        "minimum_samples": max(1, int(minimum_samples)),
+        "observed_p95_relative_error": float(p95),
+        "current_error_bound": current,
+        "recommended_error_bound": recommended,
+        "applied": False,
+    }
+
+
 def record_token_estimator_observation(
     *,
     provider: str,

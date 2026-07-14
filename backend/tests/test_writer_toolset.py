@@ -8,6 +8,7 @@ import asyncio
 
 from app.agents.tools import WriterToolset
 from app.agents.agentic import run_agentic_chat
+from app.agents.writing_actions import WritingActionToolset
 
 # ---------------------------------------------------------------- Fakes ----
 
@@ -220,6 +221,74 @@ def test_agentic_loop_executes_tool_then_finishes():
     assert gw.saw_tool_result is True  # 工具结果被回灌给模型
     assert gw.n == 2  # 一轮工具 + 一次产出
     assert "tool_call" in events and "tool_result" in events
+
+
+class _StreamingActionGateway:
+    def __init__(self):
+        self.calls = 0
+
+    async def agentic_chat(self, messages, *, on_stream_event=None, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            fragments = ['{"content":"流式', '正文第一段。', '","mode":"replace"}']
+            for fragment in fragments:
+                await on_stream_event(
+                    {
+                        "type": "tool_call_delta",
+                        "index": 0,
+                        "id": "call-1" if fragment == fragments[0] else "",
+                        "name": "write_content" if fragment == fragments[0] else "",
+                        "arguments": fragment,
+                    }
+                )
+            return {
+                "provider": "openai",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "name": "write_content",
+                        "arguments": "".join(fragments),
+                    }
+                ],
+                "usage": {},
+                "finish_reason": "tool_calls",
+            }
+        await on_stream_event({"type": "content_delta", "content": "完成"})
+        return {
+            "provider": "openai",
+            "content": "完成",
+            "tool_calls": None,
+            "usage": {},
+            "finish_reason": "stop",
+        }
+
+
+def test_agentic_streams_provisional_writing_tool_content_before_execution():
+    gateway = _StreamingActionGateway()
+    toolset = WritingActionToolset("")
+    events = []
+
+    async def on_event(event):
+        events.append(event)
+
+    result = asyncio.run(
+        run_agentic_chat(
+            gateway,
+            "openai",
+            [{"role": "user", "content": "写"}],
+            toolset,
+            max_iterations=2,
+            on_event=on_event,
+        )
+    )
+    streamed = "".join(
+        str(event.get("content") or "") for event in events if event.get("type") == "provisional_content"
+    )
+    assert streamed.startswith("流式正文第一段。")
+    assert toolset.working_text == "流式正文第一段。"
+    assert result.success is True
 
 
 # ------------------------------------- thinking + Anthropic format (5A) --

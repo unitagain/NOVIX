@@ -3,7 +3,13 @@ DeepSeek Provider / DeepSeek 适配器
 """
 
 from typing import List, Dict, Any, Optional, AsyncGenerator
-from app.llm_gateway.providers.base import BaseLLMProvider, normalize_tool_calls, _extract_reasoning_delta
+from app.llm_gateway.providers.base import (
+    BaseLLMProvider,
+    normalize_openai_usage,
+    normalize_tool_calls,
+    _extract_reasoning_delta,
+    stream_openai_events,
+)
 from app.utils.openai_client import create_async_openai_client
 
 
@@ -61,11 +67,7 @@ class DeepSeekProvider(BaseLLMProvider):
         return {
             "content": message.content,
             "tool_calls": normalize_tool_calls(message),
-            "usage": {
-                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-                "total_tokens": response.usage.total_tokens if response.usage else 0,
-            } if response.usage else None,
+            "usage": normalize_openai_usage(response.usage),
             "model": getattr(response, "model", self.model),
             "finish_reason": response.choices[0].finish_reason,
         }
@@ -110,3 +112,32 @@ class DeepSeekProvider(BaseLLMProvider):
     def get_provider_name(self) -> str:
         """Get provider name / 获取提供商名称"""
         return "deepseek"
+
+    def supports_agentic_stream(self) -> bool:
+        return True
+
+    async def stream_chat_events(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        thinking: Optional[Any] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        params: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature if temperature is None else temperature,
+            "max_tokens": max_tokens or self.max_tokens,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            params["tools"] = tools
+            if tool_choice is not None:
+                params["tool_choice"] = tool_choice
+        if isinstance(thinking, dict):
+            params["extra_body"] = dict(thinking)
+        async for event in stream_openai_events(self.client, params):
+            yield event

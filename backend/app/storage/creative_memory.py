@@ -497,6 +497,12 @@ class CreativeMemoryStorage(BaseStorage):
         top_k = max(1, int(top_k or 1))
         headers = await self.list_headers(project_id, statuses=["*"])
         if not headers:
+            try:
+                from app.observability.usage_diagnostics import record_memory_recall
+
+                record_memory_recall(0)
+            except Exception as exc:
+                logger.warning("Memory recall diagnostics failed: %s", type(exc).__name__)
             return []
         graph = build_memory_graph(headers)
         allowed_scopes = set(scopes or MEMORY_SCOPES)
@@ -531,6 +537,12 @@ class CreativeMemoryStorage(BaseStorage):
                 full["recall_score"] = round(score, 6)
                 full["last_recalled_at"] = recalled_at
                 out.append(full)
+        try:
+            from app.observability.usage_diagnostics import record_memory_recall
+
+            record_memory_recall(len(out))
+        except Exception as exc:
+            logger.warning("Memory recall diagnostics failed: %s", type(exc).__name__)
         return out
 
     async def expire_due_memories(self, project_id: str) -> List[str]:
@@ -830,7 +842,7 @@ class CreativeMemoryStorage(BaseStorage):
             bucket["confirmed"] += int(bool(item.get("confirmed_by")))
         for bucket in calibration.values():
             bucket["revert_rate"] = bucket["reverted"] / bucket["count"] if bucket["count"] else 0.0
-        return {
+        result = {
             "review_backlog": len(review_items),
             "review_median_age_seconds": median_age,
             "auto_active_count": len(auto_active),
@@ -839,6 +851,13 @@ class CreativeMemoryStorage(BaseStorage):
             "expired_due": len(expired_due),
             "confidence_calibration": calibration,
         }
+        try:
+            from app.observability.usage_diagnostics import record_governance
+
+            record_governance(result)
+        except Exception as exc:
+            logger.warning("Memory governance diagnostics failed: %s", type(exc).__name__)
+        return result
 
     @staticmethod
     def _activation_config() -> Dict[str, Any]:

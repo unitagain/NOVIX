@@ -84,6 +84,8 @@ def test_runtime_and_benchmark_share_provider_usage_contract():
         "elapsed_seconds": 0.0,
         "status": "reported",
         "requested_max_tokens": 0,
+        "cache_read_tokens": None,
+        "cache_creation_tokens": None,
     }
 
 

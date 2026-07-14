@@ -54,6 +54,63 @@ def normalize_tool_calls(message: Any) -> Optional[List[Dict[str, Any]]]:
     return calls
 
 
+def normalize_openai_usage(usage: Any) -> Optional[Dict[str, Any]]:
+    """Normalize OpenAI-compatible usage while preserving unavailable cache fields."""
+    if usage is None:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    cache_read = getattr(details, "cached_tokens", None) if details is not None else None
+    if cache_read is None:
+        cache_read = getattr(usage, "prompt_cache_hit_tokens", None)
+    cache_creation = getattr(usage, "prompt_cache_miss_tokens", None)
+    row: Dict[str, Any] = {
+        "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+        "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+        "total_tokens": int(getattr(usage, "total_tokens", 0) or 0),
+    }
+    if cache_read is not None:
+        row["cache_read_tokens"] = int(cache_read or 0)
+    if cache_creation is not None:
+        row["cache_creation_tokens"] = int(cache_creation or 0)
+    return row
+
+
+async def stream_openai_events(client: Any, params: Dict[str, Any]) -> AsyncGenerator[Dict[str, Any], None]:
+    """Yield normalized content/reasoning/tool deltas from an OpenAI-compatible client."""
+    response = await client.chat.completions.create(**params, stream=True)
+    async for chunk in response:
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            normalized_usage = normalize_openai_usage(usage) or {}
+            yield {
+                "type": "usage",
+                "usage": normalized_usage,
+            }
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        reasoning = _extract_reasoning_delta(delta)
+        if reasoning:
+            yield {"type": "thinking_delta", "content": str(reasoning)}
+        content = getattr(delta, "content", None) if delta is not None else None
+        if content:
+            yield {"type": "content_delta", "content": str(content)}
+        for call in getattr(delta, "tool_calls", None) or []:
+            function = getattr(call, "function", None)
+            yield {
+                "type": "tool_call_delta",
+                "index": int(getattr(call, "index", 0) or 0),
+                "id": str(getattr(call, "id", "") or ""),
+                "name": str(getattr(function, "name", "") or "") if function is not None else "",
+                "arguments": str(getattr(function, "arguments", "") or "") if function is not None else "",
+            }
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason:
+            yield {"type": "finish", "finish_reason": str(finish_reason)}
+
+
 class BaseLLMProvider(ABC):
     """
     大模型提供商抽象基类 / Abstract base class for LLM providers
@@ -147,6 +204,35 @@ class BaseLLMProvider(ABC):
         # Subclasses should override this for true streaming
         response = await self.chat(messages, temperature, max_tokens)
         yield response.get("content", "")
+
+    def supports_agentic_stream(self) -> bool:
+        """Whether the adapter can stream content and tool-call deltas safely."""
+        return False
+
+    async def stream_chat_events(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        thinking: Optional[Any] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Structured stream fallback used by the agent runtime.
+
+        Providers without tool-delta support return one explicit non-native event;
+        callers must report the degradation instead of manufacturing token chunks.
+        """
+        response = await self.chat(
+            messages,
+            temperature,
+            max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            thinking=thinking,
+        )
+        yield {"type": "response", "response": response, "native": False}
 
     @abstractmethod
     def get_provider_name(self) -> str:

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.config import config
+from app.context_engine.token_accounting import count_text_tokens
 from app.context_engine.turn_scope import current_turn_scope
 
 
@@ -18,6 +19,29 @@ class WriterRequest:
     max_tokens: int
     max_iterations: int
     fingerprint: str
+    supply_report: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ContextSupplyReport:
+    available: tuple[str, ...]
+    pushed: tuple[str, ...]
+    retrieved: tuple[str, ...]
+    used: tuple[str, ...]
+    omitted: tuple[Dict[str, Any], ...]
+    draft_tokens: int = 0
+    draft_pushed_tokens: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "available": list(self.available),
+            "pushed": list(self.pushed),
+            "retrieved": list(self.retrieved),
+            "used": list(self.used),
+            "omitted": [dict(item) for item in self.omitted],
+            "draft_tokens": self.draft_tokens,
+            "draft_pushed_tokens": self.draft_pushed_tokens,
+        }
 
 
 class ContextAssemblyService:
@@ -43,12 +67,15 @@ class ContextAssemblyService:
             has_draft=bool(str(current_text or "").strip()),
             target_word_count=target_word_count,
         )
-        user = self.build_writer_user(
+        input_budget = int((getattr(context_plan, "budget", {}) or {}).get("input_tokens") or 0)
+        draft_budget = min(12_000, max(3_000, int(input_budget * 0.60))) if input_budget else 6_000
+        user, draft_projection = self._build_writer_user(
             message=message,
             chapter=chapter,
             current_text=current_text,
             has_selection=has_selection,
             target_word_count=target_word_count,
+            draft_budget_tokens=draft_budget,
         )
         requested_max = max(4096, int(target_word_count * 2.0))
         if context_plan is not None:
@@ -123,10 +150,62 @@ class ContextAssemblyService:
             "max_tokens": requested_max,
             "max_iterations": int(config.get("retrieval", {}).get("agentic_max_iterations", 4)) + 2,
         }
+        available = ["prompt", "user_message", "chapter", "project_config"]
+        pushed = list(available)
+        omitted: List[Dict[str, Any]] = []
+        if current_text:
+            available.append("draft")
+            pushed.append("draft")
+            if draft_projection["projected"]:
+                omitted.append(
+                    {
+                        "type": "draft",
+                        "reason": "token_budget_projection",
+                        "recoverable": True,
+                        "source_ref": f"draft:{chapter}",
+                    }
+                )
+        for source_type in self._available_source_types(context_plan):
+            if source_type not in available:
+                available.append(source_type)
+        supply_report = ContextSupplyReport(
+            available=tuple(available),
+            pushed=tuple(pushed),
+            retrieved=(),
+            used=tuple(pushed),
+            omitted=tuple(omitted),
+            draft_tokens=int(draft_projection["original_tokens"]),
+            draft_pushed_tokens=int(draft_projection["pushed_tokens"]),
+        ).to_dict()
+        payload["supply_report"] = supply_report
         fingerprint = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         return WriterRequest(fingerprint=fingerprint, **payload)
+
+    @staticmethod
+    def _available_source_types(context_plan: Optional[Any]) -> List[str]:
+        aliases = {
+            "cards": "card",
+            "character_card": "card",
+            "world_card": "card",
+            "style_card": "style",
+            "summaries": "summary",
+            "chapter_summary": "summary",
+            "scene_brief": "summary",
+            "relations": "canon",
+            "fact": "canon",
+            "text_chunk": "prose",
+        }
+        available: List[str] = []
+        for row in tuple(getattr(context_plan, "snapshot", ()) or ()):
+            item = dict(row)
+            raw = str(item.get("asset_type") or item.get("type") or "").strip().lower()
+            normalized = aliases.get(raw, raw)
+            if normalized in {"style", "card", "canon", "memory", "summary", "draft", "prose"}:
+                if normalized not in available:
+                    available.append(normalized)
+        return available
 
     def build_writer_system(self, *, has_draft: bool, target_word_count: int = 3000) -> str:
         lang = "中文" if self.language == "zh" else "英文"
@@ -162,11 +241,35 @@ class ContextAssemblyService:
     def build_writer_user(
         *, message: str, chapter: str, current_text: str, has_selection: bool, target_word_count: int = 3000
     ) -> str:
+        user, _projection = ContextAssemblyService._build_writer_user(
+            message=message,
+            chapter=chapter,
+            current_text=current_text,
+            has_selection=has_selection,
+            target_word_count=target_word_count,
+            draft_budget_tokens=6_000,
+        )
+        return user
+
+    @staticmethod
+    def _build_writer_user(
+        *,
+        message: str,
+        chapter: str,
+        current_text: str,
+        has_selection: bool,
+        target_word_count: int,
+        draft_budget_tokens: int,
+    ) -> tuple[str, Dict[str, Any]]:
         parts = [f"本章 ID：{chapter}"]
         body = str(current_text or "")
+        original_accounting = count_text_tokens(body)
+        projected = False
         if body.strip():
-            if len(body) > 6000:
-                body = body[:3500] + "\n…（中段省略，如需修改中段请用检索或要求重写）…\n" + body[-2000:]
+            body, projected = ContextAssemblyService.project_draft_to_tokens(
+                body,
+                budget_tokens=max(1, int(draft_budget_tokens)),
+            )
             parts.append(f"【当前正文】\n{body}")
         else:
             parts.append("【当前正文】（空）")
@@ -179,4 +282,26 @@ class ContextAssemblyService:
             )
         else:
             parts.append("请先检索必要设定，再用写作工具完成本轮。")
-        return "\n".join(parts)
+        return "\n".join(parts), {
+            "projected": projected,
+            "original_tokens": original_accounting.upper_bound_tokens,
+            "pushed_tokens": count_text_tokens(body).upper_bound_tokens,
+        }
+
+    @staticmethod
+    def project_draft_to_tokens(body: str, *, budget_tokens: int) -> tuple[str, bool]:
+        text = str(body or "")
+        if count_text_tokens(text).upper_bound_tokens <= budget_tokens:
+            return text, False
+        marker = "\n…（中段按 token 预算省略；完整正文可通过 read_chapter 恢复）…\n"
+        low, high = 1, max(1, len(text) // 2)
+        best = marker
+        while low <= high:
+            half = (low + high) // 2
+            candidate = text[:half] + marker + text[-half:]
+            if count_text_tokens(candidate).upper_bound_tokens <= budget_tokens:
+                best = candidate
+                low = half + 1
+            else:
+                high = half - 1
+        return best, True

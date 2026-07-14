@@ -188,12 +188,28 @@ class ChatTurnService:
             if scope is not None:
                 scope.ensure_active()
             fallback_reason = str(agent_result.get("reason") or "")
+            fallback_context = dict(agent_result.get("fallback_context") or {})
         else:
             fallback_reason = "no_chapter"
+            fallback_context = {"schema_version": 1, "reason": fallback_reason, "category": "routing"}
+
+        try:
+            from app.observability.usage_diagnostics import record_fallback
+
+            record_fallback(str(fallback_context.get("category") or "unknown"))
+        except Exception as exc:
+            record_degradation("chat_turn_fallback_diagnostics", exc)
 
         if scope is not None:
             if scope.runtime.state != TurnState.FALLBACK_RUNNING:
-                scope.runtime.transition(TurnState.FALLBACK_RUNNING, reason=fallback_reason)
+                scope.runtime.transition(
+                    TurnState.FALLBACK_RUNNING,
+                    reason=fallback_reason,
+                    metadata={
+                        "category": str(fallback_context.get("category") or "unknown"),
+                        "iterations": int(fallback_context.get("iterations") or 0),
+                    },
+                )
             self.owner.context_planning_service.prepare_context_plan(
                 scope=scope,
                 project_id=project_id,
@@ -210,6 +226,7 @@ class ChatTurnService:
                 "action": action,
                 "decision": decision,
                 "route_contract": route_contract(action, fallback=True),
+                "fallback_context": fallback_context,
             },
             project_id=project_id,
             chapter=chapter,

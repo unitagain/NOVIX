@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,8 @@ class ProviderUsage:
     elapsed_seconds: float = 0.0
     status: str = "missing"
     requested_max_tokens: int = 0
+    cache_read_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
 
     @classmethod
     def from_mapping(
@@ -24,6 +26,10 @@ class ProviderUsage:
         prompt = int(data.get("prompt_tokens") or data.get("input_tokens") or 0)
         completion = int(data.get("completion_tokens") or data.get("output_tokens") or 0)
         total = int(data.get("total_tokens") or prompt + completion)
+        cache_read_present = any(key in data for key in ("cache_read_tokens", "cache_read_input_tokens", "cached_tokens"))
+        cache_creation_present = any(
+            key in data for key in ("cache_creation_tokens", "cache_creation_input_tokens", "cache_write_tokens")
+        )
         return cls(
             requests=int(data.get("requests") or requests),
             prompt_tokens=prompt,
@@ -32,6 +38,26 @@ class ProviderUsage:
             elapsed_seconds=float(data.get("elapsed_seconds") or 0.0),
             status=str(data.get("status") or ("reported" if value is not None else "missing")),
             requested_max_tokens=int(data.get("requested_max_tokens") or requested_max_tokens),
+            cache_read_tokens=(
+                int(
+                    data.get("cache_read_tokens")
+                    or data.get("cache_read_input_tokens")
+                    or data.get("cached_tokens")
+                    or 0
+                )
+                if cache_read_present
+                else None
+            ),
+            cache_creation_tokens=(
+                int(
+                    data.get("cache_creation_tokens")
+                    or data.get("cache_creation_input_tokens")
+                    or data.get("cache_write_tokens")
+                    or 0
+                )
+                if cache_creation_present
+                else None
+            ),
         )
 
     def merge(self, other: "ProviderUsage") -> "ProviderUsage":
@@ -43,10 +69,20 @@ class ProviderUsage:
             elapsed_seconds=self.elapsed_seconds + other.elapsed_seconds,
             status="reported" if self.status == other.status == "reported" else "estimated",
             requested_max_tokens=self.requested_max_tokens + other.requested_max_tokens,
+            cache_read_tokens=_merge_optional_int(self.cache_read_tokens, other.cache_read_tokens),
+            cache_creation_tokens=_merge_optional_int(
+                self.cache_creation_tokens, other.cache_creation_tokens
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def _merge_optional_int(left: Optional[int], right: Optional[int]) -> Optional[int]:
+    if left is None and right is None:
+        return None
+    return int(left or 0) + int(right or 0)
 
 
 @dataclass(frozen=True)

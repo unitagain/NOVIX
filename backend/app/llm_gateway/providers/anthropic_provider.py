@@ -13,7 +13,7 @@ License: PolyForm Noncommercial License 1.0.0
 
 import json
 
-from typing import List, Dict, Any, Optional
+from typing import AsyncGenerator, List, Dict, Any, Optional
 from app.llm_gateway.providers.base import BaseLLMProvider
 from app.utils.anthropic_client import create_async_anthropic_client
 from app.error_contract import record_degradation
@@ -30,6 +30,36 @@ def _prompt_caching_enabled() -> bool:
         return bool((config.get("retrieval", {}) or {}).get("prompt_caching", True))
     except Exception:
         return False
+
+
+def _anthropic_tools(tools: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized = []
+    for tool in tools or []:
+        function = tool.get("function") if tool.get("type") == "function" else tool
+        function = dict(function or {})
+        name = str(function.get("name") or "")
+        if not name:
+            continue
+        normalized.append(
+            {
+                "name": name,
+                "description": str(function.get("description") or ""),
+                "input_schema": dict(function.get("parameters") or function.get("input_schema") or {}),
+            }
+        )
+    return normalized
+
+
+def _anthropic_tool_choice(value: Any) -> Any:
+    if value is None or isinstance(value, dict) and value.get("type") in {"auto", "any", "tool", "none"}:
+        return value
+    if isinstance(value, str):
+        return {"type": value} if value in {"auto", "any", "none"} else {"type": "tool", "name": value}
+    if isinstance(value, dict):
+        function = value.get("function") or {}
+        name = str(function.get("name") or value.get("name") or "")
+        return {"type": "tool", "name": name} if name else None
+    return None
 
 
 class AnthropicProvider(BaseLLMProvider):
@@ -58,6 +88,52 @@ class AnthropicProvider(BaseLLMProvider):
         super().__init__(api_key, model, max_tokens, temperature)
         self.client = create_async_anthropic_client(api_key=api_key)
 
+    def _request_kwargs(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: Optional[float],
+        max_tokens: Optional[int],
+        *,
+        tools: Optional[List[Dict[str, Any]]],
+        tool_choice: Optional[Any],
+        thinking: Optional[Any],
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        system_message = None
+        filtered_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_message = msg["content"]
+            else:
+                filtered_messages.append(msg)
+
+        resolved_max_tokens = max_tokens or self.max_tokens
+        kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": filtered_messages,
+            "max_tokens": resolved_max_tokens,
+        }
+        if not isinstance(thinking, dict):
+            kwargs["temperature"] = self.temperature if temperature is None else temperature
+        if system_message:
+            if _prompt_caching_enabled():
+                kwargs["system"] = [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}]
+            else:
+                kwargs["system"] = system_message
+        if tools:
+            kwargs["tools"] = _anthropic_tools(tools)
+            normalized_choice = _anthropic_tool_choice(tool_choice)
+            if normalized_choice is not None:
+                kwargs["tool_choice"] = normalized_choice
+        if isinstance(thinking, dict):
+            kwargs["thinking"] = thinking
+            budget = int(thinking.get("budget_tokens") or 0)
+            if budget and resolved_max_tokens <= budget:
+                kwargs["max_tokens"] = budget + 1024
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        return kwargs
+
     async def chat(
         self,
         messages: List[Dict[str, str]],
@@ -76,42 +152,15 @@ class AnthropicProvider(BaseLLMProvider):
         抽取 system 为独立参数；支持 Claude 工具调用（tools/tool_choice）与 thinking（均可选、默认关）。
         response_format 对 Claude 无直接对应，忽略。多内容块（text/tool_use/thinking）已健壮解析。
         """
-        # 提取 system 消息（Claude 用独立 system 参数）/ Extract system message
-        system_message = None
-        filtered_messages = []
-        for msg in messages:
-            if msg["role"] == "system":
-                system_message = msg["content"]
-            else:
-                filtered_messages.append(msg)
-
-        resolved_max_tokens = max_tokens or self.max_tokens
-        kwargs: Dict[str, Any] = {
-            "model": self.model,
-            "messages": filtered_messages,
-            "max_tokens": resolved_max_tokens,
-        }
-        # 开启扩展思考时不传 temperature（API 禁止 temperature/top_p/top_k）；其余照常传。
-        if not isinstance(thinking, dict):
-            kwargs["temperature"] = temperature or self.temperature
-        if system_message:
-            # Phase 6 prompt caching：开启时把 system 标为 ephemeral 可缓存块（降本降延）；否则纯字符串。
-            if _prompt_caching_enabled():
-                kwargs["system"] = [{"type": "text", "text": system_message, "cache_control": {"type": "ephemeral"}}]
-            else:
-                kwargs["system"] = system_message
-        if tools:
-            kwargs["tools"] = tools
-            if tool_choice is not None:
-                kwargs["tool_choice"] = tool_choice
-        if isinstance(thinking, dict):
-            kwargs["thinking"] = thinking
-            # budget_tokens 必须 < max_tokens：必要时上调输出上限。
-            budget = int(thinking.get("budget_tokens") or 0)
-            if budget and resolved_max_tokens <= budget:
-                kwargs["max_tokens"] = budget + 1024
-        if extra_body:
-            kwargs["extra_body"] = extra_body
+        kwargs = self._request_kwargs(
+            messages,
+            temperature,
+            max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            thinking=thinking,
+            extra_body=extra_body,
+        )
 
         response = await self.client.messages.create(**kwargs)
 
@@ -136,8 +185,9 @@ class AnthropicProvider(BaseLLMProvider):
                 )
 
         # Phase 13：提取 prompt caching 命中（仅 Anthropic 返回 cache_*_input_tokens），记缓存命中率指标。
-        cache_creation = int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0)
-        cache_read = int(getattr(response.usage, "cache_read_input_tokens", 0) or 0)
+        usage = self._normalize_usage(response.usage)
+        cache_creation = int(usage.get("cache_creation_tokens") or 0)
+        cache_read = int(usage.get("cache_read_tokens") or 0)
         try:
             from app.utils.cache_metrics import record_cache
 
@@ -149,13 +199,7 @@ class AnthropicProvider(BaseLLMProvider):
             "content": "".join(text_parts),
             "tool_calls": tool_calls or None,
             "thinking": "".join(thinking_parts) or None,
-            "usage": {
-                "prompt_tokens": response.usage.input_tokens,
-                "completion_tokens": response.usage.output_tokens,
-                "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-                "cache_creation_tokens": cache_creation,
-                "cache_read_tokens": cache_read,
-            },
+            "usage": usage,
             "model": response.model,
             "finish_reason": response.stop_reason,
         }
@@ -163,3 +207,90 @@ class AnthropicProvider(BaseLLMProvider):
     def get_provider_name(self) -> str:
         """获取提供商名称 / Get provider name."""
         return "anthropic"
+
+    def supports_agentic_stream(self) -> bool:
+        return True
+
+    async def stream_chat_events(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        thinking: Optional[Any] = None,
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Yield normalized Claude text, thinking, tool input, usage, and finish events."""
+        kwargs = self._request_kwargs(
+            messages,
+            temperature,
+            max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            thinking=thinking,
+        )
+        stream_manager = self.client.messages.stream(**kwargs)
+        async with stream_manager as stream:
+            indexes: Dict[int, Dict[str, str]] = {}
+            async for event in stream:
+                event_type = str(getattr(event, "type", "") or "")
+                if event_type == "message_start":
+                    usage = getattr(getattr(event, "message", None), "usage", None)
+                    if usage is not None:
+                        yield {"type": "usage", "usage": self._normalize_usage(usage)}
+                elif event_type == "content_block_start":
+                    index = int(getattr(event, "index", 0) or 0)
+                    block = getattr(event, "content_block", None)
+                    if str(getattr(block, "type", "") or "") == "tool_use":
+                        row = indexes.setdefault(index, {"id": "", "name": ""})
+                        row["id"] = str(getattr(block, "id", "") or "")
+                        row["name"] = str(getattr(block, "name", "") or "")
+                        yield {
+                            "type": "tool_call_delta",
+                            "index": index,
+                            "id": row["id"],
+                            "name": row["name"],
+                            "arguments": "",
+                        }
+                elif event_type == "content_block_delta":
+                    index = int(getattr(event, "index", 0) or 0)
+                    delta = getattr(event, "delta", None)
+                    delta_type = str(getattr(delta, "type", "") or "")
+                    if delta_type == "text_delta":
+                        yield {"type": "content_delta", "content": str(getattr(delta, "text", "") or "")}
+                    elif delta_type == "thinking_delta":
+                        yield {
+                            "type": "thinking_delta",
+                            "content": str(getattr(delta, "thinking", "") or ""),
+                        }
+                    elif delta_type == "input_json_delta":
+                        yield {
+                            "type": "tool_call_delta",
+                            "index": index,
+                            "id": "",
+                            "name": "",
+                            "arguments": str(getattr(delta, "partial_json", "") or ""),
+                        }
+                elif event_type == "message_delta":
+                    usage = getattr(event, "usage", None)
+                    if usage is not None:
+                        yield {"type": "usage", "usage": self._normalize_usage(usage)}
+                    stop_reason = str(getattr(getattr(event, "delta", None), "stop_reason", "") or "")
+                    if stop_reason:
+                        yield {"type": "finish", "finish_reason": stop_reason}
+
+    @staticmethod
+    def _normalize_usage(usage: Any) -> Dict[str, Any]:
+        prompt = int(getattr(usage, "input_tokens", 0) or 0)
+        completion = int(getattr(usage, "output_tokens", 0) or 0)
+        row = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        }
+        if hasattr(usage, "cache_creation_input_tokens"):
+            row["cache_creation_tokens"] = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        if hasattr(usage, "cache_read_input_tokens"):
+            row["cache_read_tokens"] = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        return row

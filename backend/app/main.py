@@ -229,6 +229,7 @@ async def health_check(request: Request):
     from app.jobs.runtime import get_task_queue, task_worker_status
     from app.observability.otel import telemetry
     from app.observability.runtime_metrics import runtime_metrics
+    from app.observability.usage_diagnostics import build_usage_diagnostics
     from app.observability.slo import SLOEvaluator
     from app.control_plane.runtime import get_control_store
 
@@ -239,6 +240,7 @@ async def health_check(request: Request):
         "json_metrics": json_metrics_snapshot(),
         "cache_metrics": cache_metrics_snapshot(),
         "runtime_metrics": runtime_metrics.snapshot(),
+        "usage_diagnostics": build_usage_diagnostics(),
         "task_queue": get_task_queue().health(),
         "task_worker": task_worker_status(),
         "control_plane": get_control_store().health(),

@@ -50,6 +50,33 @@ def _parse_tool_args(arguments: Any) -> Dict[str, Any]:
         return {}
 
 
+def _partial_json_string(arguments: str, key: str) -> str:
+    """Decode a complete or in-progress JSON string field for provisional streaming."""
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"', str(arguments or ""))
+    if not match:
+        return ""
+    raw: List[str] = []
+    escaped = False
+    for char in str(arguments)[match.end() :]:
+        if escaped:
+            raw.extend(("\\", char))
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            break
+        raw.append(char)
+    if escaped:
+        raw.append("\\")
+    candidate = "".join(raw)
+    try:
+        return str(json.loads(f'"{candidate}"'))
+    except json.JSONDecodeError:
+        return candidate.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+
+
 async def _emit(on_event: OnEvent, event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not on_event:
         return None
@@ -128,6 +155,9 @@ async def run_agentic_chat(
     degradations: List[Dict[str, Any]] = []
     last_response: Dict[str, Any] = {}
     iterations = 0
+    stream_tool_buffers: Dict[int, Dict[str, str]] = {}
+    stream_provisional_lengths: Dict[int, int] = {}
+    streamed_thinking = False
 
     def finish(
         status: AgentRunStatus,
@@ -137,13 +167,25 @@ async def run_agentic_chat(
         reason: str = "",
     ) -> AgentRunResult:
         payload = dict(response or {})
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        try:
+            from app.observability.usage_diagnostics import record_agent_run
+
+            record_agent_run(
+                status=status.value,
+                iterations=iterations,
+                tool_calls=len(tool_results),
+                elapsed_ms=elapsed_ms,
+            )
+        except Exception as exc:
+            record_degradation("agent_usage_diagnostics", exc)
         return AgentRunResult(
             status=status.value,
             content=str(payload.get("content") or ""),
             response=payload,
             tool_results=tuple(tool_results),
             error=error,
-            elapsed_ms=int((time.monotonic() - started) * 1000),
+            elapsed_ms=elapsed_ms,
             iterations=iterations,
             finish_reason=reason or str(payload.get("finish_reason") or ""),
             degradations=tuple(degradations),
@@ -161,8 +203,74 @@ async def run_agentic_chat(
         return remaining
 
     async def provider_chat(*, tools: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        nonlocal streamed_thinking
         runtime.ensure_active()
+        streamed_thinking = False
+        stream_tool_buffers.clear()
+        stream_provisional_lengths.clear()
         timeout = active_timeout()
+        agentic_chat = getattr(gateway, "agentic_chat", None)
+        if callable(agentic_chat):
+            async def on_stream_event(event: Dict[str, Any]) -> None:
+                nonlocal streamed_thinking
+                event_type = str(event.get("type") or "")
+                if event_type == "thinking_delta":
+                    streamed_thinking = True
+                    degradation = await _emit(
+                        on_event,
+                        {"type": "thinking", "content": str(event.get("content") or ""), "stream": True},
+                    )
+                    if degradation:
+                        degradations.append(degradation)
+                elif event_type == "content_delta":
+                    degradation = await _emit(
+                        on_event,
+                        {
+                            "type": "provisional_content",
+                            "content": str(event.get("content") or ""),
+                            "source": "assistant",
+                        },
+                    )
+                    if degradation:
+                        degradations.append(degradation)
+                elif event_type == "tool_call_delta":
+                    index = int(event.get("index") or 0)
+                    buffer = stream_tool_buffers.setdefault(index, {"name": "", "arguments": ""})
+                    buffer["name"] += str(event.get("name") or "")
+                    buffer["arguments"] += str(event.get("arguments") or "")
+                    field = "content" if buffer["name"] == "write_content" else "new_text"
+                    if buffer["name"] in {"write_content", "edit_lines"}:
+                        current = _partial_json_string(buffer["arguments"], field)
+                        previous = stream_provisional_lengths.get(index, 0)
+                        if len(current) > previous:
+                            stream_provisional_lengths[index] = len(current)
+                            degradation = await _emit(
+                                on_event,
+                                {
+                                    "type": "provisional_content",
+                                    "content": current[previous:],
+                                    "source": "tool_argument",
+                                    "tool": buffer["name"],
+                                },
+                            )
+                            if degradation:
+                                degradations.append(degradation)
+                elif event_type == "stream_degradation":
+                    degradations.append(dict(event))
+
+            return await runtime.wait_for(
+                agentic_chat(
+                    msgs,
+                    provider=provider,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                    thinking=thinking,
+                    timeout_seconds=timeout,
+                    on_stream_event=on_stream_event,
+                ),
+                timeout_seconds=timeout,
+            )
         return await runtime.wait_for(
             gateway.chat(
                 msgs,
@@ -213,7 +321,7 @@ async def run_agentic_chat(
         is_anthropic = str(resp.get("provider") or "").lower() == "anthropic"
 
         thought = str(resp.get("thinking") or "").strip()
-        if thought:
+        if thought and not streamed_thinking:
             degradation = await _emit(on_event, {"type": "thinking", "content": thought})
             if degradation:
                 degradations.append(degradation)
@@ -273,6 +381,12 @@ async def run_agentic_chat(
             name = str(tc.get("name") or "")
             tool_call_id = str(tc.get("id") or "")
             arguments = tc.get("arguments")
+            try:
+                from app.observability.usage_diagnostics import record_tool_call
+
+                record_tool_call(name)
+            except Exception as exc:
+                record_degradation("agent_tool_usage_diagnostics", exc)
             try:
                 runtime.ensure_active()
             except RuntimeError as exc:
@@ -429,10 +543,10 @@ async def run_agentic_chat(
             if scope is not None and scope.source_closure_required:
                 scope.register_provider_payload(
                     [tool_message],
-                source_prefix="agentic.tool_result",
-                selection_reason="agentic_tool_result_replay",
-                artifact_ref=str(anthropic_results[-1].get("_source_ref") or ""),
-            )
+                    source_prefix="agentic.tool_result",
+                    selection_reason="agentic_tool_result_replay",
+                    artifact_ref=str(anthropic_results[-1].get("_source_ref") or ""),
+                )
 
     logger.info("agentic loop hit max_iterations=%d; returning incomplete", max_iterations)
     return finish(AgentRunStatus.INCOMPLETE, response=last_response, reason="max_iterations")

@@ -216,6 +216,34 @@ MEMORY_ASSET_BOUNDARIES: Dict[str, Dict[str, str]] = {
 }
 
 
+MAINTENANCE_FREEZE_POLICIES: Tuple[Dict[str, str], ...] = (
+    {
+        "area": "eval",
+        "policy": "diagnostic_only",
+        "expansion_gate": "concrete_diagnostic_requirement",
+        "refactor_gate": "touched_stage_boundary_with_contract_tests",
+    },
+    {
+        "area": "durable_queue",
+        "policy": "existing_consumers_only",
+        "expansion_gate": "explicit_cross_restart_business_requirement",
+        "refactor_gate": "new_consumer_contract_and_recovery_evidence",
+    },
+    {
+        "area": "legacy_fallback",
+        "policy": "compatibility_safety_only",
+        "expansion_gate": "no_new_context_features",
+        "refactor_gate": "observable_parity_with_agentic_path",
+    },
+    {
+        "area": "permission_policy",
+        "policy": "code_owned_static_policy",
+        "expansion_gate": "validated_user_configuration_need",
+        "refactor_gate": "migration_and_precedence_contract",
+    },
+)
+
+
 def runtime_main_path() -> List[Dict[str, str]]:
     """Return a JSON-safe copy of the P0 runtime path."""
 
@@ -232,6 +260,12 @@ def memory_asset_boundaries() -> Dict[str, Dict[str, str]]:
     """Return canon / memory / memory_pack ownership boundaries."""
 
     return {name: dict(boundary) for name, boundary in MEMORY_ASSET_BOUNDARIES.items()}
+
+
+def maintenance_freeze_policies() -> List[Dict[str, str]]:
+    """Return explicit YAGNI gates for low-usage maintenance surfaces."""
+
+    return [dict(item) for item in MAINTENANCE_FREEZE_POLICIES]
 
 
 def route_contract(

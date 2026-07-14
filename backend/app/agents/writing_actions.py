@@ -161,6 +161,13 @@ class WritingActionToolset:
         if not old_text:
             return "[edit_lines 需要 old_text]"
         count = self.working_text.count(old_text)
+        if count != 1:
+            try:
+                from app.observability.usage_diagnostics import record_edit_miss
+
+                record_edit_miss()
+            except Exception as exc:
+                logger.warning("Edit diagnostics failed: %s", type(exc).__name__)
         if count == 0:
             return "未找到要替换的文本：old_text 未在当前正文中出现。请逐字核对原文，或改用 write_content 覆盖。"
         if count > 1:

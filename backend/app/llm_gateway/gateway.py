@@ -6,7 +6,7 @@ Unified LLM gateway with retry, provider routing, and usage tracking.
 
 import asyncio
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Awaitable, Callable
 import app.config as app_config
 from app.utils.logger import get_logger
 from app.services.llm_config_service import llm_config_service
@@ -416,6 +416,12 @@ class LLMGateway:
         runtime_metrics.observe("gateway.latency_ms", elapsed_time * 1000.0)
         runtime_metrics.increment("gateway.tokens", float((response.get("usage") or {}).get("total_tokens") or 0))
         try:
+            from app.observability.usage_diagnostics import record_provider_usage
+
+            record_provider_usage(dict(response.get("usage") or {}))
+        except Exception as metric_exc:
+            record_degradation("gateway_usage_diagnostics", metric_exc)
+        try:
             usage = response.get("usage", {})
             logger.info(
                 "LLM chat completed provider=%s model=%s elapsed_ms=%s prompt_tokens=%s completion_tokens=%s",
@@ -477,6 +483,260 @@ class LLMGateway:
             self.payload_accounting = PayloadAccountingPort()
         if not hasattr(self, "telemetry"):
             self.telemetry = GatewayTelemetryPort(egress_ledger)
+
+    async def agentic_chat(
+        self,
+        messages: List[Dict[str, Any]],
+        provider: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
+        thinking: Optional[Any] = None,
+        timeout_seconds: Optional[float] = None,
+        on_stream_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        data_classification: str = "project_private",
+        egress_authorized: bool = True,
+    ) -> Dict[str, Any]:
+        """Execute one agent iteration with native tool-delta streaming when available."""
+        self._ensure_reliability()
+        target_provider = self.provider_registry.resolve(provider)
+        if not target_provider.supports_agentic_stream():
+            if on_stream_event is not None:
+                await on_stream_event(
+                    {
+                        "type": "stream_degradation",
+                        "reason": "provider_agentic_stream_unavailable",
+                        "provider": target_provider.get_provider_name(),
+                    }
+                )
+            return await self.chat(
+                messages,
+                provider=provider,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                thinking=thinking,
+                timeout_seconds=timeout_seconds,
+                data_classification=data_classification,
+                egress_authorized=egress_authorized,
+            )
+
+        requested_timeout = float(timeout_seconds or self.request_timeout)
+        try:
+            from app.jobs.durable_queue import current_task_execution
+
+            task_execution = current_task_execution()
+            if task_execution is not None:
+                requested_timeout = task_execution.bounded_timeout(requested_timeout)
+        except ImportError:
+            pass
+        deadline = RequestDeadline(requested_timeout)
+        options = {
+            key: value
+            for key, value in (("tools", tools), ("tool_choice", tool_choice), ("thinking", thinking))
+            if value is not None
+        }
+        negotiated = self.capability_negotiator.negotiate(target_provider, options)
+        options = negotiated["options"]
+        tools = options.get("tools")
+        tool_choice = options.get("tool_choice")
+        thinking = options.get("thinking")
+        prepared_messages, accounting, degradation, final_payload_fingerprint = self.payload_accounting.prepare(
+            messages=messages,
+            tools=tools,
+            target_provider=target_provider,
+            max_tokens=max_tokens,
+        )
+        request_trace = await self.telemetry.record_request_plan(
+            messages=prepared_messages,
+            provider=provider,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            tools=tools,
+            token_accounting=accounting,
+            capabilities={**negotiated["capabilities"], "agentic_stream": True},
+            degradation=[*negotiated["degradation"], *degradation],
+            final_payload_fingerprint=final_payload_fingerprint,
+        )
+        await self.telemetry.record_egress(
+            request_trace,
+            provider_profile=provider,
+            provider_name=target_provider.get_provider_name(),
+            messages=prepared_messages,
+            data_classification=data_classification,
+            authorized=egress_authorized,
+            status="attempted",
+        )
+        if not egress_authorized:
+            raise PermissionError("external_egress_not_authorized")
+        request_trace["timeout_seconds"] = deadline.total_seconds
+        request_trace["_deadline"] = deadline
+        try:
+            from app.jobs.durable_queue import current_task_execution
+
+            task_execution = current_task_execution()
+            if task_execution is not None:
+                await task_execution.mark_external_side_effect(str(request_trace.get("request_fingerprint") or ""))
+        except ImportError:
+            pass
+
+        lease = await self.reliability.before_request(
+            f"{target_provider.get_provider_name()}:{getattr(target_provider, 'model', '')}",
+            deadline=deadline,
+        )
+        content_parts: List[str] = []
+        thinking_parts: List[str] = []
+        tool_buffers: Dict[int, Dict[str, str]] = {}
+        usage: Optional[ProviderUsage] = None
+        finish_reason = ""
+        started_at = time.monotonic()
+        first_event = True
+
+        async def emit_stream_event(event: Dict[str, Any]) -> None:
+            if on_stream_event is None:
+                return
+            try:
+                await on_stream_event(dict(event))
+            except Exception as exc:
+                code = record_degradation("gateway_agentic_stream_callback", exc)
+                request_trace.setdefault("degradation", []).append(
+                    {
+                        "type": "stream_callback_failure",
+                        "code": code,
+                        "event_type": str(event.get("type") or ""),
+                    }
+                )
+
+        stream = target_provider.stream_chat_events(
+            prepared_messages,
+            temperature,
+            max_tokens,
+            tools=tools,
+            tool_choice=tool_choice,
+            thinking=thinking,
+        ).__aiter__()
+        try:
+            while True:
+                try:
+                    event = await deadline.wait_for(anext(stream), limit=min(30.0, deadline.remaining()))
+                except StopAsyncIteration:
+                    break
+                if first_event:
+                    first_event = False
+                    try:
+                        from app.observability.usage_diagnostics import record_ttft
+
+                        record_ttft((time.monotonic() - started_at) * 1000.0)
+                    except Exception as exc:
+                        record_degradation("agentic_stream_ttft", exc)
+                event_type = str(event.get("type") or "")
+                if event_type == "response":
+                    return dict(event.get("response") or {})
+                if event_type == "content_delta":
+                    content_parts.append(str(event.get("content") or ""))
+                elif event_type == "thinking_delta":
+                    thinking_parts.append(str(event.get("content") or ""))
+                elif event_type == "tool_call_delta":
+                    index = int(event.get("index") or 0)
+                    buffer = tool_buffers.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                    buffer["id"] += str(event.get("id") or "")
+                    buffer["name"] += str(event.get("name") or "")
+                    buffer["arguments"] += str(event.get("arguments") or "")
+                elif event_type == "usage":
+                    reported = ProviderUsage.from_mapping(event.get("usage"), requests=0)
+                    usage = reported if usage is None else usage.merge(reported)
+                elif event_type == "finish":
+                    finish_reason = str(event.get("finish_reason") or "")
+                await emit_stream_event(event)
+            self.reliability.success(lease)
+        except asyncio.CancelledError:
+            self.reliability.cancelled(lease)
+            await self.telemetry.record_egress(
+                request_trace,
+                provider_profile=provider,
+                provider_name=target_provider.get_provider_name(),
+                messages=prepared_messages,
+                data_classification=data_classification,
+                authorized=egress_authorized,
+                status="cancelled_uncertain",
+            )
+            runtime_metrics.increment("gateway.agentic_stream_cancelled")
+            raise
+        except Exception:
+            self.reliability.failure(lease)
+            await self.telemetry.record_egress(
+                request_trace,
+                provider_profile=provider,
+                provider_name=target_provider.get_provider_name(),
+                messages=prepared_messages,
+                data_classification=data_classification,
+                authorized=egress_authorized,
+                status="failed",
+            )
+            runtime_metrics.increment("gateway.agentic_stream_failure")
+            raise
+        except BaseException:
+            self.reliability.cancelled(lease)
+            raise
+        finally:
+            await self.telemetry.close_provider_stream(stream)
+
+        tool_calls = [
+            {
+                "id": value["id"] or f"stream-call-{index}",
+                "type": "function",
+                "name": value["name"],
+                "arguments": value["arguments"] or "{}",
+            }
+            for index, value in sorted(tool_buffers.items())
+            if value["name"]
+        ]
+        if usage is None:
+            normalized_usage = ProviderUsage.from_mapping(
+                None,
+                requests=1,
+                requested_max_tokens=int(max_tokens or getattr(target_provider, "max_tokens", 0) or 0),
+            ).to_dict()
+        else:
+            normalized_usage = {
+                **usage.to_dict(),
+                "requests": 1,
+                "requested_max_tokens": int(max_tokens or getattr(target_provider, "max_tokens", 0) or 0),
+            }
+        self.total_requests += 1
+        self.total_tokens += int(normalized_usage.get("total_tokens") or 0)
+        try:
+            from app.observability.usage_diagnostics import record_provider_usage
+
+            record_provider_usage(normalized_usage)
+        except Exception as exc:
+            record_degradation("agentic_stream_usage_diagnostics", exc)
+        runtime_metrics.increment("gateway.agentic_stream_success")
+        runtime_metrics.observe("gateway.agentic_stream_latency_ms", (time.monotonic() - started_at) * 1000.0)
+        request_trace["usage"] = normalized_usage
+        await self.telemetry.record_egress(
+            request_trace,
+            provider_profile=provider,
+            provider_name=target_provider.get_provider_name(),
+            messages=prepared_messages,
+            data_classification=data_classification,
+            authorized=egress_authorized,
+            status="completed",
+        )
+        return {
+            "provider": target_provider.get_provider_name(),
+            "model": str(getattr(target_provider, "model", "") or ""),
+            "content": "".join(content_parts),
+            "thinking": "".join(thinking_parts) or None,
+            "tool_calls": tool_calls or None,
+            "usage": normalized_usage,
+            "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
+            "request_id": request_trace.get("request_id"),
+            "request_fingerprint": request_trace.get("request_fingerprint"),
+        }
 
     async def stream_chat(
         self,
