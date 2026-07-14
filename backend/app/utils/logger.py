@@ -56,7 +56,7 @@ def _build_handlers(debug_enabled: bool) -> list[logging.Handler]:
     log_dir = _resolve_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(logging.DEBUG if debug_enabled else logging.INFO)
     console_handler.setFormatter(RedactingFormatter(LOG_FORMAT, DATE_FORMAT))
 
