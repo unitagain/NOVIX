@@ -34,9 +34,13 @@ export default function WritingSessionAgentPanel({ vm }) {
     deepThinkingSupported,
     onToggleDeepThinking,
     pendingPlan,
+    pendingApproval,
+    agentTurnMeta,
     planExecuting,
     onExecutePlan,
     onDismissPlan,
+    onApproveFallback,
+    onDismissFallback,
   } = vm;
 
   // 输入禁用仅限「AI 正忙于其它章节」。无激活章节不再禁用——复杂规划 / 问答可直接对话，
@@ -102,9 +106,13 @@ export default function WritingSessionAgentPanel({ vm }) {
         deepThinkingSupported={deepThinkingSupported}
         onToggleDeepThinking={onToggleDeepThinking}
         pendingPlan={pendingPlan}
+        pendingApproval={pendingApproval}
+        agentTurnMeta={agentTurnMeta}
         planExecuting={planExecuting}
         onExecutePlan={onExecutePlan}
         onDismissPlan={onDismissPlan}
+        onApproveFallback={onApproveFallback}
+        onDismissFallback={onDismissFallback}
       />
     </AgentsPanel>
   );

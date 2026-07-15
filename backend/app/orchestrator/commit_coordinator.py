@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.context_engine.turn_scope import current_turn_scope
 from app.orchestrator.turn_runtime import TurnState
@@ -29,7 +29,7 @@ class CommitCoordinator:
         runtime = scope.runtime if scope is not None else None
         if runtime is not None and runtime.state not in {TurnState.COMMITTING, TurnState.COMPLETED}:
             runtime.transition(TurnState.COMMITTING)
-        kwargs = {
+        kwargs: Dict[str, Any] = {
             "project_id": project_id,
             "chapter": chapter,
             "version": version,
@@ -53,7 +53,7 @@ class CommitCoordinator:
         runtime = scope.runtime if scope is not None else None
         if runtime is not None and runtime.state not in {TurnState.COMMITTING, TurnState.COMPLETED}:
             runtime.transition(TurnState.COMMITTING)
-        kwargs = {"project_id": project_id, "chapter": chapter, "content": content}
+        kwargs: Dict[str, Any] = {"project_id": project_id, "chapter": chapter, "content": content}
         if expected_revision is not None:
             kwargs["expected_revision"] = expected_revision
         await self.draft_storage.save_final_draft(**kwargs)

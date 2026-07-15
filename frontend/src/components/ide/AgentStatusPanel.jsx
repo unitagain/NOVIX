@@ -24,6 +24,8 @@ import {
   Bot,
   ArrowUp,
   User,
+  ShieldCheck,
+  Wrench,
 } from 'lucide-react';
 import { useLocale } from '../../i18n';
 import { buildAgentThread } from '../../lib/agentThread';
@@ -196,8 +198,7 @@ function groupTimeline(timeline) {
   let buf = [];
   const flush = () => {
     if (!buf.length) return;
-    if (buf.length >= 2) out.push({ kind: 'tool-group', id: `grp-${buf[0].id}`, steps: buf });
-    else out.push(buf[0]);
+    out.push({ kind: 'tool-group', id: `grp-${buf[0].id}`, steps: buf });
     buf = [];
   };
   (timeline || []).forEach((item) => {
@@ -212,7 +213,7 @@ function groupTimeline(timeline) {
   return out;
 }
 
-// 折叠的工具调用组：默认收起，显示「调用工具 · N 次」，展开看每步（含逐项结果）。
+// AI IDE 式工具入口：主时间线只显示小图标，展开后查看逐项状态。
 const ToolGroupRow = ({ steps, isOpen, onToggle, expandedSteps, onToggleStep, defaultStepOpen, formatStageLabel }) => {
   const { t } = useLocale();
   const callCount = steps.filter((s) => s.event?.stage === 'tool_call').length || steps.length;
@@ -221,13 +222,17 @@ const ToolGroupRow = ({ steps, isOpen, onToggle, expandedSteps, onToggleStep, de
       <button
         type="button"
         onClick={onToggle}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded-[6px] text-[12px] bg-[var(--vscode-list-hover)] text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)] transition-colors"
+        title={(t('agentPanel.toolGroup') || '调用工具 · {n} 次').replace('{n}', callCount)}
+        aria-label={(t('agentPanel.toolGroup') || '调用工具 · {n} 次').replace('{n}', callCount)}
+        aria-expanded={isOpen}
+        className="relative inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)] transition-colors"
       >
-        <motion.span animate={{ rotate: isOpen ? 90 : 0 }} transition={{ duration: 0.15 }} className="shrink-0">
-          <ChevronRight size={13} />
-        </motion.span>
-        <Search size={12} />
-        <span>{(t('agentPanel.toolGroup') || '调用工具 · {n} 次').replace('{n}', callCount)}</span>
+        <Wrench size={13} />
+        {callCount > 1 ? (
+          <span className="absolute -right-1 -top-1 min-w-3 rounded-full bg-[var(--vscode-list-active)] px-0.5 text-center text-[8px] leading-3 text-[var(--vscode-list-active-fg)]">
+            {callCount}
+          </span>
+        ) : null}
       </button>
       <AnimatePresence initial={false}>
         {isOpen ? (
@@ -383,9 +388,13 @@ const AgentStatusPanel = ({
   deepThinkingSupported = false,
   onToggleDeepThinking = () => {},
   pendingPlan = null,
+  pendingApproval = null,
+  agentTurnMeta = null,
   planExecuting = false,
   onExecutePlan = () => {},
   onDismissPlan = () => {},
+  onApproveFallback = () => {},
+  onDismissFallback = () => {},
   isGenerating = false,
   isCancelling = false,
   onCancel = () => {},
@@ -466,7 +475,13 @@ const AgentStatusPanel = ({
   }, [diffReview, diffDecisions]);
 
   const hasDiffActions = Boolean(diffSummary);
-  const hasAnyContent = runs.length > 0 || Boolean(contextDebug) || hasDiffActions || Boolean(pendingPlan);
+  const hasAnyContent =
+    runs.length > 0 ||
+    Boolean(contextDebug) ||
+    hasDiffActions ||
+    Boolean(pendingPlan) ||
+    Boolean(pendingApproval) ||
+    Boolean(agentTurnMeta);
 
   const handleSubmit = () => {
     if (inputDisabled) return;
@@ -515,8 +530,8 @@ const AgentStatusPanel = ({
   const toggleStep = (id, current) => {
     setExpandedSteps((prev) => ({ ...prev, [id]: !current }));
   };
-  // 思考步骤默认展开（呈现真实推理），其余步骤默认折叠。
-  const defaultStepOpen = (stage) => stage === 'thinking';
+  // AI IDE 模式：思考与工具过程默认折叠，仅保留紧凑状态入口。
+  const defaultStepOpen = () => false;
 
   const formatStageLabel = (stage) => {
     return t(`agentPanel.stageLabels.${stage}`) !== `agentPanel.stageLabels.${stage}`
@@ -702,6 +717,55 @@ const AgentStatusPanel = ({
                   </button>
                 </div>
               </div>
+            ) : null}
+            {pendingApproval ? (
+              <div className="my-2 overflow-hidden rounded-[10px] border border-amber-200 bg-amber-50/70">
+                <div className="flex items-start gap-2.5 px-3 py-3">
+                  <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-amber-100 text-amber-700">
+                    <ShieldCheck size={15} />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-semibold text-amber-950">需要你的授权</div>
+                    <div className="mt-1 text-[11px] leading-5 text-amber-800">
+                      Agent 准备执行 {pendingApproval.operation || '受保护操作'}。授权仅对本次操作有效。
+                    </div>
+                    {pendingApproval.expiresAt ? (
+                      <div className="mt-1 text-[10px] text-amber-700/80">有效期至 {pendingApproval.expiresAt}</div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2 border-t border-amber-200/80 px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={onDismissFallback}
+                    className="rounded-[7px] px-3 py-1.5 text-[11px] text-amber-800 hover:bg-amber-100"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onApproveFallback}
+                    className="rounded-[7px] bg-amber-700 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-amber-800"
+                  >
+                    授权并继续
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            {agentTurnMeta ? (
+              <details className="my-2 rounded-[8px] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)]">
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[10px] text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]">
+                  <Wrench size={12} />
+                  <span>本轮上下文与运行信息</span>
+                </summary>
+                <pre className="max-h-48 overflow-auto border-t border-[var(--vscode-sidebar-border)] px-3 py-2 text-[10px] text-[var(--vscode-fg-subtle)]">
+                  {JSON.stringify(
+                    { contextPlan: agentTurnMeta.contextPlan, runtime: agentTurnMeta.runtime },
+                    null,
+                    2,
+                  )}
+                </pre>
+              </details>
             ) : null}
           </>
         )}

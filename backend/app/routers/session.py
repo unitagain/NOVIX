@@ -234,10 +234,23 @@ class ChatTurnRequest(BaseModel):
     chapter: Optional[str] = Field(None, max_length=50, description="Chapter ID")
     message: str = Field(..., min_length=1, max_length=6000, description="User chat message")
     has_selection: bool = Field(False, description="Editor has a selection")
-    has_draft: bool = Field(False, description="Chapter already has a draft")
+    has_draft: bool = Field(
+        False,
+        description="Compatibility hint only; unified chat routing verifies draft state in backend storage",
+    )
     target_word_count: int = Field(3000, ge=100, le=20000, description="Target word count for write")
     auto_execute_plan: bool = Field(False, description="Auto-execute plan after generation")
     thinking: bool = Field(False, description="Enable deep thinking (provider param toggle) for this turn")
+    fallback_approval_action_id: Optional[str] = Field(
+        None,
+        max_length=120,
+        description="Pending fallback approval action id returned by a previous chat turn",
+    )
+    fallback_approval_token: Optional[str] = Field(
+        None,
+        max_length=200,
+        description="Single-use fallback approval token returned by a previous chat turn",
+    )
 
 
 class AppendMessageRequest(BaseModel):
@@ -462,6 +475,8 @@ async def chat_turn(project_id: str, request: ChatTurnRequest):
         target_word_count=request.target_word_count,
         auto_execute_plan=request.auto_execute_plan,
         thinking=request.thinking,
+        fallback_approval_action_id=request.fallback_approval_action_id or "",
+        fallback_approval_token=request.fallback_approval_token or "",
     )
 
 

@@ -7,21 +7,55 @@ LLM judge 属于扩展轨道，由 app.eval.writing_judge 显式运行。
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Awaitable, Callable, Dict, List
 
+from app.eval.representative_scenarios import EVAL_ASSET_INVENTORY, evaluate_representative_scenarios
 from app.eval.trace_replay import replay_trace_payload
 from app.orchestrator.architecture import route_contract
 
 
 CaseRunner = Callable[[], Awaitable[Dict[str, Any]]]
+_PRIVATE_METRIC_KEYS = {"body", "content", "message", "output_preview", "prompt", "query", "statement"}
 
 
-def _case(case_id: str, category: str, passed: bool, metrics: Dict[str, Any] | None = None, failure: str = ""):
+def _fingerprint(value: Any) -> str:
+    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _privacy_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        safe: Dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).strip().lower()
+            if normalized in _PRIVATE_METRIC_KEYS:
+                if item not in (None, "", [], {}):
+                    safe[f"{key}_fingerprint"] = _fingerprint(item)
+                continue
+            safe[str(key)] = _privacy_safe(item)
+        return safe
+    if isinstance(value, (list, tuple)):
+        return [_privacy_safe(item) for item in value]
+    return value
+
+
+def _case(
+    case_id: str,
+    category: str,
+    passed: bool,
+    metrics: Dict[str, Any] | None = None,
+    failure: str = "",
+    *,
+    gate: bool = True,
+):
     return {
         "id": case_id,
         "category": category,
         "passed": bool(passed),
-        "metrics": metrics or {},
+        "gate": bool(gate),
+        "metrics": _privacy_safe(metrics or {}),
         "failure": "" if passed else failure,
     }
 
@@ -258,6 +292,181 @@ async def _trace_cases(thresholds: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+async def _representative_cases() -> List[Dict[str, Any]]:
+    cases = []
+    for result in await evaluate_representative_scenarios():
+        manifest = result.get("manifest") or {}
+        cases.append(
+            _case(
+                f"scenario-{result['id']}",
+                "representative_scenario",
+                bool(result.get("passed")),
+                result,
+                str(result.get("failure") or "representative scenario failed"),
+                gate=manifest.get("layer") == "deterministic",
+            )
+        )
+    return cases
+
+
+def _evidence_baseline(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
+    from app.observability.usage_diagnostics import memory_semantic_recall_decision
+
+    scenario_cases = [case for case in cases if case.get("category") == "representative_scenario"]
+    scenario_rows = [case.get("metrics") or {} for case in scenario_cases]
+    trace_cost = next((case.get("metrics") or {} for case in cases if case.get("id") == "trace-replay-cost"), {})
+
+    terminal_states: Dict[str, int] = {}
+    fallback_categories: Dict[str, int] = {}
+    edit_targets: Dict[str, Dict[str, Any]] = {}
+    degradation: Dict[str, int] = {}
+    required_total = 0
+    observed_total = 0
+    unexpected_source_types = 0
+    evidence_status: Dict[str, int] = {}
+    for row in scenario_rows:
+        diagnostics = row.get("diagnostics") or {}
+        coverage = diagnostics.get("critical_source_coverage") or {}
+        required_total += int(coverage.get("required_count") or 0)
+        observed_total += int(coverage.get("observed_count") or 0)
+        unexpected_source_types += int((diagnostics.get("source_overfetch") or {}).get("count") or 0)
+        terminal = str(diagnostics.get("terminal_state") or "unknown")
+        terminal_states[terminal] = terminal_states.get(terminal, 0) + 1
+        fallback = str(diagnostics.get("fallback_category") or "none")
+        fallback_categories[fallback] = fallback_categories.get(fallback, 0) + 1
+        edit = diagnostics.get("edit_target_outcome") or {}
+        if edit.get("status") == "observed":
+            edit_targets[str(edit.get("target") or "unknown")] = {"changed": bool(edit.get("changed"))}
+        for item in diagnostics.get("degradation") or []:
+            name = str(item or "unknown")
+            degradation[name] = degradation.get(name, 0) + 1
+        status = str(row.get("evidence_status") or "insufficient_evidence")
+        evidence_status[status] = evidence_status.get(status, 0) + 1
+
+    metric_decisions = [
+        {
+            "metric": "critical_source_coverage",
+            "decision": "hard_gate_candidate",
+            "basis": "synthetic_required_source_contract",
+        },
+        {
+            "metric": "edit_target_outcome",
+            "decision": "hard_gate_candidate",
+            "basis": "deterministic_exact_edit_contract",
+        },
+        {
+            "metric": "terminal_state",
+            "decision": "hard_gate_candidate",
+            "basis": "typed_runtime_terminal_contract",
+        },
+        {
+            "metric": "fallback_category",
+            "decision": "hard_gate_candidate",
+            "basis": "content_free_reason_taxonomy",
+        },
+        {
+            "metric": "permission_boundary",
+            "decision": "hard_gate_candidate",
+            "basis": "deterministic_allow_ask_deny_contract",
+        },
+        {
+            "metric": "source_overfetch",
+            "decision": "insufficient_evidence",
+            "basis": "representative_corpus_not_established",
+        },
+        {
+            "metric": "token_latency",
+            "decision": "diagnostic_only",
+            "basis": "synthetic_trace_is_not_a_production_budget",
+        },
+        {
+            "metric": "provider_degradation",
+            "decision": "engineering_gate",
+            "basis": "offline_adapter_inventory_and_explicit_degradation_contract",
+        },
+        {
+            "metric": "style_outcome",
+            "decision": "insufficient_evidence",
+            "basis": "source_recall_does_not_prove_subjective_prose_quality",
+        },
+    ]
+    resolved_gaps = [
+        "backend_fallback_execution_owner",
+        "provider_adapter_conformance",
+    ]
+    gaps = [
+        "representative_source_overfetch_corpus",
+        "production_token_latency_samples",
+        "style_constraint_outcome_without_subjective_judge",
+    ]
+    context_policy_decision = {
+        "schema_version": 1,
+        "status": "closed_no_change",
+        "default_strategy": "jit_retrieval",
+        "story_source_catalog_enabled": False,
+        "stable_push_layer_enabled": False,
+        "applied": False,
+        "reasons": [
+            "critical_source_coverage_has_no_observed_gap",
+            "representative_source_overfetch_corpus_missing",
+            "production_token_latency_samples_missing",
+        ],
+    }
+    memory_policy_decision = {
+        **memory_semantic_recall_decision(lexical_queries=0, labeled_semantic_misses=0),
+        "schema_version": 1,
+        "strategy": "lexical_only",
+        "semantic_rrf_enabled": False,
+        "eligibility_order": "filter_before_candidate_generation",
+        "applied": False,
+    }
+    decision_material = {
+        "assets": EVAL_ASSET_INVENTORY,
+        "scenarios": [
+            {
+                "id": row.get("id"),
+                "passed": row.get("passed"),
+                "evidence_status": row.get("evidence_status"),
+            }
+            for row in scenario_rows
+        ],
+        "metric_decisions": metric_decisions,
+        "resolved_gaps": resolved_gaps,
+        "gaps": gaps,
+        "context_policy_decision": context_policy_decision,
+        "memory_policy_decision": memory_policy_decision,
+    }
+    return {
+        "schema_version": 1,
+        "classification": "content_free_deterministic_baseline",
+        "assets": [dict(item) for item in EVAL_ASSET_INVENTORY],
+        "scenario_count": len(scenario_rows),
+        "scenario_evidence_status": evidence_status,
+        "diagnostics": {
+            "critical_source_coverage": {
+                "required_count": required_total,
+                "observed_count": observed_total,
+                "ratio": (observed_total / required_total) if required_total else 1.0,
+            },
+            "source_overfetch": {"unexpected_type_count": unexpected_source_types},
+            "edit_target_outcome": edit_targets,
+            "terminal_state": terminal_states,
+            "fallback_category": fallback_categories,
+            "token": trace_cost.get("tokens") or {"status": "insufficient_evidence"},
+            "latency": trace_cost.get("latency_ms") or {"status": "insufficient_evidence"},
+            "degradation": degradation,
+        },
+        "metric_decisions": metric_decisions,
+        "resolved_evidence_gaps": resolved_gaps,
+        "policy_decisions": {
+            "context": context_policy_decision,
+            "memory": memory_policy_decision,
+        },
+        "evidence_gaps": gaps,
+        "decision_fingerprint": _fingerprint(decision_material),
+    }
+
+
 async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Run the default P6 CI gate suite."""
 
@@ -273,6 +482,7 @@ async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> D
     cases.extend(await _component_cases())
     cases.extend(await _route_cases())
     cases.extend(await _trace_cases(thresholds))
+    cases.extend(await _representative_cases())
 
     retrieval_cases = [case for case in cases if case["category"] == "retrieval"]
     retrieval_pass = [case for case in retrieval_cases if case["passed"]]
@@ -289,7 +499,7 @@ async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> D
         else False,
         "fallback_rate_ok": fallback_rate <= thresholds["fallback_rate_max"],
     }
-    failures = [case for case in cases if not case["passed"]]
+    failures = [case for case in cases if case.get("gate", True) and not case["passed"]]
     aggregate_failures = [name for name, ok in aggregate_checks.items() if not ok]
     return {
         "success": not failures and not aggregate_failures,
@@ -298,5 +508,6 @@ async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> D
         "aggregate": {"checks": aggregate_checks, "fallback_rate": fallback_rate},
         "failures": failures,
         "aggregate_failures": aggregate_failures,
+        "evidence_baseline": _evidence_baseline(cases),
         "cases": cases,
     }

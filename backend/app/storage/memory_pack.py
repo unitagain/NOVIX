@@ -5,9 +5,13 @@ Memory Pack Storage / 章节记忆包存储
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
+import threading
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -17,6 +21,7 @@ import aiofiles
 from app.config import config as app_cfg
 from app.context_engine.turn_scope import current_turn_scope
 from app.storage.base import BaseStorage
+from app.storage.file_lock import get_file_lock
 from app.utils.chapter_id import ChapterIDValidator, normalize_chapter_id
 from app.utils.logger import get_logger
 
@@ -26,6 +31,24 @@ logger = get_logger(__name__)
 _storage_cfg = app_cfg.get("storage", {})
 MAX_MEMORY_PACK_HISTORY = int(_storage_cfg.get("max_memory_pack_history", 3))
 _MEMORY_PACK_SOURCE_ROOTS = {"canon", "cards", "drafts", "memory", "outline", "summaries", "volumes"}
+_SOURCE_INDEX_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class SourceScanResult:
+    revisions: list[Dict[str, Any]]
+    files_scanned: int
+    bytes_hashed: int
+    scan_latency_ms: float
+    hash_latency_ms: float
+    total_latency_ms: float
+    fallback_reason: str = ""
+
+    def diagnostics(self, *, changed_files: int = 0) -> Dict[str, Any]:
+        payload = asdict(self)
+        payload.pop("revisions", None)
+        payload["changed_files"] = max(0, int(changed_files))
+        return payload
 
 
 class MemoryPackStorage(BaseStorage):
@@ -53,7 +76,7 @@ class MemoryPackStorage(BaseStorage):
         canonical = self._canonicalize_chapter_id(chapter)
         if canonical:
             payload["chapter"] = canonical
-        verification = self.verify_source_binding(project_id, canonical or chapter, payload)
+        verification = await self.verify_source_binding(project_id, canonical or chapter, payload)
         payload["stale"] = not verification["valid"]
         payload["stale_reasons"] = verification["reasons"]
         payload["source_verification"] = verification
@@ -81,7 +104,7 @@ class MemoryPackStorage(BaseStorage):
             if scope is not None
             else int((pack.get("source_binding") or {}).get("context_epoch") or pack.get("context_epoch") or 0)
         )
-        pack["source_binding"] = self.build_source_binding(
+        pack["source_binding"] = await self.build_source_binding(
             project_id,
             canonical or chapter,
             context_epoch=context_epoch,
@@ -93,31 +116,35 @@ class MemoryPackStorage(BaseStorage):
                 self._rotate_history(path)
             await self._atomic_write(path, payload)
 
-    def build_source_binding(self, project_id: str, chapter: str, *, context_epoch: int = 0) -> Dict[str, Any]:
-        revisions = self._capture_source_revisions(project_id, chapter)
+    async def build_source_binding(self, project_id: str, chapter: str, *, context_epoch: int = 0) -> Dict[str, Any]:
+        scan = await self._capture_source_revisions_async(project_id, chapter)
         return {
             "schema_version": 1,
             "context_epoch": max(0, int(context_epoch or 0)),
-            "source_fingerprint": self._source_fingerprint(revisions),
-            "source_revisions": revisions,
+            "source_fingerprint": self._source_fingerprint(scan.revisions),
+            "source_revisions": scan.revisions,
+            "scan_diagnostics": scan.diagnostics(),
         }
 
-    def verify_source_binding(self, project_id: str, chapter: str, pack: Dict[str, Any]) -> Dict[str, Any]:
+    async def verify_source_binding(self, project_id: str, chapter: str, pack: Dict[str, Any]) -> Dict[str, Any]:
         binding = dict((pack or {}).get("source_binding") or {})
         if not binding:
             return {"valid": False, "reasons": ["source_binding_missing"], "checked": 0}
         stored = list(binding.get("source_revisions") or [])
         reasons = []
-        current = self._capture_source_revisions(project_id, chapter)
+        scan = await self._capture_source_revisions_async(project_id, chapter)
+        current = scan.revisions
         stored_by_path = {str(item.get("path") or ""): str(item.get("content_sha256") or "") for item in stored}
         current_by_path = {str(item.get("path") or ""): str(item.get("content_sha256") or "") for item in current}
+        changes = {"missing": 0, "added": 0, "changed": 0}
         for path in sorted(set(stored_by_path) | set(current_by_path)):
             if path not in current_by_path:
-                reasons.append(f"source:{path}:missing")
+                changes["missing"] += 1
             elif path not in stored_by_path:
-                reasons.append(f"source:{path}:added")
+                changes["added"] += 1
             elif current_by_path[path] != stored_by_path[path]:
-                reasons.append(f"source:{path}:changed")
+                changes["changed"] += 1
+        reasons.extend(name for name, count in changes.items() if count)
         if self._source_fingerprint(current) != str(binding.get("source_fingerprint") or ""):
             reasons.append("source_fingerprint_changed")
         scope = current_turn_scope()
@@ -128,43 +155,179 @@ class MemoryPackStorage(BaseStorage):
             "reasons": list(dict.fromkeys(reasons)),
             "checked": len(set(stored_by_path).intersection(current_by_path)),
             "context_epoch": int(binding.get("context_epoch") or 0),
+            "change_counts": changes,
+            "scan_diagnostics": scan.diagnostics(changed_files=sum(changes.values())),
         }
 
-    def _capture_source_revisions(self, project_id: str, chapter: str) -> list[Dict[str, Any]]:
+    async def profile_source_scan(self, project_id: str, chapter: str = "") -> Dict[str, Any]:
+        """Run one content-free source scan for synthetic/local performance evidence."""
+
+        return (await self._capture_source_revisions_async(project_id, chapter)).diagnostics()
+
+    async def _capture_source_revisions_async(self, project_id: str, chapter: str) -> SourceScanResult:
+        index_path = self._source_index_path(project_id)
+        async with get_file_lock().lock(index_path):
+            result = await asyncio.to_thread(self._capture_source_revisions, project_id, chapter)
+        try:
+            from app.observability.runtime_metrics import runtime_metrics
+
+            runtime_metrics.observe("memory_pack.scan.files", result.files_scanned)
+            runtime_metrics.observe("memory_pack.scan.bytes_hashed", result.bytes_hashed)
+            runtime_metrics.observe("memory_pack.scan.latency_ms", result.scan_latency_ms)
+            runtime_metrics.observe("memory_pack.hash.latency_ms", result.hash_latency_ms)
+        except Exception as exc:
+            from app.error_contract import record_degradation
+
+            record_degradation("memory_pack_scan_metrics", exc)
+        return result
+
+    def _capture_source_revisions(self, project_id: str, chapter: str) -> SourceScanResult:
+        started = time.perf_counter()
         project_root = self.get_project_path(project_id)
         del chapter
         if not project_root.exists():
-            return []
+            return SourceScanResult([], 0, 0, 0.0, 0.0, 0.0, "project_root_missing")
+        cached_files, fallback_reason = self._load_source_index(project_id)
+        scan_started = time.perf_counter()
+        paths = self._enumerate_source_files(project_root)
+        scan_latency_ms = (time.perf_counter() - scan_started) * 1000.0
         rows = []
-        for path in sorted(item for item in project_root.rglob("*") if item.is_file()):
-            relative = path.relative_to(project_root).as_posix()
-            root = relative.split("/", 1)[0]
-            if relative != "project.yaml" and root not in _MEMORY_PACK_SOURCE_ROOTS:
-                continue
-            content = b""
-            for _ in range(3):
-                before = path.stat()
-                content = path.read_bytes()
-                after = path.stat()
-                if before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns:
-                    break
+        files_scanned = 0
+        bytes_hashed = 0
+        next_index: Dict[str, Dict[str, Any]] = {}
+        hash_started = time.perf_counter()
+        for relative, path, stat in paths:
+            files_scanned += 1
+            path_fingerprint = hashlib.sha256(relative.encode("utf-8")).hexdigest()
+            cached = cached_files.get(path_fingerprint) or {}
+            if (
+                int(cached.get("size", -1)) == int(stat.st_size)
+                and int(cached.get("mtime_ns", -1)) == int(stat.st_mtime_ns)
+                and cached.get("content_sha256")
+            ):
+                digest = str(cached["content_sha256"])
+                byte_size = int(stat.st_size)
             else:
-                raise RuntimeError(f"memory_pack_source_changed:{relative}")
-            digest = hashlib.sha256(content).hexdigest()
+                content = b""
+                for _ in range(3):
+                    before = path.stat()
+                    content = path.read_bytes()
+                    after = path.stat()
+                    if before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns:
+                        stat = after
+                        break
+                else:
+                    raise RuntimeError(f"memory_pack_source_changed:{path_fingerprint}")
+                digest = hashlib.sha256(content).hexdigest()
+                byte_size = len(content)
+                bytes_hashed += byte_size
+            next_index[path_fingerprint] = {
+                "size": byte_size,
+                "mtime_ns": int(stat.st_mtime_ns),
+                "content_sha256": digest,
+            }
             rows.append(
                 {
                     "path": relative,
+                    "path_fingerprint": path_fingerprint,
                     "revision_kind": "content_hash",
                     "revision": digest,
                     "content_sha256": digest,
-                    "byte_size": len(content),
+                    "byte_size": byte_size,
+                    "mtime_ns": int(stat.st_mtime_ns),
                 }
             )
+        hash_latency_ms = (time.perf_counter() - hash_started) * 1000.0
+        self._write_source_index(project_id, next_index)
+        return SourceScanResult(
+            revisions=rows,
+            files_scanned=files_scanned,
+            bytes_hashed=bytes_hashed,
+            scan_latency_ms=round(scan_latency_ms, 3),
+            hash_latency_ms=round(hash_latency_ms, 3),
+            total_latency_ms=round((time.perf_counter() - started) * 1000.0, 3),
+            fallback_reason=fallback_reason,
+        )
+
+    @staticmethod
+    def _enumerate_source_files(project_root: Path) -> list[tuple[str, Path, os.stat_result]]:
+        rows: list[tuple[str, Path, os.stat_result]] = []
+
+        def walk(root: Path) -> None:
+            if not root.exists():
+                return
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        walk(Path(entry.path))
+                    elif entry.is_file(follow_symlinks=False):
+                        path = Path(entry.path)
+                        rows.append((path.relative_to(project_root).as_posix(), path, entry.stat(follow_symlinks=False)))
+
+        project_file = project_root / "project.yaml"
+        if project_file.is_file():
+            rows.append(("project.yaml", project_file, project_file.stat()))
+        for root_name in sorted(_MEMORY_PACK_SOURCE_ROOTS):
+            walk(project_root / root_name)
+        rows.sort(key=lambda item: item[0])
         return rows
+
+    def _source_index_path(self, project_id: str) -> Path:
+        return self.get_project_path(project_id) / "memory_packs" / "source_revision_index.json"
+
+    def _load_source_index(self, project_id: str) -> tuple[Dict[str, Dict[str, Any]], str]:
+        path = self._source_index_path(project_id)
+        if not path.exists():
+            return {}, "index_missing"
+        try:
+            payload = json.loads(path.read_text(encoding=self.encoding))
+            if int(payload.get("schema_version") or 0) != _SOURCE_INDEX_SCHEMA_VERSION:
+                return {}, "index_schema_mismatch"
+            files = payload.get("files")
+            if not isinstance(files, dict):
+                return {}, "index_invalid"
+            return {str(key): dict(value) for key, value in files.items() if isinstance(value, dict)}, ""
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            return {}, "index_unreadable"
+
+    def _write_source_index(self, project_id: str, files: Dict[str, Dict[str, Any]]) -> None:
+        path = self._source_index_path(project_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": _SOURCE_INDEX_SCHEMA_VERSION,
+            "classification": "derived_content_hash_manifest",
+            "files": files,
+        }
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                encoding=self.encoding,
+            )
+            os.replace(str(temporary), str(path))
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @staticmethod
     def _source_fingerprint(revisions: list[Dict[str, Any]]) -> str:
-        payload = json.dumps(revisions, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        stable_revisions = [
+            {
+                "path": str(item.get("path") or ""),
+                "content_sha256": str(item.get("content_sha256") or item.get("revision") or ""),
+                "byte_size": int(item.get("byte_size") or 0),
+            }
+            for item in revisions
+        ]
+        payload = json.dumps(
+            stable_revisions,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------

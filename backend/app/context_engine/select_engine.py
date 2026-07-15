@@ -13,7 +13,7 @@ License: PolyForm Noncommercial License 1.0.0
   (ranked by relevance using embeddings or BM25).
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Protocol
 from contextvars import ContextVar
 import math
 from .models import ContextItem, ContextPriority, ContextType
@@ -37,6 +37,14 @@ logger = get_logger(__name__)
 _RRF_K = 60
 
 
+class EmbeddingPort(Protocol):
+    async def embed(self, texts: List[str]) -> List[List[float]]: ...
+
+
+class RerankerPort(Protocol):
+    async def rerank(self, query: str, documents: List[str]) -> List[float]: ...
+
+
 class ContextSelectEngine:
     """
     上下文选择引擎 - 为LLM调用选择最相关的上下文项
@@ -56,9 +64,9 @@ class ContextSelectEngine:
 
     def __init__(
         self,
-        embeddings_service=None,
+        embeddings_service: Optional[EmbeddingPort] = None,
         *,
-        reranker_service=None,
+        reranker_service: Optional[RerankerPort] = None,
         fusion: Optional[str] = None,
         semantic_rerank: Optional[bool] = None,
         rerank_top_k: Optional[int] = None,

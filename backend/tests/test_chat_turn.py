@@ -9,6 +9,9 @@
 """
 
 import asyncio
+from unittest.mock import patch
+
+import pytest
 
 from app.orchestrator.orchestrator import Orchestrator
 from app.agents.intent import classify_writing_intent
@@ -30,7 +33,15 @@ def test_intent_continue_without_draft_is_write():
 
 
 def _orch(tmp_path):
-    return Orchestrator(str(tmp_path))
+    with (
+        patch("app.orchestrator.orchestrator.create_embeddings_backend", return_value=None),
+        patch("app.orchestrator.orchestrator.create_reranker_backend", return_value=None),
+    ):
+        return Orchestrator(str(tmp_path))
+
+
+def _seed_draft(orch, *, content="existing draft"):
+    asyncio.run(orch.draft_storage.save_draft("p", "V1C001", "v1", content, len(content)))
 
 
 def test_chat_turn_agent_is_default_path(tmp_path):
@@ -81,7 +92,7 @@ def test_chat_turn_passes_only_writing_service_contract_arguments(tmp_path):
 
 
 def test_chat_turn_fallback_signals_write(tmp_path):
-    """能力降级：agent fallback → run_chat_turn 返回 fallback 信号（前端用成熟 write 流程兜底）。"""
+    """能力降级由后端生成审批合同，客户端不再选择 legacy 路径。"""
     orch = _orch(tmp_path)
 
     async def fake_decide(*a, **k):
@@ -93,7 +104,11 @@ def test_chat_turn_fallback_signals_write(tmp_path):
     orch.decide_writing_action = fake_decide
     orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "写个新场景"))
-    assert r.get("fallback") is True and r["action"] == "write"
+    assert r.get("fallback") is False and r["action"] == "write"
+    assert r["terminal_state"] == "requires_approval"
+    assert r["fallback_decision"]["category"] == "no_tool_calls"
+    assert r["pending_action"]["operation"] == "write_content"
+    assert r["compatibility"]["backend_authoritative"] is True
     assert r["route_contract"]["path"] == "fallback_workflow"
     assert r["context_plan"]["degradation"][0]["status"] == "fallback"
 
@@ -119,36 +134,87 @@ def test_chat_turn_context_plan_includes_actual_ranking_trace(tmp_path):
 
 
 def test_chat_turn_fallback_signals_edit(tmp_path):
-    """能力降级 + edit 意图：agent fallback → 返回 fallback 信号（前端走 editor 精确 diff）。"""
+    """edit fallback 由后端决定操作与权限。"""
     orch = _orch(tmp_path)
+    _seed_draft(orch)
 
     async def fake_decide(*a, **k):
         return {"action": "edit"}
 
     async def fake_agent(pid, ch, msg, **k):
-        return {"fallback": True}
+        return {"fallback": True, "reason": "provider_failure"}
 
     orch.decide_writing_action = fake_decide
     orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "改下措辞", has_draft=True))
-    assert r.get("fallback") is True and r["action"] == "edit"
+    assert r.get("fallback") is False and r["action"] == "edit"
+    assert r["terminal_state"] == "requires_approval"
+    assert r["fallback_decision"]["operation"] == "edit_lines"
+    assert r["fallback_decision"]["category"] == "provider_failure"
     assert r["route_contract"]["fallback"] is True
 
 
 def test_chat_turn_fallback_signals_continue(tmp_path):
-    """能力降级 + continue：agent fallback → 返回 fallback 信号（前端续写）。"""
+    """continue fallback 由后端归一为写入权限合同。"""
     orch = _orch(tmp_path)
+    _seed_draft(orch)
 
     async def fake_decide(*a, **k):
         return {"action": "continue"}
 
     async def fake_agent(pid, ch, msg, **k):
-        return {"fallback": True}
+        return {"fallback": True, "reason": "max_iterations"}
 
     orch.decide_writing_action = fake_decide
     orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "接着写", has_draft=True))
-    assert r.get("fallback") is True and r["action"] == "continue"
+    assert r.get("fallback") is False and r["action"] == "continue"
+    assert r["terminal_state"] == "requires_approval"
+    assert r["fallback_decision"]["category"] == "iteration_limit"
+    assert r["fallback_decision"]["operation"] == "write_content"
+
+
+@pytest.mark.parametrize(
+    ("client_hint", "seed_draft", "expected"),
+    [(True, False, False), (False, True, True)],
+)
+def test_chat_turn_uses_backend_draft_state_instead_of_client_hint(client_hint, seed_draft, expected, tmp_path):
+    orch = _orch(tmp_path)
+    if seed_draft:
+        _seed_draft(orch)
+    observed = []
+
+    async def fake_decide(*_args, **kwargs):
+        observed.append(kwargs["has_draft"])
+        return {"action": "write"}
+
+    async def fake_agent(*_args, **_kwargs):
+        return {"success": True, "action": "agentic_write", "changed": True}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = fake_agent
+    result = asyncio.run(orch.run_chat_turn("p", "V1C001", "request", has_draft=client_hint))
+
+    assert result["success"] is True
+    assert observed == [expected]
+
+
+def test_fallback_edit_rejects_client_draft_hint_when_storage_has_no_draft(tmp_path):
+    orch = _orch(tmp_path)
+
+    async def fake_decide(*_args, **_kwargs):
+        return {"action": "edit"}
+
+    async def fake_agent(*_args, **_kwargs):
+        return {"fallback": True, "reason": "provider_failure"}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = fake_agent
+    result = asyncio.run(orch.run_chat_turn("p", "V1C001", "edit", has_draft=True))
+
+    assert result["terminal_state"] == "requires_input"
+    assert result["reason"] == "draft_required"
+    assert "pending_action" not in result
 
 
 def test_chat_turn_routes_plan(tmp_path):
@@ -170,7 +236,7 @@ def test_chat_turn_routes_plan(tmp_path):
 
 
 def test_chat_turn_plan_unsplittable_then_fallback_signal(tmp_path):
-    """plan 拆不出 → 转写作；agent 也降级 → 返回 fallback 信号（前端兜底）。"""
+    """plan 拆不出且 agent 降级时，后端仍拥有 fallback 决策。"""
     orch = _orch(tmp_path)
 
     async def fake_decide(*a, **k):
@@ -180,13 +246,124 @@ def test_chat_turn_plan_unsplittable_then_fallback_signal(tmp_path):
         return None  # 拆不出可执行步骤
 
     async def fake_agent(pid, ch, msg, **k):
-        return {"fallback": True}
+        return {"fallback": True, "reason": "no_tool_calls"}
 
     orch.decide_writing_action = fake_decide
     orch.application.plans.create_plan = fake_create
     orch.writing_service.run = fake_agent
     r = asyncio.run(orch.run_chat_turn("p", "V1C001", "随便写点"))
-    assert r.get("fallback") is True and r["action"] == "write"
+    assert r.get("fallback") is False and r["action"] == "write"
+    assert r["terminal_state"] == "requires_approval"
+
+
+def test_chat_turn_fallback_approval_executes_once(tmp_path):
+    orch = _orch(tmp_path)
+    command_calls = []
+
+    async def fake_decide(*_args, **_kwargs):
+        return {"action": "write"}
+
+    async def fake_agent(*_args, **_kwargs):
+        return {"fallback": True, "reason": "no_tool_calls"}
+
+    async def fake_command(**kwargs):
+        command_calls.append(kwargs["route_path"])
+        return {"success": True, "status": "waiting_feedback", "version": "v1"}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = fake_agent
+    orch.application.commands.run = fake_command
+
+    pending = asyncio.run(orch.run_chat_turn("p", "V1C001", "写个新场景"))
+    approved = asyncio.run(
+        orch.run_chat_turn(
+            "p",
+            "V1C001",
+            "写个新场景",
+            fallback_approval_action_id=pending["pending_action"]["id"],
+            fallback_approval_token=pending["pending_action"]["token"],
+        )
+    )
+    replay = asyncio.run(
+        orch.run_chat_turn(
+            "p",
+            "V1C001",
+            "写个新场景",
+            fallback_approval_action_id=pending["pending_action"]["id"],
+            fallback_approval_token=pending["pending_action"]["token"],
+        )
+    )
+
+    assert approved["terminal_state"] == "completed"
+    assert approved["fallback_executed"] is True
+    assert approved["fallback_execution"]["result_ref"].endswith("/v1")
+    assert replay["terminal_state"] == "incomplete"
+    assert replay["fallback_execution"]["idempotency_replayed"] is True
+    assert command_calls == ["fallback_workflow"]
+
+
+def test_chat_turn_fallback_approval_rejects_revision_drift(tmp_path):
+    orch = _orch(tmp_path)
+    command_calls = []
+
+    async def fake_decide(*_args, **_kwargs):
+        return {"action": "write"}
+
+    async def fake_agent(*_args, **_kwargs):
+        return {"fallback": True, "reason": "no_tool_calls"}
+
+    async def fake_command(**kwargs):
+        command_calls.append(kwargs["route_path"])
+        return {"success": True}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = fake_agent
+    orch.application.commands._run_command = fake_command
+
+    pending = asyncio.run(orch.run_chat_turn("p", "V1C001", "write"))
+    _seed_draft(orch, content="concurrent change")
+    stale = asyncio.run(
+        orch.run_chat_turn(
+            "p",
+            "V1C001",
+            "write",
+            fallback_approval_action_id=pending["pending_action"]["id"],
+            fallback_approval_token=pending["pending_action"]["token"],
+        )
+    )
+
+    assert stale["terminal_state"] == "incomplete"
+    assert stale["fallback_execution"]["executed"] is False
+    assert stale["reason"] == "target_hash_mismatch"
+    assert command_calls == []
+
+
+@pytest.mark.parametrize(
+    ("reason", "category", "terminal"),
+    [
+        ("no_provider", "capability", "requires_approval"),
+        ("timeout", "deadline", "incomplete"),
+        ("tool_execution_failed", "tool_failure", "requires_approval"),
+    ],
+)
+def test_chat_turn_fallback_reason_contracts(reason, category, terminal, tmp_path):
+    orch = _orch(tmp_path)
+
+    async def fake_decide(*_args, **_kwargs):
+        return {"action": "write"}
+
+    async def fake_agent(*_args, **_kwargs):
+        return {"fallback": True, "reason": reason}
+
+    orch.decide_writing_action = fake_decide
+    orch.writing_service.run = fake_agent
+    result = asyncio.run(orch.run_chat_turn("p", "V1C001", "request"))
+
+    assert result["fallback_decision"]["category"] == category
+    assert result["terminal_state"] == terminal
+    if category == "deadline":
+        assert result["fallback_executed"] is False
+        assert "pending_action" not in result
 
 
 def test_chat_turn_auto_execute_plan(tmp_path):

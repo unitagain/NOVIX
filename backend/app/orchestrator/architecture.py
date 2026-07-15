@@ -283,7 +283,7 @@ def route_contract(
     normalized = str(action or "write").strip() or "write"
     if fallback:
         path = "fallback_workflow"
-        stages = [RuntimeStage.INTENT_ROUTING, RuntimeStage.FALLBACK_WORKFLOW]
+        stages = [RuntimeStage.INTENT_ROUTING, RuntimeStage.FALLBACK_WORKFLOW, RuntimeStage.PERMISSION_GATE]
     elif normalized == "plan":
         path = "plan_workflow"
         stages = [RuntimeStage.INTENT_ROUTING, RuntimeStage.PLAN_WORKFLOW]

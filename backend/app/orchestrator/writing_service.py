@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.agents.agentic import run_agentic_chat
 from app.agents.fallback_policy import build_fallback_context
@@ -13,12 +13,18 @@ from app.agents.writing_actions import WritingActionToolset
 from app.context_engine.turn_scope import current_turn_scope
 from app.error_contract import record_degradation, safe_error_code
 from app.orchestrator.context_assembly_service import ContextAssemblyService
+from app.orchestrator.runtime_contracts import (
+    AgentStreamEvent,
+    DraftStoragePort,
+    GatewayPort,
+    ProgressCallback,
+    ProposalDetector,
+    WriterAgentPort,
+    WritingResult,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-
-ProgressCallback = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
-
 
 class WritingService:
     """Own tool execution, provider calls, and proposal streaming for writer turns."""
@@ -26,14 +32,14 @@ class WritingService:
     def __init__(
         self,
         *,
-        gateway: Any,
-        writer: Any,
-        draft_storage: Any,
-        storage_adapter: Any,
-        select_engine: Any,
+        gateway: GatewayPort,
+        writer: WriterAgentPort,
+        draft_storage: DraftStoragePort,
+        storage_adapter: object,
+        select_engine: object,
         context_assembly: ContextAssemblyService,
-        progress_callback: ProgressCallback = None,
-        detect_proposals: Optional[Callable[[str, str], Awaitable[List[Dict[str, Any]]]]] = None,
+        progress_callback: Optional[ProgressCallback] = None,
+        detect_proposals: Optional[ProposalDetector] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
     ):
         self.gateway = gateway
@@ -55,7 +61,7 @@ class WritingService:
         has_selection: bool = False,
         thinking: bool = False,
         target_word_count: int = 3000,
-    ) -> Dict[str, Any]:
+    ) -> WritingResult:
         current_text = await self._load_current_text(project_id, chapter)
         retrieval = WriterToolset(
             project_id,
@@ -103,41 +109,45 @@ class WritingService:
         try:
             from app.observability.usage_diagnostics import record_edit_assembly, record_source_usage
 
-            for source_type in request.supply_report.get("available") or []:
+            for source_type in request.supply_report.available:
                 record_source_usage(str(source_type), "available")
-            for source_type in request.supply_report.get("pushed") or []:
+            for source_type in request.supply_report.pushed:
                 record_source_usage(str(source_type), "selected")
-            for item in request.supply_report.get("omitted") or []:
+            for item in request.supply_report.omitted:
                 record_source_usage(str(item.get("type") or "other"), "omitted")
             if current_text:
                 record_edit_assembly(
-                    draft_tokens=int(request.supply_report.get("draft_tokens") or 0),
-                    pushed_tokens=int(request.supply_report.get("draft_pushed_tokens") or 0),
-                    projected=bool(request.supply_report.get("omitted")),
+                    draft_tokens=request.supply_report.draft_tokens,
+                    pushed_tokens=request.supply_report.draft_pushed_tokens,
+                    projected=bool(request.supply_report.omitted),
                 )
         except Exception as exc:
             record_degradation("writer_source_usage_diagnostics", exc)
-        tools_used = {"any": False, "names": set()}
+        tools_used_any = False
+        tool_names: set[str] = set()
         stream_state = {"started": False, "provisional": False}
 
-        def fallback_result(reason: str, agent_run: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        supply_report_payload = request.supply_report.to_dict()
+
+        def fallback_result(reason: str, agent_run: Optional[Dict[str, Any]] = None) -> WritingResult:
             return {
                 "success": False,
                 "fallback": True,
                 "reason": reason,
                 "agent_run": dict(agent_run or {}),
-                "context_supply": dict(request.supply_report),
+                "context_supply": dict(supply_report_payload),
                 "fallback_context": build_fallback_context(
                     reason=reason,
                     agent_run=agent_run,
-                    context_supply=request.supply_report,
+                    context_supply=supply_report_payload,
                 ),
             }
 
-        async def on_event(event: Dict[str, Any]) -> None:
+        async def on_event(event: AgentStreamEvent) -> None:
+            nonlocal tools_used_any
             if event.get("type") == "tool_call":
-                tools_used["any"] = True
-                tools_used["names"].add(str(event.get("name") or ""))
+                tools_used_any = True
+                tool_names.add(str(event.get("name") or ""))
             if scope is not None and scope.turn_trace is not None and event.get("type") == "tool_result":
                 scope.turn_trace.source_usage.append(
                     {
@@ -225,7 +235,7 @@ class WritingService:
             return fallback_result(safe_error_code(exc))
 
         agent_run = response.to_dict()
-        supply_report = dict(request.supply_report)
+        supply_report = dict(supply_report_payload)
         retrieved_types = sorted(
             {
                 {
@@ -235,13 +245,13 @@ class WritingService:
                     "read_chapter": "prose",
                     "search_prose": "prose",
                 }.get(name, "")
-                for name in tools_used["names"]
+                for name in tool_names
                 if name
             }
             - {""}
         )
         supply_report["retrieved"] = retrieved_types
-        supply_report["used"] = sorted(set(supply_report.get("used") or []) | set(retrieved_types))
+        supply_report["used"] = sorted(set(request.supply_report.used) | set(retrieved_types))
         if response.cancelled:
             await close_provisional("cancelled", response.finish_reason or "turn_cancelled")
             return {
@@ -270,11 +280,11 @@ class WritingService:
             reason = str((response.error or {}).get("code") or response.finish_reason or "agent_run_failed")
             await close_provisional("failed", reason)
             if reason in {"turn_deadline_exceeded", "timeout"}:
-                return {"success": False, "reason": reason, "agent_run": agent_run}
+                return fallback_result(reason, agent_run)
             return fallback_result(reason, agent_run)
 
         if not writing_tools.changed:
-            if not tools_used["any"]:
+            if not tools_used_any:
                 await close_provisional("fallback", "no_tool_calls")
                 return fallback_result("no_tool_calls", agent_run)
             await close_provisional("completed")
@@ -317,7 +327,7 @@ class WritingService:
             return ""
         return ""
 
-    async def _emit_agent_event(self, project_id: str, chapter: str, event: Dict[str, Any]) -> None:
+    async def _emit_agent_event(self, project_id: str, chapter: str, event: AgentStreamEvent) -> None:
         if not self.progress_callback:
             return
         event_type = event.get("type")

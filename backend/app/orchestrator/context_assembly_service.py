@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -19,11 +20,11 @@ class WriterRequest:
     max_tokens: int
     max_iterations: int
     fingerprint: str
-    supply_report: Dict[str, Any]
+    supply_report: "ContextSupplyReport"
 
 
 @dataclass(frozen=True)
-class ContextSupplyReport:
+class ContextSupplyReport(Mapping[str, object]):
     available: tuple[str, ...]
     pushed: tuple[str, ...]
     retrieved: tuple[str, ...]
@@ -31,6 +32,15 @@ class ContextSupplyReport:
     omitted: tuple[Dict[str, Any], ...]
     draft_tokens: int = 0
     draft_pushed_tokens: int = 0
+
+    def __getitem__(self, key: str) -> object:
+        return self.to_dict()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.to_dict())
+
+    def __len__(self) -> int:
+        return 7
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -176,12 +186,20 @@ class ContextAssemblyService:
             omitted=tuple(omitted),
             draft_tokens=int(draft_projection["original_tokens"]),
             draft_pushed_tokens=int(draft_projection["pushed_tokens"]),
-        ).to_dict()
+        )
         payload["supply_report"] = supply_report
+        fingerprint_payload = {**payload, "supply_report": supply_report.to_dict()}
         fingerprint = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        return WriterRequest(fingerprint=fingerprint, **payload)
+        return WriterRequest(
+            messages=messages,
+            temperature=0.7,
+            max_tokens=requested_max,
+            max_iterations=int(config.get("retrieval", {}).get("agentic_max_iterations", 4)) + 2,
+            fingerprint=fingerprint,
+            supply_report=supply_report,
+        )
 
     @staticmethod
     def _available_source_types(context_plan: Optional[Any]) -> List[str]:

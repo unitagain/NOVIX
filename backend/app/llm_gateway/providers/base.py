@@ -13,7 +13,7 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, Any, Optional, AsyncGenerator, Mapping
 
 
 def _extract_reasoning_delta(delta: Any) -> Optional[str]:
@@ -208,6 +208,15 @@ class BaseLLMProvider(ABC):
     def supports_agentic_stream(self) -> bool:
         """Whether the adapter can stream content and tool-call deltas safely."""
         return False
+
+    def declared_capabilities(self) -> Optional[Mapping[str, object]]:
+        """Optional explicit profile for injected fakes or private adapters.
+
+        Registered production adapters are classified by the central inventory.
+        Unknown adapters remain fail-closed unless they explicitly implement this seam.
+        """
+
+        return None
 
     async def stream_chat_events(
         self,

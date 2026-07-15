@@ -12,6 +12,7 @@ import { ActivityBar } from './ActivityBar';
 import { SidePanel } from './SidePanel';
 import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
+import { PanelResizeHandle } from './PanelResizeHandle';
 
 /**
  * IDELayout - 写作 IDE 主布局组件
@@ -79,9 +80,16 @@ export function IDELayout({ children, rightPanelContent, titleBarProps = {} }) {
           {/* 右侧 AI 对话卡片 - Right Panel (AI Sidebar) card */}
           {!state.zenMode && state.rightPanelVisible && (
             <div
-              className="flex-shrink-0 bg-[var(--vscode-bg)] overflow-hidden flex flex-col rounded-[8px] shadow-[0_1px_3px_rgba(2,6,23,0.07)]"
+              className="relative flex-shrink-0 bg-[var(--vscode-bg)] overflow-hidden flex flex-col rounded-[10px] border border-black/[0.035] shadow-[0_1px_3px_rgba(2,6,23,0.07)]"
               style={{ width: state.rightPanelWidth }}
             >
+              <PanelResizeHandle
+                side="right"
+                width={state.rightPanelWidth}
+                min={360}
+                max={Math.min(620, Math.max(360, window.innerWidth - 720))}
+                onResize={(width) => dispatch({ type: 'SET_PANEL_WIDTH', panel: 'right', width })}
+              />
               {rightPanelContent}
             </div>
           )}

@@ -6,7 +6,7 @@
  * License: PolyForm Noncommercial License 1.0.0
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import useSWR from 'swr';
 import { useParams } from 'react-router-dom';
 import { sessionAPI, draftsAPI, cardsAPI, projectsAPI, volumesAPI, configAPI } from '../api';
@@ -31,6 +31,7 @@ import {
   setDeepThinkingPreference,
 } from '../components/ide/TitleBar';
 import { useWritingSessionRealtime } from '../hooks/useWritingSessionRealtime';
+import { normalizeChatTurnResponse, terminalStateMessage } from '../features/agent/model/agentProtocol';
 import {
   fetchChapterContent,
   countWords,
@@ -264,8 +265,11 @@ function WritingSessionContent() {
 
   // 对话以「项目」为单位（而非章节）：整个项目一份长青对话，AI 的撰写/编辑动作仍作用于当前激活章节。
   const projectChatKey = String(projectId || '');
-  const messages = messagesByChapter[projectChatKey] || [];
-  const progressEvents = progressEventsByChapter[projectChatKey] || [];
+  const messages = useMemo(() => messagesByChapter[projectChatKey] || [], [messagesByChapter, projectChatKey]);
+  const progressEvents = useMemo(
+    () => progressEventsByChapter[projectChatKey] || [],
+    [progressEventsByChapter, projectChatKey],
+  );
   const contextDebug = contextDebugByChapter[projectChatKey] || null;
 
   // 深度思考开关：仅当「写作角色」绑定的模型支持参数级 thinking 切换时，对话栏才显示按钮（能力门控）。
@@ -292,6 +296,8 @@ function WritingSessionContent() {
   // 待执行的 plan（仿 Claude Code：生成后展示步骤 + 等用户「执行」批准；执行走串行编排器）。
   const [pendingPlan, setPendingPlan] = useState(null);
   const [planExecuting, setPlanExecuting] = useState(false);
+  const [pendingApproval, setPendingApproval] = useState(null);
+  const [agentTurnMeta, setAgentTurnMeta] = useState(null);
 
   // 本地长存 + Git-Native 持久化：开项目时优先从后端加载对话历史（扛刷新/重启/清缓存/换机），
   // 失败或空则回退 localStorage 缓存。progressEvents（过程轨迹）仍走本地缓存。
@@ -1730,8 +1736,8 @@ function WritingSessionContent() {
     setPendingPlan(null);
   };
 
-  const handleChatSubmit = async (text) => {
-    addMessage('user', text);
+  const handleChatSubmit = async (text, approval = null) => {
+    if (!approval) addMessage('user', text);
     const chapterKey = chapterInfo.chapter ? String(chapterInfo.chapter) : '';
 
     // 无章节：仅复杂规划可行（plan 不落具体章节）；写/改需章节作目标 → 友好引导。
@@ -1759,16 +1765,29 @@ function WritingSessionContent() {
         has_selection: Boolean(attachedSelection?.text?.trim() || selectionInfo?.text?.trim()),
         has_draft: Boolean(chapterKey) && !canUseWriter,
         thinking: writerSupportsThinking && deepThinking,
+        ...(approval
+          ? {
+              fallback_approval_action_id: approval.id,
+              fallback_approval_token: approval.token,
+            }
+          : {}),
       });
       const data = resp?.data || {};
+      const turnView = normalizeChatTurnResponse(data);
+      setAgentTurnMeta(turnView.contextPlan || turnView.runtime ? turnView : null);
 
-      // 能力降级：用前端成熟流程兜底（user 消息已在上方添加，子流程跳过以免重复）。
-      if (data.fallback) {
-        if (data.action === 'write' && canUseWriter) {
-          handleStart(chapterKey, 'deep', text);
-        } else {
-          handleSubmitFeedback(text, { skipUserMessage: true });
-        }
+      // fallback 的执行权属于后端。前端只展示审批，并将单次 token 原样回传。
+      if (turnView.terminalState === 'requires_approval' && turnView.pendingAction) {
+        setPendingApproval({ ...turnView.pendingAction, message: text, chapter: chapterKey });
+        setIsGenerating(false);
+        return;
+      }
+      setPendingApproval(null);
+
+      const terminalCopy = terminalStateMessage(turnView);
+      if (terminalCopy) {
+        addMessage(turnView.terminalState === 'failed' ? 'error' : 'system', terminalCopy);
+        setIsGenerating(false);
         return;
       }
 
@@ -1796,6 +1815,17 @@ function WritingSessionContent() {
       setIsGenerating(false);
       setStatus('waiting_feedback');
     }
+  };
+
+  const handleApproveFallback = () => {
+    if (!pendingApproval || isGenerating) return;
+    handleChatSubmit(pendingApproval.message, pendingApproval);
+  };
+
+  const handleDismissFallback = () => {
+    if (isGenerating) return;
+    setPendingApproval(null);
+    addMessage('system', '已取消本次授权，未执行变更。');
   };
 
   const rightPanelContent = (
@@ -1838,9 +1868,13 @@ function WritingSessionContent() {
         deepThinkingSupported: writerSupportsThinking,
         onToggleDeepThinking: toggleDeepThinking,
         pendingPlan,
+        pendingApproval,
+        agentTurnMeta,
         planExecuting,
         onExecutePlan: handleExecutePlan,
         onDismissPlan: handleDismissPlan,
+        onApproveFallback: handleApproveFallback,
+        onDismissFallback: handleDismissFallback,
       }}
     />
   );

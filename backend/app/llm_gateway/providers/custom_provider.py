@@ -46,7 +46,7 @@ class CustomProvider(BaseLLMProvider):
         params: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature or self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
             "max_tokens": max_tokens or self.max_tokens,
         }
         if tools:
@@ -96,7 +96,7 @@ class CustomProvider(BaseLLMProvider):
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=temperature or self.temperature,
+            temperature=self.temperature if temperature is None else temperature,
             max_tokens=max_tokens or self.max_tokens,
             stream=True,
         )

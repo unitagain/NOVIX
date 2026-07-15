@@ -28,6 +28,22 @@ logger = get_logger(__name__)
 class ProviderRegistry:
     """Own provider construction, caching and profile/provider resolution."""
 
+    SUPPORTED_TYPES = frozenset(
+        {
+            "openai",
+            "anthropic",
+            "deepseek",
+            "gemini",
+            "qwen",
+            "kimi",
+            "glm",
+            "grok",
+            "wenxin",
+            "aistudio",
+            "custom",
+        }
+    )
+
     def __init__(self, config_service: LLMConfigService = llm_config_service) -> None:
         self.config_service = config_service
         self.providers: Dict[str, BaseLLMProvider] = {}
@@ -82,6 +98,8 @@ class ProviderRegistry:
     @staticmethod
     def create(profile: Dict[str, Any]) -> Optional[BaseLLMProvider]:
         provider_type = str(profile.get("provider") or "").lower()
+        if provider_type not in ProviderRegistry.SUPPORTED_TYPES:
+            return None
         api_key = profile.get("api_key")
         model = str(profile.get("model") or "")
         max_tokens = int(profile.get("max_tokens") or 8000)

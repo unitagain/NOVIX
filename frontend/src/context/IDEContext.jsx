@@ -27,7 +27,7 @@ const initialState = {
   sidePanelVisible: true, // 左侧面板是否可见
   rightPanelVisible: true, // 右侧面板是否可见
   sidePanelWidth: 248, // 左侧面板宽度（像素，悬浮卡片设计下更窄更紧凑）
-  rightPanelWidth: 350, // 右侧面板宽度（像素）
+  rightPanelWidth: 460, // 右侧 Agent Dock：AI IDE 默认宽度
 
   // ========================================================================
   // 编辑器状态 / Editor State

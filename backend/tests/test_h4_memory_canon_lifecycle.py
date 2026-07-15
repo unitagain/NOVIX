@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -305,3 +307,111 @@ def test_legacy_memory_pack_without_binding_is_stale(tmp_path: Path):
     pack = asyncio.run(store.read_pack("p", "V1C001"))
     assert pack and pack["stale"] is True
     assert pack["stale_reasons"] == ["source_binding_missing"]
+
+
+def test_memory_pack_detects_added_and_deleted_files_without_path_leak(tmp_path: Path):
+    store = MemoryPackStorage(str(tmp_path))
+    source_root = store.get_project_path("p") / "cards"
+    source_root.mkdir(parents=True, exist_ok=True)
+    original = source_root / "private-character-name.yaml"
+    original.write_text("name: one\n", encoding="utf-8")
+    asyncio.run(store.write_pack("p", "V1C001", {"payload": {}}))
+
+    added = source_root / "private-added-name.yaml"
+    added.write_text("name: two\n", encoding="utf-8")
+    added_pack = asyncio.run(store.read_pack("p", "V1C001"))
+    assert added_pack and added_pack["source_verification"]["change_counts"]["added"] == 1
+    assert "private-added-name" not in str(added_pack["source_verification"])
+
+    asyncio.run(store.write_pack("p", "V1C001", {"payload": {}}))
+    original.unlink()
+    deleted_pack = asyncio.run(store.read_pack("p", "V1C001"))
+    assert deleted_pack and deleted_pack["source_verification"]["change_counts"]["missing"] == 1
+    assert "private-character-name" not in str(deleted_pack["source_verification"])
+
+
+def test_memory_pack_scan_is_offloaded_from_event_loop(monkeypatch, tmp_path: Path):
+    store = MemoryPackStorage(str(tmp_path))
+    source = store.get_project_path("p") / "cards" / "hero.yaml"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("name: Hero\n", encoding="utf-8")
+    original = store._capture_source_revisions
+    events = []
+
+    def slow_capture(project_id, chapter):
+        time.sleep(0.05)
+        result = original(project_id, chapter)
+        events.append("scan")
+        return result
+
+    monkeypatch.setattr(store, "_capture_source_revisions", slow_capture)
+
+    async def scenario():
+        scan = asyncio.create_task(store.profile_source_scan("p"))
+        await asyncio.sleep(0.01)
+        events.append("tick")
+        diagnostics = await scan
+        return diagnostics
+
+    diagnostics = asyncio.run(scenario())
+    assert events == ["tick", "scan"]
+    assert diagnostics["files_scanned"] == 1
+    assert diagnostics["bytes_hashed"] > 0
+
+
+def test_memory_pack_hybrid_index_hashes_only_changed_files(tmp_path: Path):
+    store = MemoryPackStorage(str(tmp_path))
+    root = store.get_project_path("p") / "drafts"
+    root.mkdir(parents=True, exist_ok=True)
+    first = root / "first.md"
+    second = root / "second.md"
+    first.write_text("first", encoding="utf-8")
+    second.write_text("second", encoding="utf-8")
+
+    cold = asyncio.run(store.profile_source_scan("p"))
+    warm = asyncio.run(store.profile_source_scan("p"))
+    first.write_text("first changed", encoding="utf-8")
+    changed = asyncio.run(store.profile_source_scan("p"))
+
+    assert cold["fallback_reason"] == "index_missing"
+    assert cold["bytes_hashed"] == len("first") + len("second")
+    assert warm["fallback_reason"] == ""
+    assert warm["bytes_hashed"] == 0
+    assert changed["bytes_hashed"] == len("first changed")
+
+
+def test_memory_pack_touch_without_content_change_does_not_mark_pack_stale(tmp_path: Path):
+    store = MemoryPackStorage(str(tmp_path))
+    source = store.get_project_path("p") / "cards" / "hero.yaml"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("name: Hero\n", encoding="utf-8")
+    asyncio.run(store.write_pack("p", "V1C001", {"payload": {}}))
+
+    stat = source.stat()
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
+    pack = asyncio.run(store.read_pack("p", "V1C001"))
+
+    assert pack and pack["stale"] is False
+    assert pack["source_verification"]["scan_diagnostics"]["bytes_hashed"] == source.stat().st_size
+
+
+@pytest.mark.parametrize(
+    ("index_payload", "expected_reason"),
+    [
+        ("not-json", "index_unreadable"),
+        ('{"schema_version":999,"files":{}}', "index_schema_mismatch"),
+        ('{"schema_version":1,"files":[]}', "index_invalid"),
+    ],
+)
+def test_memory_pack_invalid_index_falls_back_to_full_hash(index_payload, expected_reason, tmp_path: Path):
+    store = MemoryPackStorage(str(tmp_path))
+    source = store.get_project_path("p") / "cards" / "hero.yaml"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("name: Hero\n", encoding="utf-8")
+    asyncio.run(store.profile_source_scan("p"))
+    index = store.get_project_path("p") / "memory_packs" / "source_revision_index.json"
+    index.write_text(index_payload, encoding="utf-8")
+
+    recovered = asyncio.run(store.profile_source_scan("p"))
+    assert recovered["fallback_reason"] == expected_reason
+    assert recovered["bytes_hashed"] == source.stat().st_size

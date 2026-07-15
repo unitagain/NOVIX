@@ -43,7 +43,7 @@ class OpenAIProvider(BaseLLMProvider):
         }
         # 推理模型（reasoning_effort）不接受 temperature：开启 thinking 时不传。
         if not isinstance(thinking, dict):
-            params["temperature"] = temperature or self.temperature
+            params["temperature"] = self.temperature if temperature is None else temperature
         if tools:
             params["tools"] = tools
             if tool_choice is not None:

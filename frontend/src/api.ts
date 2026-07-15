@@ -11,6 +11,7 @@
  */
 
 import axios, { AxiosResponse } from 'axios';
+import type { ChatTurnRequest, ChatTurnResponse } from './features/agent/model/agentProtocol';
 import logger from './utils/logger';
 import type {
   Project,
@@ -125,7 +126,7 @@ export const sessionAPI = {
   classifyIntent: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     api.post(`${API_BASE}/projects/${projectId}/session/classify-intent`, data),
   // Phase 12（单 Writer 主循环）：统一对话入口——一句话 → 后端自判 write/edit/continue/plan 并执行。
-  chat: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
+  chat: (projectId: string, data: ChatTurnRequest): Promise<AxiosResponse<ChatTurnResponse>> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/chat`, data, { timeout: LLM_SYNC_TIMEOUT }),
   // Phase 11（Plan 编排）：把复杂指令拆成串行 todo。
   plan: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>

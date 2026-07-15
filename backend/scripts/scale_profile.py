@@ -18,6 +18,7 @@ from app.eval.campaign_store import CampaignStore
 from app.jobs.durable_queue import DurableTaskQueue
 from app.ops.project_maintenance import ProjectMaintenanceService
 from app.schemas.canon import Fact
+from app.storage.memory_pack import MemoryPackStorage
 
 
 def _latency_ms(operation: Callable[[], Any], repeats: int = 7) -> dict[str, float]:
@@ -144,6 +145,23 @@ def _profile_campaign(root: Path, sizes: list[int]) -> list[dict[str, Any]]:
     return rows
 
 
+def _profile_memory_pack(root: Path, sizes: list[int], bytes_per_file: int) -> list[dict[str, Any]]:
+    rows = []
+    data_root = root / "memory-pack-data"
+    store = MemoryPackStorage(data_root)
+    payload = b"M" * max(1, int(bytes_per_file))
+    for size in sizes:
+        project_id = f"profile-{size}"
+        source_root = data_root / project_id / "drafts"
+        source_root.mkdir(parents=True)
+        for index in range(size):
+            (source_root / f"source-{index:06d}.md").write_bytes(payload)
+        cold = asyncio.run(store.profile_source_scan(project_id))
+        warm = asyncio.run(store.profile_source_scan(project_id))
+        rows.append({"files": size, "bytes_per_file": len(payload), "cold": cold, "warm": warm})
+    return rows
+
+
 def _parse_sizes(value: str) -> list[int]:
     sizes = sorted({int(item) for item in value.split(",") if int(item) > 0})
     if not sizes:
@@ -157,6 +175,8 @@ def main() -> int:
     parser.add_argument("--queue-sizes", type=_parse_sizes, default=_parse_sizes("100,1000"))
     parser.add_argument("--backup-sizes", type=_parse_sizes, default=_parse_sizes("10,100,500"))
     parser.add_argument("--campaign-sizes", type=_parse_sizes, default=_parse_sizes("100,1000"))
+    parser.add_argument("--memory-pack-sizes", type=_parse_sizes, default=_parse_sizes("1000,10000"))
+    parser.add_argument("--memory-pack-bytes-per-file", type=int, default=1024)
     parser.add_argument("--backup-bytes-per-file", type=int, default=2048)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -171,6 +191,11 @@ def main() -> int:
             "queue": _profile_queue(root, args.queue_sizes),
             "backup": _profile_backup(root, args.backup_sizes, max(1, args.backup_bytes_per_file)),
             "campaign": _profile_campaign(root, args.campaign_sizes),
+            "memory_pack": _profile_memory_pack(
+                root,
+                args.memory_pack_sizes,
+                max(1, args.memory_pack_bytes_per_file),
+            ),
             "elapsed_seconds": round(time.time() - started, 3),
         }
     payload = json.dumps(profile, ensure_ascii=False, indent=2)

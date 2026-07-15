@@ -51,6 +51,15 @@ class _FakeProvider(BaseLLMProvider):
     def get_provider_name(self):
         return "fake"
 
+    def declared_capabilities(self):
+        return {
+            "tools": True,
+            "json_mode": True,
+            "thinking": True,
+            "agentic_stream": False,
+            "stream_mode": "non_stream_fallback",
+        }
+
 
 def _make_gateway() -> LLMGateway:
     # 跳过 __init__ 的 profile 加载，直接注入 FakeProvider

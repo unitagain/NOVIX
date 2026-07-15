@@ -4,7 +4,7 @@ Compatible with OpenAI API / 兼容 OpenAI API
 """
 
 from typing import List, Dict, Any, Optional
-from app.llm_gateway.providers.base import BaseLLMProvider, normalize_tool_calls
+from app.llm_gateway.providers.base import BaseLLMProvider, normalize_openai_usage, normalize_tool_calls
 from app.utils.openai_client import create_async_openai_client
 
 
@@ -37,7 +37,7 @@ class GeminiProvider(BaseLLMProvider):
         params: Dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature or self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
             "max_tokens": max_tokens or self.max_tokens,
         }
         if tools:
@@ -61,15 +61,10 @@ class GeminiProvider(BaseLLMProvider):
             )
 
         message = response.choices[0].message
-        usage = response.usage
         return {
             "content": message.content,
             "tool_calls": normalize_tool_calls(message),
-            "usage": {
-                "prompt_tokens": usage.prompt_tokens if usage else 0,
-                "completion_tokens": usage.completion_tokens if usage else 0,
-                "total_tokens": usage.total_tokens if usage else 0,
-            } if usage else None,
+            "usage": normalize_openai_usage(response.usage),
             "model": response.model,
             "finish_reason": response.choices[0].finish_reason,
         }

@@ -13,6 +13,7 @@ import CardsPanel from './panels/CardsPanel';
 import AgentsPanel from './panels/AgentsPanel';
 import FanfictionPanel from './panels/FanfictionPanel';
 import FactsEncyclopedia from './FactsEncyclopedia';
+import { PanelResizeHandle } from './PanelResizeHandle';
 
 /**
  * SidePanel - 左侧侧栏容器
@@ -68,28 +69,12 @@ export const SidePanel = () => {
       {/* ========================================================================
           宽度调整拖拽条 / Width Resize Handle
           ======================================================================== */}
-      <div
-        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/30 transition-colors z-50"
-        onMouseDown={(e) => {
-          e.preventDefault();
-          const startX = e.pageX;
-          const startWidth = sidePanelWidth;
-
-          // 鼠标移动时调整宽度 / Handle mouse move to resize
-          const handleMouseMove = (moveEvent) => {
-            const newWidth = Math.max(160, Math.min(600, startWidth + (moveEvent.pageX - startX)));
-            dispatch({ type: 'SET_PANEL_WIDTH', payload: newWidth });
-          };
-
-          // 鼠标抬起时停止调整 / Handle mouse up to stop resizing
-          const handleMouseUp = () => {
-            document.removeEventListener('mousemove', handleMouseMove);
-            document.removeEventListener('mouseup', handleMouseUp);
-          };
-
-          document.addEventListener('mousemove', handleMouseMove);
-          document.addEventListener('mouseup', handleMouseUp);
-        }}
+      <PanelResizeHandle
+        side="left"
+        width={sidePanelWidth}
+        min={180}
+        max={420}
+        onResize={(width) => dispatch({ type: 'SET_PANEL_WIDTH', panel: 'left', width })}
       />
     </div>
   );

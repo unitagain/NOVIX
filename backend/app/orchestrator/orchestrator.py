@@ -53,6 +53,7 @@ from app.orchestrator.context_planning_service import ContextPlanningService
 from app.orchestrator.context_assembly_service import ContextAssemblyService
 from app.orchestrator.writing_service import WritingService
 from app.orchestrator.commit_coordinator import CommitCoordinator
+from app.orchestrator.fallback_execution_service import FallbackExecutionService
 from app.orchestrator.turn_runtime import TurnState
 from app.orchestrator.chat_turn_service import ChatTurnService
 from app.orchestrator.post_turn_service import PostTurnService
@@ -75,6 +76,7 @@ from app.orchestrator.application_ports import (
     StreamTaskRegistry,
     VolumeSummaryService,
 )
+from app.storage.pending_actions import PendingActionStorage
 
 logger = get_logger(__name__)
 
@@ -129,6 +131,7 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         self.creative_memory_storage = CreativeMemoryStorage(data_dir)
         self.plan_store = PlanStore(data_dir)
         self.session_history = SessionHistoryStorage(data_dir)
+        self.pending_action_storage = PendingActionStorage(data_dir)
 
         self.gateway = get_gateway()
 
@@ -215,6 +218,10 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             progress_callback=self.progress_callback,
             detect_proposals=self._detect_proposals,
             is_cancelled=lambda: self._cancelled,
+        )
+        self.fallback_execution_service = FallbackExecutionService(
+            owner=self,
+            pending_actions=self.pending_action_storage,
         )
         self.chat_turn_service = ChatTurnService(self)
         self.post_turn_service = PostTurnService(
@@ -1527,6 +1534,8 @@ class Orchestrator(ContextMixin, AnalysisMixin):
         target_word_count: int = 3000,
         auto_execute_plan: bool = False,
         thinking: bool = False,
+        fallback_approval_action_id: str = "",
+        fallback_approval_token: str = "",
     ) -> Dict[str, Any]:
         """Delegate the main route to ChatTurnService."""
 
@@ -1539,6 +1548,8 @@ class Orchestrator(ContextMixin, AnalysisMixin):
             target_word_count=target_word_count,
             auto_execute_plan=auto_execute_plan,
             thinking=thinking,
+            fallback_approval_action_id=fallback_approval_action_id,
+            fallback_approval_token=fallback_approval_token,
         )
 
     def _cancel_active_turns(self) -> int:
