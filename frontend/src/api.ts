@@ -22,9 +22,9 @@ import type {
   ChapterSummary,
   Volume,
   Fact,
-  SessionStatus,
-  EditSuggestResult,
   LLMProfile,
+  TavernImportResponse,
+  RelationsDocument,
 } from './types';
 
 // ============================================================================
@@ -108,26 +108,52 @@ export const cardsAPI = {
     data: { content: string; language?: string },
   ): Promise<AxiosResponse<{ style: string }>> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/cards/style/extract`, data),
+
+  // SillyTavern 卡片互操作 / Tavern card interop
+  // 两步式导入：commit=false 返回预案（含丢弃字段清单），确认后 commit=true 落盘。
+  importTavern: (
+    projectId: string,
+    file: File,
+    options?: { commit?: boolean; overwrite?: boolean },
+  ): Promise<AxiosResponse<TavernImportResponse>> => {
+    const form = new FormData();
+    form.append('file', file);
+    return api.post(`${API_BASE}/projects/${projectId}/cards/import/tavern`, form, {
+      params: { commit: options?.commit ?? false, overwrite: options?.overwrite ?? false },
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
+  exportTavernCharacter: (
+    projectId: string,
+    name: string,
+    includeWorld = false,
+  ): Promise<AxiosResponse<Record<string, unknown>>> =>
+    api.get(`${API_BASE}/projects/${projectId}/cards/export/tavern/characters/${encodeURIComponent(name)}`, {
+      params: { include_world: includeWorld },
+    }),
+  exportTavernLorebook: (projectId: string): Promise<AxiosResponse<Record<string, unknown>>> =>
+    api.get(`${API_BASE}/projects/${projectId}/cards/export/tavern/lorebook`),
+
+  // 角色关系图谱（作者设定层）/ Character relation graph（authored settings layer）
+  // 整文档读写：画布天然持有全图状态，服务端整体校验、整体拒绝。
+  getRelations: (projectId: string): Promise<AxiosResponse<RelationsDocument>> =>
+    api.get(`${API_BASE}/projects/${projectId}/cards/relations`),
+  saveRelations: (projectId: string, document: RelationsDocument): Promise<AxiosResponse<RelationsDocument>> =>
+    api.put(`${API_BASE}/projects/${projectId}/cards/relations`, document),
 };
 
 // ============================================================================
 // 会话 API / Session API（LLM 操作使用扩展超时）
 // ============================================================================
 export const sessionAPI = {
-  start: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
-    llmApi.post(`${API_BASE}/projects/${projectId}/session/start`, data, { timeout: LLM_SYNC_TIMEOUT }),
-  getStatus: (projectId: string): Promise<AxiosResponse<SessionStatus>> =>
-    api.get(`${API_BASE}/projects/${projectId}/session/status`),
-  submitFeedback: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
-    llmApi.post(`${API_BASE}/projects/${projectId}/session/feedback`, data),
-  suggestEdit: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse<EditSuggestResult>> =>
-    llmApi.post(`${API_BASE}/projects/${projectId}/session/edit-suggest`, data),
-  // Phase 5（vibe writing）：让后端自判本轮意图（write/edit），前端据此单输入框路由。
-  classifyIntent: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
-    api.post(`${API_BASE}/projects/${projectId}/session/classify-intent`, data),
-  // Phase 12（单 Writer 主循环）：统一对话入口——一句话 → 后端自判 write/edit/continue/plan 并执行。
+  // 单 Writer 主循环：一句话 → 后端自判 write/edit/continue/plan 并执行。
   chat: (projectId: string, data: ChatTurnRequest): Promise<AxiosResponse<ChatTurnResponse>> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/chat`, data, { timeout: LLM_SYNC_TIMEOUT }),
+  // Writer 反问工具策略：always=主动检查 | auto=模型自行判断 | off=不主动触发（项目级覆盖）。
+  getClarifySettings: (projectId: string): Promise<AxiosResponse> =>
+    api.get(`${API_BASE}/projects/${projectId}/session/clarify-settings`),
+  updateClarifySettings: (projectId: string, data: { auto_trigger: string }): Promise<AxiosResponse> =>
+    api.put(`${API_BASE}/projects/${projectId}/session/clarify-settings`, data),
   // Phase 11（Plan 编排）：把复杂指令拆成串行 todo。
   plan: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/plan`, data, { timeout: LLM_SYNC_TIMEOUT }),
@@ -137,14 +163,24 @@ export const sessionAPI = {
   review: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/review`, data),
   // 对话记忆层（Git-Native 持久化 + compact）：开项目加载历史、每条消息追加、长对话压缩。
-  getHistory: (projectId: string, limit = 0): Promise<AxiosResponse> =>
-    api.get(`${API_BASE}/projects/${projectId}/session/history`, { params: { limit } }),
+  getHistory: (projectId: string, limit = 0, conversationId = ''): Promise<AxiosResponse> =>
+    api.get(`${API_BASE}/projects/${projectId}/session/history`, {
+      params: { limit, conversation_id: conversationId || undefined },
+    }),
   appendHistory: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     api.post(`${API_BASE}/projects/${projectId}/session/history`, data),
   compactHistory: (projectId: string): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/history/compact`, {}, { timeout: LLM_SYNC_TIMEOUT }),
-  answerQuestions: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
-    llmApi.post(`${API_BASE}/projects/${projectId}/session/answer-questions`, data, { timeout: LLM_SYNC_TIMEOUT }),
+  listConversations: (projectId: string): Promise<AxiosResponse> =>
+    api.get(`${API_BASE}/projects/${projectId}/session/conversations`),
+  createConversation: (projectId: string, title = '新对话'): Promise<AxiosResponse> =>
+    api.post(`${API_BASE}/projects/${projectId}/session/conversations`, { title }),
+  activateConversation: (projectId: string, conversationId: string): Promise<AxiosResponse> =>
+    api.post(`${API_BASE}/projects/${projectId}/session/conversations/${conversationId}/activate`),
+  deleteConversation: (projectId: string, conversationId: string): Promise<AxiosResponse> =>
+    api.delete(`${API_BASE}/projects/${projectId}/session/conversations/${conversationId}`),
+  rollbackConversation: (projectId: string, conversationId: string): Promise<AxiosResponse> =>
+    api.post(`${API_BASE}/projects/${projectId}/session/conversations/${conversationId}/rollback`),
   cancel: (projectId: string): Promise<AxiosResponse> => api.post(`${API_BASE}/projects/${projectId}/session/cancel`),
   analyze: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/analyze`, data),
@@ -152,6 +188,10 @@ export const sessionAPI = {
     llmApi.post(`${API_BASE}/projects/${projectId}/session/save-analysis`, data),
   analyzeSync: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/analyze-sync`, data, { timeout: LLM_SYNC_TIMEOUT }),
+  applyTurnEffect: (
+    projectId: string,
+    data: { chapter: string; turn_effect: Record<string, unknown>; language?: string },
+  ): Promise<AxiosResponse> => llmApi.post(`${API_BASE}/projects/${projectId}/session/apply-turn-effect`, data),
   analyzeBatch: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/session/analyze-batch`, data, { timeout: LLM_SYNC_TIMEOUT }),
   saveAnalysisBatch: (projectId: string, data: Record<string, unknown>): Promise<AxiosResponse> =>
@@ -190,9 +230,9 @@ export const draftsAPI = {
     api.delete(`${API_BASE}/projects/${projectId}/drafts/${chapter}`),
   reorderChapters: (projectId: string, data: { chapters: string[] }): Promise<AxiosResponse> =>
     api.post(`${API_BASE}/projects/${projectId}/drafts/reorder`, data),
-  updateContent: (projectId: string, chapter: string, data: { content: string }): Promise<AxiosResponse> =>
+  updateContent: (projectId: string, chapter: string, data: { content: string; title?: string | null }): Promise<AxiosResponse> =>
     api.put(`${API_BASE}/projects/${projectId}/drafts/${chapter}/content`, data),
-  autosaveContent: (projectId: string, chapter: string, data: { content: string }): Promise<AxiosResponse> =>
+  autosaveContent: (projectId: string, chapter: string, data: { content: string; title?: string | null }): Promise<AxiosResponse> =>
     api.put(`${API_BASE}/projects/${projectId}/drafts/${chapter}/autosave`, data),
 };
 
@@ -213,6 +253,21 @@ export const volumesAPI = {
     api.put(`${API_BASE}/projects/${projectId}/volumes/${volumeId}/summary`, data),
   refreshSummaries: (projectId: string, volumeIds: string[]): Promise<AxiosResponse> =>
     llmApi.post(`${API_BASE}/projects/${projectId}/volumes/refresh-summaries`, { volume_ids: volumeIds }),
+};
+
+// ============================================================================
+// 大纲 / Outline API（全文规划资产，非章节；内容不参与事实提取）
+// ============================================================================
+export const outlineAPI = {
+  get: (projectId: string): Promise<AxiosResponse> => api.get(`${API_BASE}/projects/${projectId}/outline`),
+  save: (
+    projectId: string,
+    data: { content: string; expected_revision?: number | null },
+  ): Promise<AxiosResponse> => api.put(`${API_BASE}/projects/${projectId}/outline`, data),
+  updateSettings: (
+    projectId: string,
+    data: { enabled?: boolean; require_consult?: boolean },
+  ): Promise<AxiosResponse> => api.put(`${API_BASE}/projects/${projectId}/outline/settings`, data),
 };
 
 // ============================================================================

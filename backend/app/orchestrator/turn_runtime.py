@@ -17,9 +17,7 @@ class TurnState(str, Enum):
     CONTEXT_PLANNING = "context_planning"
     WRITER_RUNNING = "writer_running"
     PLAN_RUNNING = "plan_running"
-    FALLBACK_RUNNING = "fallback_running"
     WORKER_RUNNING = "worker_running"
-    COMMITTING = "committing"
     COMPLETED = "completed"
     INCOMPLETE = "incomplete"
     FAILED = "failed"
@@ -29,18 +27,15 @@ class TurnState(str, Enum):
 _TERMINAL = {TurnState.COMPLETED, TurnState.INCOMPLETE, TurnState.FAILED, TurnState.CANCELLED}
 _ALLOWED: Dict[TurnState, Set[TurnState]] = {
     TurnState.CREATED: {TurnState.ROUTING, TurnState.CANCELLED, TurnState.FAILED},
-    TurnState.ROUTING: {TurnState.CONTEXT_PLANNING, TurnState.FALLBACK_RUNNING, TurnState.CANCELLED, TurnState.FAILED},
+    TurnState.ROUTING: {TurnState.CONTEXT_PLANNING, TurnState.CANCELLED, TurnState.FAILED},
     TurnState.CONTEXT_PLANNING: {
         TurnState.WRITER_RUNNING,
         TurnState.PLAN_RUNNING,
-        TurnState.FALLBACK_RUNNING,
         TurnState.WORKER_RUNNING,
         TurnState.CANCELLED,
         TurnState.FAILED,
     },
     TurnState.WRITER_RUNNING: {
-        TurnState.COMMITTING,
-        TurnState.FALLBACK_RUNNING,
         TurnState.COMPLETED,
         TurnState.INCOMPLETE,
         TurnState.CANCELLED,
@@ -48,28 +43,17 @@ _ALLOWED: Dict[TurnState, Set[TurnState]] = {
     },
     TurnState.PLAN_RUNNING: {
         TurnState.CONTEXT_PLANNING,
-        TurnState.COMMITTING,
-        TurnState.FALLBACK_RUNNING,
-        TurnState.COMPLETED,
-        TurnState.INCOMPLETE,
-        TurnState.CANCELLED,
-        TurnState.FAILED,
-    },
-    TurnState.FALLBACK_RUNNING: {
-        TurnState.COMMITTING,
         TurnState.COMPLETED,
         TurnState.INCOMPLETE,
         TurnState.CANCELLED,
         TurnState.FAILED,
     },
     TurnState.WORKER_RUNNING: {
-        TurnState.COMMITTING,
         TurnState.COMPLETED,
         TurnState.INCOMPLETE,
         TurnState.CANCELLED,
         TurnState.FAILED,
     },
-    TurnState.COMMITTING: {TurnState.COMPLETED, TurnState.INCOMPLETE, TurnState.CANCELLED, TurnState.FAILED},
     TurnState.COMPLETED: set(),
     TurnState.INCOMPLETE: set(),
     TurnState.FAILED: set(),
@@ -97,7 +81,7 @@ class TurnTransition:
 
 @dataclass
 class TurnRuntime:
-    """Deterministic lifecycle with explicit retry, fallback, and terminal states."""
+    """Deterministic lifecycle with explicit running and terminal states."""
 
     turn_id: str
     state: TurnState = TurnState.CREATED

@@ -1,5 +1,6 @@
 import AgentsPanel from '../ide/panels/AgentsPanel';
 import AgentStatusPanel from '../ide/AgentStatusPanel';
+import { AgentPanelErrorBoundary } from '../../features/agent/components/AgentPanelErrorBoundary';
 
 export default function WritingSessionAgentPanel({ vm }) {
   const {
@@ -7,8 +8,6 @@ export default function WritingSessionAgentPanel({ vm }) {
     agentTraces,
     agentMode,
     agentBusy,
-    aiLockedChapter,
-    activeChapterKey,
     t,
     isCancelling,
     handleCancel,
@@ -17,11 +16,14 @@ export default function WritingSessionAgentPanel({ vm }) {
     setAttachedSelection,
     setEditScope,
     editScope,
-    contextDebug,
+    memoryPackStatus,
+    memoryPackLoading,
+    memoryPackChapter,
+    showWritingMemory,
+    canonTurnState,
     progressEvents,
     messages,
     diffReview,
-    agentChapterKey,
     diffDecisions,
     handleAcceptAllDiff,
     handleRejectAllDiff,
@@ -30,34 +32,41 @@ export default function WritingSessionAgentPanel({ vm }) {
     countWords,
     writingLanguage,
     dialogMaxChars,
-    deepThinkingEnabled,
-    deepThinkingSupported,
-    onToggleDeepThinking,
+    reasoningLevel,
+    reasoningLevels,
+    reasoningSupported,
+    onReasoningLevelChange,
+    agentMention,
     pendingPlan,
-    pendingApproval,
-    agentTurnMeta,
     planExecuting,
+    planActiveStepId,
     onExecutePlan,
     onDismissPlan,
-    onApproveFallback,
-    onDismissFallback,
+    clarification,
+    onClarificationConfirm,
+    onClarificationSkip,
+    conversations,
+    activeConversationId,
+    onNewConversation,
+    onSelectConversation,
+    onRollbackConversation,
   } = vm;
 
-  // 输入禁用仅限「AI 正忙于其它章节」。无激活章节不再禁用——复杂规划 / 问答可直接对话，
-  // 撰写 / 编辑由 handleChatSubmit 在无章节时友好引导（vibe writing 灵活性）。
-  const aiBusyElsewhere = agentBusy && String(aiLockedChapter || '') !== activeChapterKey;
-  const inputDisabled = aiBusyElsewhere;
-  const inputDisabledReason = aiBusyElsewhere
-    ? t('writingSession.aiLockedHint').replace('{n}', String(aiLockedChapter))
-    : '';
-
   return (
-    <AgentsPanel traceEvents={traceEvents} agentTraces={agentTraces}>
+    <AgentsPanel
+      traceEvents={traceEvents}
+      agentTraces={agentTraces}
+      conversations={conversations}
+      activeConversationId={activeConversationId}
+      onNewConversation={onNewConversation}
+      onSelectConversation={onSelectConversation}
+    >
+      <AgentPanelErrorBoundary>
       <AgentStatusPanel
         mode={agentMode}
-        inputDisabled={inputDisabled}
-        inputDisabledReason={inputDisabledReason}
-        isGenerating={agentBusy && String(aiLockedChapter || '') === activeChapterKey}
+        inputDisabled={false}
+        inputDisabledReason=""
+        isGenerating={agentBusy}
         isCancelling={isCancelling}
         onCancel={handleCancel}
         selectionCandidateSummary={
@@ -92,28 +101,36 @@ export default function WritingSessionAgentPanel({ vm }) {
         }}
         editScope={editScope}
         onEditScopeChange={setEditScope}
-        contextDebug={contextDebug}
+        memoryPackStatus={memoryPackStatus}
+        memoryPackLoading={memoryPackLoading}
+        activeChapter={memoryPackChapter}
+        showWritingMemory={showWritingMemory}
+        canonTurnState={canonTurnState}
         progressEvents={progressEvents}
         messages={messages}
-        diffReview={diffReview && String(diffReview?.chapterKey || '') === agentChapterKey ? diffReview : null}
+        diffReview={diffReview}
         diffDecisions={diffDecisions}
         onAcceptAllDiff={handleAcceptAllDiff}
         onRejectAllDiff={handleRejectAllDiff}
         onApplySelectedDiff={handleApplySelectedDiff}
         onSubmit={(text) => handleChatSubmit(text)}
         inputMaxLength={dialogMaxChars}
-        deepThinkingEnabled={deepThinkingEnabled}
-        deepThinkingSupported={deepThinkingSupported}
-        onToggleDeepThinking={onToggleDeepThinking}
+        reasoningLevel={reasoningLevel}
+        reasoningLevels={reasoningLevels}
+        reasoningSupported={reasoningSupported}
+        onReasoningLevelChange={onReasoningLevelChange}
+        agentMention={agentMention}
         pendingPlan={pendingPlan}
-        pendingApproval={pendingApproval}
-        agentTurnMeta={agentTurnMeta}
         planExecuting={planExecuting}
+        planActiveStepId={planActiveStepId}
         onExecutePlan={onExecutePlan}
         onDismissPlan={onDismissPlan}
-        onApproveFallback={onApproveFallback}
-        onDismissFallback={onDismissFallback}
+        clarification={clarification}
+        onClarificationConfirm={onClarificationConfirm}
+        onClarificationSkip={onClarificationSkip}
+        onRollbackConversation={onRollbackConversation}
       />
+      </AgentPanelErrorBoundary>
     </AgentsPanel>
   );
 }

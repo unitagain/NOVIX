@@ -6,7 +6,7 @@
  * License: PolyForm Noncommercial License 1.0.0
  */
 
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useIDE } from '../../context/IDEContext';
 import { ActivityBar } from './ActivityBar';
 import { SidePanel } from './SidePanel';
@@ -32,6 +32,32 @@ import { PanelResizeHandle } from './PanelResizeHandle';
  */
 export function IDELayout({ children, rightPanelContent, titleBarProps = {} }) {
   const { state, dispatch } = useIDE();
+  const [viewportWidth, setViewportWidth] = useState(() => (typeof window === 'undefined' ? 1440 : window.innerWidth));
+  const layoutRef = useRef(null);
+
+  useEffect(() => {
+    const updateWidth = () => setViewportWidth(window.innerWidth);
+    updateWidth();
+    window.addEventListener('resize', updateWidth);
+    if (typeof ResizeObserver === 'undefined' || !layoutRef.current) {
+      return () => window.removeEventListener('resize', updateWidth);
+    }
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect?.width;
+      if (width) setViewportWidth(width);
+    });
+    observer.observe(layoutRef.current);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateWidth);
+    };
+  }, []);
+
+  const rightPanelMax = Math.min(
+    620,
+    Math.max(280, viewportWidth - 44 - (state.sidePanelVisible ? state.sidePanelWidth : 0) - 360 - 16),
+  );
+  const rightPanelWidth = Math.min(state.rightPanelWidth, rightPanelMax);
 
   // ========================================================================
   // 键盘快捷键处理 / Keyboard Shortcuts
@@ -63,7 +89,7 @@ export function IDELayout({ children, rightPanelContent, titleBarProps = {} }) {
       {/* ========================================================================
                 主体编辑区 / Main Editor Area
                 ======================================================================== */}
-      <div className="flex-1 flex overflow-hidden min-h-0">
+      <div ref={layoutRef} className="flex-1 flex overflow-hidden min-h-0">
         {/* 活动栏（固定左侧，属于底层边框、不做卡片） - Activity Bar (frame, flush) */}
         {!state.zenMode && <ActivityBar />}
 
@@ -81,13 +107,13 @@ export function IDELayout({ children, rightPanelContent, titleBarProps = {} }) {
           {!state.zenMode && state.rightPanelVisible && (
             <div
               className="relative flex-shrink-0 bg-[var(--vscode-bg)] overflow-hidden flex flex-col rounded-[10px] border border-black/[0.035] shadow-[0_1px_3px_rgba(2,6,23,0.07)]"
-              style={{ width: state.rightPanelWidth }}
+              style={{ width: rightPanelWidth }}
             >
               <PanelResizeHandle
                 side="right"
-                width={state.rightPanelWidth}
-                min={360}
-                max={Math.min(620, Math.max(360, window.innerWidth - 720))}
+                width={rightPanelWidth}
+                min={280}
+                max={rightPanelMax}
                 onResize={(width) => dispatch({ type: 'SET_PANEL_WIDTH', panel: 'right', width })}
               />
               {rightPanelContent}

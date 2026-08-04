@@ -74,7 +74,7 @@ class AnthropicProvider(BaseLLMProvider):
     """
 
     def __init__(
-        self, api_key: str, model: str = "claude-3-5-sonnet-20241022", max_tokens: int = 8000, temperature: float = 0.7
+        self, api_key: str, model: str = "claude-sonnet-5", max_tokens: int = 8000, temperature: float = 0.7
     ):
         """
         初始化 Anthropic提供商 / Initialize Anthropic provider
@@ -126,8 +126,11 @@ class AnthropicProvider(BaseLLMProvider):
             if normalized_choice is not None:
                 kwargs["tool_choice"] = normalized_choice
         if isinstance(thinking, dict):
-            kwargs["thinking"] = thinking
-            budget = int(thinking.get("budget_tokens") or 0)
+            thinking_config = thinking.get("thinking") if isinstance(thinking.get("thinking"), dict) else thinking
+            kwargs["thinking"] = thinking_config
+            if isinstance(thinking.get("output_config"), dict):
+                kwargs["output_config"] = dict(thinking["output_config"])
+            budget = int(thinking_config.get("budget_tokens") or 0)
             if budget and resolved_max_tokens <= budget:
                 kwargs["max_tokens"] = budget + 1024
         if extra_body:

@@ -107,21 +107,21 @@ class ProviderRegistry:
         common = {"api_key": api_key, "max_tokens": max_tokens, "temperature": temperature}
 
         if provider_type == "openai":
-            return OpenAIProvider(model=model or "gpt-5.4-mini", **common)
+            return OpenAIProvider(model=model or "gpt-5.6-terra", **common)
         if provider_type == "anthropic":
-            return AnthropicProvider(model=model or "claude-sonnet-4-6", **common)
+            return AnthropicProvider(model=model or "claude-sonnet-5", **common)
         if provider_type == "deepseek":
-            return DeepSeekProvider(model=model or "deepseek-chat", **common)
+            return DeepSeekProvider(model=model or "deepseek-v4-flash", **common)
         if provider_type == "gemini":
-            return GeminiProvider(model=model or "gemini-3.1-pro-preview", **common)
+            return GeminiProvider(model=model or "gemini-3.5-flash", **common)
 
         compatible = {
-            "qwen": (QwenProvider, "qwen3.5-plus"),
-            "kimi": (KimiProvider, "kimi-k2.5"),
-            "glm": (GLMProvider, "glm-5"),
-            "grok": (GrokProvider, "grok-4"),
-            "wenxin": (WenxinProvider, "ernie-4.5-turbo-32k"),
-            "aistudio": (AIStudioProvider, "ernie-5.0-thinking-preview"),
+            "qwen": (QwenProvider, "qwen3.7-plus"),
+            "kimi": (KimiProvider, "kimi-k2.6"),
+            "glm": (GLMProvider, "glm-5.2"),
+            "grok": (GrokProvider, "grok-4.5"),
+            "wenxin": (WenxinProvider, "ernie-5.0"),
+            "aistudio": (AIStudioProvider, "ernie-5.0"),
             "custom": (CustomProvider, "custom-model"),
         }
         entry = compatible.get(provider_type)

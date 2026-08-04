@@ -27,7 +27,7 @@ def test_runtime_main_path_names_control_owners():
     assert by_stage[RuntimeStage.COMPRESS.value] == ControlOwner.WORKER.value
 
 
-def test_route_contract_distinguishes_agent_plan_and_fallback():
+def test_route_contract_distinguishes_agent_and_plan():
     agent = route_contract("agentic_write")
     assert agent["path"] == "agentic_writer"
     assert [s["stage"] for s in agent["stages"]] == [
@@ -40,23 +40,16 @@ def test_route_contract_distinguishes_agent_plan_and_fallback():
     assert plan["path"] == "plan_workflow"
     assert RuntimeStage.PERMISSION_GATE.value in [s["stage"] for s in plan["stages"]]
 
-    fallback = route_contract("edit", fallback=True)
-    assert fallback["fallback"] is True
-    assert fallback["path"] == RuntimeStage.FALLBACK_WORKFLOW.value
-
-
 def test_service_and_memory_boundaries_are_explicit():
     services = {item["name"]: item for item in service_boundaries()}
     assert {
         "context_preparation",
         "plan_execution",
-        "finalize_analysis",
         "isolated_tasks",
         "control_plane",
     } <= set(services)
     assert "ContextPlanningService" in services["context_preparation"]["target"]
     assert services["plan_execution"]["current"] == "PlanExecutionService"
-    assert "FinalizePipeline" in services["finalize_analysis"]["current"]
     assert "WorkerTaskService" in services["isolated_tasks"]["current"]
     assert "SQLite" in services["control_plane"]["current"]
 

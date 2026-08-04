@@ -176,6 +176,8 @@ MODEL_CONTEXT_WINDOWS = {
     # DeepSeek
     "deepseek-chat": 64000,
     "deepseek-reasoner": 64000,
+    "deepseek": 64000,  # 兜底：deepseek-v3 等未列出变体经前缀匹配回落 64K，而非保守 32K 默认
+
     # Qwen
     "qwen3.5-plus": 131072,
     "qwen3-max": 32768,

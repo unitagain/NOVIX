@@ -11,6 +11,10 @@ License: PolyForm Noncommercial License 1.0.0
   （主体 -[关系]→ 客体，可带 change/章节），构建邻接，支持"实体邻居""两实体间关系"查询。
   纯本地、确定性、不调 LLM。三元组由档案员章末提取顺带产出（生产侧见 Phase 4b）。
 
+  本模块是关系遍历的唯一 owner。除 Canon 抽取关系外，作者在关系图谱中手绘的设定边
+  （U4，cards/relations.yaml）也经 ``Relation.from_card_edge`` 汇入同一张图，
+  由调用方（WriterToolset._query_relations）合并——不新建第二条检索通道。
+
   设计取向：解决纯向量/词法答不出的"连点成线 / 全局关系"类查询（Microsoft GraphRAG 实证），
   但**不跑微软那套重型管线**——复用现有 canon 资产、增量 append、本地遍历。
 """
@@ -27,16 +31,50 @@ logger = get_logger(__name__)
 
 
 class Relation:
-    """一条有类型关系：subject -[relation]-> object（可带 change 演变与 chapter 出处）。"""
+    """一条有类型关系：subject -[relation]-> object（可带 change 演变与 chapter 出处）。
 
-    __slots__ = ("subject", "relation", "object", "change", "chapter")
+    两个来源共用本结构：Canon 抽取关系（带 chapter 出处）与作者在关系图谱中手绘的
+    设定关系（U4，无出处、可带 appellation 称呼）。来源差异由字段自然体现，
+    渲染后模型可自行区分「已发生事实」与「作者设定」。
+    """
 
-    def __init__(self, subject: str, relation: str, object_: str, change: str = "", chapter: str = ""):
+    __slots__ = ("subject", "relation", "object", "change", "chapter", "appellation", "reverse_appellation")
+
+    def __init__(
+        self,
+        subject: str,
+        relation: str,
+        object_: str,
+        change: str = "",
+        chapter: str = "",
+        appellation: str = "",
+        reverse_appellation: str = "",
+    ):
         self.subject = subject
         self.relation = relation
         self.object = object_
         self.change = change
         self.chapter = chapter
+        self.appellation = appellation
+        self.reverse_appellation = reverse_appellation
+
+    @classmethod
+    def from_card_edge(cls, data: Dict[str, object]) -> "Relation":
+        """由卡片层设定边构造关系（U4）。
+
+        方向语义：``from`` 是 ``to`` 的 ``relation``，因此 subject=from、object=to；
+        ``appellation`` 是 object 对 subject 的称呼，``reverse_appellation`` 是 subject
+        对 object 的称呼。设定边没有章节出处（chapter 留空），因此不参与「未来章节」时间过滤。
+        """
+        return cls(
+            str(data.get("from") or "").strip(),
+            str(data.get("relation") or "").strip(),
+            str(data.get("to") or "").strip(),
+            "",
+            "",
+            str(data.get("appellation") or "").strip(),
+            str(data.get("reverse_appellation") or "").strip(),
+        )
 
     def text(self) -> str:
         base = f"{self.subject} —[{self.relation}]→ {self.object}"
@@ -44,6 +82,14 @@ class Relation:
             base += f"（{self.change}）"
         if self.chapter:
             base += f" @{self.chapter}"
+        # 双向称呼各自独立输出，模型据此直接决定对白里怎么称呼对方。
+        forms = []
+        if self.appellation:
+            forms.append(f"{self.object}称{self.subject}「{self.appellation}」")
+        if self.reverse_appellation:
+            forms.append(f"{self.subject}称{self.object}「{self.reverse_appellation}」")
+        if forms:
+            base += f"（{'；'.join(forms)}）"
         return base
 
 

@@ -94,6 +94,23 @@ def _tool_error_code(output: str) -> str:
 
 
 _DEFAULT_TOOL_RESULT_BUDGET = 8000  # compatibility-only; gateway accounting owns runtime folding
+_REASONING_BLOCK_RE = re.compile(
+    r"<(?P<tag>think|thinking|analysis)>\s*(?P<body>.*?)\s*</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _split_reasoning_text(value: Any) -> tuple[str, str]:
+    """Split common tagged reasoning from user-visible assistant text."""
+
+    text = str(value or "")
+    reasoning = [match.group("body").strip() for match in _REASONING_BLOCK_RE.finditer(text)]
+    visible = _REASONING_BLOCK_RE.sub("", text).strip()
+    if not reasoning:
+        open_tag = re.match(r"^<(think|thinking|analysis)>\s*(.*)$", text, re.IGNORECASE | re.DOTALL)
+        if open_tag:
+            return open_tag.group(2).strip(), ""
+    return "\n\n".join(part for part in reasoning if part), visible
 
 
 async def run_agentic_chat(
@@ -110,6 +127,7 @@ async def run_agentic_chat(
     tool_result_budget: int = _DEFAULT_TOOL_RESULT_BUDGET,
     artifact_store: Optional[ToolArtifactStore] = None,
     deadline_seconds: Optional[float] = None,
+    emit_reasoning: bool = True,
 ) -> AgentRunResult:
     """运行"LLM ↔ 工具"循环，直到模型不再请求工具或达到上限，返回最终响应 dict。
 
@@ -158,6 +176,8 @@ async def run_agentic_chat(
     stream_tool_buffers: Dict[int, Dict[str, str]] = {}
     stream_provisional_lengths: Dict[int, int] = {}
     streamed_thinking = False
+    commentary_emitted = False
+    requires_terminal_tool = bool(getattr(toolset, "requires_terminal_tool", False))
 
     def finish(
         status: AgentRunStatus,
@@ -216,12 +236,13 @@ async def run_agentic_chat(
                 event_type = str(event.get("type") or "")
                 if event_type == "thinking_delta":
                     streamed_thinking = True
-                    degradation = await _emit(
-                        on_event,
-                        {"type": "thinking", "content": str(event.get("content") or ""), "stream": True},
-                    )
-                    if degradation:
-                        degradations.append(degradation)
+                    if emit_reasoning:
+                        degradation = await _emit(
+                            on_event,
+                            {"type": "thinking", "content": str(event.get("content") or ""), "stream": True},
+                        )
+                        if degradation:
+                            degradations.append(degradation)
                 elif event_type == "content_delta":
                     degradation = await _emit(
                         on_event,
@@ -321,14 +342,41 @@ async def run_agentic_chat(
         is_anthropic = str(resp.get("provider") or "").lower() == "anthropic"
 
         thought = str(resp.get("thinking") or "").strip()
-        if thought and not streamed_thinking:
+        tagged_thought, visible_content = _split_reasoning_text(resp.get("content"))
+        if emit_reasoning and thought and not streamed_thinking:
             degradation = await _emit(on_event, {"type": "thinking", "content": thought})
+            if degradation:
+                degradations.append(degradation)
+        if emit_reasoning and tagged_thought and tagged_thought != thought:
+            degradation = await _emit(on_event, {"type": "thinking", "content": tagged_thought})
             if degradation:
                 degradations.append(degradation)
 
         tool_calls = resp.get("tool_calls")
+        # 工具循环旁白只保留本轮第一条有价值的用户可见更新；后续动作由工具轨迹表达，
+        # 避免「开始写入 / 已写完 / 提交收尾」逐轮堆叠成伪思考日志。
+        commentary = visible_content
+        if commentary and tool_calls and not commentary_emitted:
+            commentary_emitted = True
+            degradation = await _emit(on_event, {"type": "assistant_text", "content": commentary})
+            if degradation:
+                degradations.append(degradation)
+
         if not tool_calls:
-            return finish(AgentRunStatus.COMPLETED, response=resp)
+            if requires_terminal_tool and not bool(getattr(toolset, "has_terminal_payload", False)):
+                assistant_text = str(resp.get("content") or "").strip()
+                if assistant_text:
+                    msgs.append({"role": "assistant", "content": assistant_text})
+                msgs.append(
+                    {
+                        "role": "user",
+                        "content": "请不要继续解释；现在必须调用 finish_turn 提交本轮变化类型、摘要和事实候选。",
+                    }
+                )
+                continue
+            visible_response = dict(resp or {})
+            visible_response["content"] = visible_content
+            return finish(AgentRunStatus.COMPLETED, response=visible_response)
 
         # 回放 assistant 的工具调用消息（按 provider 选择格式）
         if is_anthropic:
@@ -375,12 +423,28 @@ async def run_agentic_chat(
                 artifact_ref="run_agentic_chat:assistant_replay",
             )
 
+        # 输入请求工具主导整个 provider batch：即便模型把写作调用排在反问前，
+        # 也先执行反问并立即暂停，避免并行工具排序造成正文副作用。
+        execution_tool_calls = list(tool_calls)
+        input_tool_checker = getattr(toolset, "is_input_tool", None)
+        if callable(input_tool_checker):
+            input_calls = [tc for tc in execution_tool_calls if input_tool_checker(str(tc.get("name") or ""))]
+            if input_calls:
+                execution_tool_calls = input_calls + [
+                    tc for tc in execution_tool_calls if not input_tool_checker(str(tc.get("name") or ""))
+                ]
+
         # 执行工具并回灌结果（Anthropic 用单条 user 消息聚合 tool_result 块）
         anthropic_results: List[Dict[str, Any]] = []
-        for tc in tool_calls:
+        terminal_tool_called = False
+        input_required_payload: Optional[Dict[str, Any]] = None
+        for tc in execution_tool_calls:
             name = str(tc.get("name") or "")
             tool_call_id = str(tc.get("id") or "")
             arguments = tc.get("arguments")
+            terminal_checker = getattr(toolset, "is_terminal_tool", None)
+            if callable(terminal_checker) and terminal_checker(name):
+                terminal_tool_called = True
             try:
                 from app.observability.usage_diagnostics import record_tool_call
 
@@ -400,9 +464,13 @@ async def run_agentic_chat(
                     error=error_payload,
                     reason="turn_deadline_exceeded",
                 )
-            degradation = await _emit(on_event, {"type": "tool_call", "name": name, "arguments": arguments})
+            degradation = await _emit(
+                on_event,
+                {"type": "tool_call", "tool_call_id": tool_call_id, "name": name, "arguments": arguments},
+            )
             if degradation:
                 degradations.append(degradation)
+
             tool_started = time.monotonic()
             tool_error: Optional[Dict[str, Any]] = None
             try:
@@ -528,6 +596,7 @@ async def run_agentic_chat(
                 on_event,
                 {
                     "type": "tool_result",
+                    "tool_call_id": tool_call_id,
                     "name": name,
                     "arguments": arguments,
                     "result": preview,
@@ -536,6 +605,20 @@ async def run_agentic_chat(
             )
             if degradation:
                 degradations.append(degradation)
+
+            # An input-capable tool may pause the turn and require author input.
+            # Stop executing the rest of a provider batch immediately so a
+            # speculative write/finish call cannot slip through after the pause.
+            pause_builder = getattr(toolset, "input_required_payload", None)
+            if callable(pause_builder):
+                try:
+                    candidate = pause_builder()
+                except Exception as exc:
+                    record_degradation("agent_input_required_payload", exc)
+                    candidate = None
+                if isinstance(candidate, dict) and candidate.get("questions"):
+                    input_required_payload = dict(candidate)
+                    break
 
         if is_anthropic and anthropic_results:
             tool_message = {"role": "user", "content": anthropic_results}
@@ -547,6 +630,35 @@ async def run_agentic_chat(
                     selection_reason="agentic_tool_result_replay",
                     artifact_ref=str(anthropic_results[-1].get("_source_ref") or ""),
                 )
+
+        if input_required_payload is not None:
+            clarification_response = dict(resp or {})
+            clarification_response.update(
+                {
+                    "terminal_state": "requires_input",
+                    "reason": "clarification_requested",
+                    "clarification": input_required_payload,
+                    "questions": list(input_required_payload.get("questions") or []),
+                }
+            )
+            clarification_response["content"] = ""
+            return finish(
+                AgentRunStatus.INCOMPLETE,
+                response=clarification_response,
+                reason="clarification_requested",
+            )
+
+        if terminal_tool_called:
+            payload_builder = getattr(toolset, "terminal_payload", None)
+            terminal_payload = dict(payload_builder() or {}) if callable(payload_builder) else {}
+            terminal_response = dict(resp or {})
+            terminal_response["terminal_payload"] = terminal_payload
+            terminal_response["content"] = str(terminal_payload.get("message") or resp.get("content") or "")
+            return finish(
+                AgentRunStatus.COMPLETED,
+                response=terminal_response,
+                reason="terminal_tool",
+            )
 
     logger.info("agentic loop hit max_iterations=%d; returning incomplete", max_iterations)
     return finish(AgentRunStatus.INCOMPLETE, response=last_response, reason="max_iterations")

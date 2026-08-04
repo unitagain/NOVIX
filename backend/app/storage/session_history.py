@@ -21,6 +21,7 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 import json
+import re
 import time
 import uuid
 from pathlib import Path
@@ -46,14 +47,139 @@ _ALLOWED_ROLES = {"user", "assistant", "system", "tool"}
 class SessionHistoryStorage(BaseStorage):
     """单项目一份长青对话，落 `sessions/conversation.jsonl`（每行一条消息）。"""
 
-    def _path(self, project_id: str) -> Path:
-        return self.get_project_path(project_id) / "sessions" / "conversation.jsonl"
+    _CONVERSATION_ID = re.compile(r"^[a-zA-Z0-9_-]{1,80}$")
 
-    def _event_path(self, project_id: str) -> Path:
-        return self.get_project_path(project_id) / "sessions" / "conversation.events.jsonl"
+    def _index_path(self, project_id: str) -> Path:
+        return self.get_project_path(project_id) / "sessions" / "conversations" / "index.json"
+
+    def _read_index_sync(self, project_id: str) -> Dict[str, Any]:
+        path = self._index_path(project_id)
+        if not path.exists():
+            return {}
+        try:
+            return dict(json.loads(path.read_text(encoding="utf-8")) or {})
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def active_conversation_id(self, project_id: str) -> str:
+        value = str(self._read_index_sync(project_id).get("active_id") or "legacy")
+        return value if self._CONVERSATION_ID.fullmatch(value) else "legacy"
+
+    def _conversation_id(self, project_id: str, conversation_id: str = "") -> str:
+        value = str(conversation_id or self.active_conversation_id(project_id))
+        if not self._CONVERSATION_ID.fullmatch(value):
+            raise ValueError("invalid_conversation_id")
+        return value
+
+    def _path(self, project_id: str, conversation_id: str = "") -> Path:
+        cid = self._conversation_id(project_id, conversation_id)
+        if cid == "legacy":
+            return self.get_project_path(project_id) / "sessions" / "conversation.jsonl"
+        return self.get_project_path(project_id) / "sessions" / "conversations" / cid / "conversation.jsonl"
+
+    def _event_path(self, project_id: str, conversation_id: str = "") -> Path:
+        cid = self._conversation_id(project_id, conversation_id)
+        if cid == "legacy":
+            return self.get_project_path(project_id) / "sessions" / "conversation.events.jsonl"
+        return self.get_project_path(project_id) / "sessions" / "conversations" / cid / "conversation.events.jsonl"
 
     def _compact_dir(self, project_id: str) -> Path:
-        return self.get_project_path(project_id) / "sessions" / "compact"
+        cid = self.active_conversation_id(project_id)
+        if cid == "legacy":
+            return self.get_project_path(project_id) / "sessions" / "compact"
+        return self.get_project_path(project_id) / "sessions" / "conversations" / cid / "compact"
+
+    async def list_conversations(self, project_id: str) -> List[Dict[str, Any]]:
+        index = self._read_index_sync(project_id)
+        items = [dict(item) for item in index.get("items") or [] if isinstance(item, dict)]
+        legacy_path = self.get_project_path(project_id) / "sessions" / "conversation.jsonl"
+        if legacy_path.exists() and not any(item.get("id") == "legacy" for item in items):
+            items.insert(0, {"id": "legacy", "title": "历史对话", "created_at": 0, "updated_at": 0})
+        active_id = str(index.get("active_id") or ("legacy" if legacy_path.exists() else ""))
+        return [{**item, "active": item.get("id") == active_id} for item in sorted(items, key=lambda x: int(x.get("updated_at") or 0), reverse=True)]
+
+    async def create_conversation(self, project_id: str, *, title: str = "") -> Dict[str, Any]:
+        now = int(time.time() * 1000)
+        item = {
+            "id": f"conv_{uuid.uuid4().hex[:16]}",
+            "title": str(title or "新对话").strip()[:80] or "新对话",
+            "created_at": now,
+            "updated_at": now,
+        }
+        async with self.content_transaction(project_id):
+            index = self._read_index_sync(project_id)
+            items = [dict(row) for row in index.get("items") or [] if isinstance(row, dict)]
+            items.append(item)
+            await self._atomic_write(
+                self._index_path(project_id),
+                json.dumps({"active_id": item["id"], "items": items}, ensure_ascii=False, indent=2) + "\n",
+            )
+        return {**item, "active": True}
+
+    async def activate_conversation(self, project_id: str, conversation_id: str) -> Dict[str, Any]:
+        cid = self._conversation_id(project_id, conversation_id)
+        async with self.content_transaction(project_id):
+            index = self._read_index_sync(project_id)
+            items = [dict(row) for row in index.get("items") or [] if isinstance(row, dict)]
+            known = {str(row.get("id") or "") for row in items}
+            legacy_exists = (self.get_project_path(project_id) / "sessions" / "conversation.jsonl").exists()
+            if cid not in known and not (cid == "legacy" and legacy_exists):
+                raise FileNotFoundError("conversation_not_found")
+            await self._atomic_write(
+                self._index_path(project_id),
+                json.dumps({"active_id": cid, "items": items}, ensure_ascii=False, indent=2) + "\n",
+            )
+        return {"id": cid, "active": True}
+
+    async def delete_conversation(self, project_id: str, conversation_id: str) -> Dict[str, Any]:
+        """删除独立会话；legacy 是兼容历史数据，不允许误删。"""
+        cid = self._conversation_id(project_id, conversation_id)
+        if cid == "legacy":
+            raise ValueError("legacy_conversation_protected")
+        async with self.content_transaction(project_id):
+            index = self._read_index_sync(project_id)
+            items = [dict(row) for row in index.get("items") or [] if isinstance(row, dict)]
+            if cid not in {str(row.get("id") or "") for row in items}:
+                raise FileNotFoundError("conversation_not_found")
+            path = self.get_project_path(project_id) / "sessions" / "conversations" / cid
+            if path.exists():
+                import shutil
+                shutil.rmtree(path)
+            remaining = [row for row in items if str(row.get("id") or "") != cid]
+            active = str(index.get("active_id") or "")
+            if active == cid:
+                active = str(remaining[-1].get("id") or "") if remaining else ""
+            await self._atomic_write(self._index_path(project_id), json.dumps({"active_id": active, "items": remaining}, ensure_ascii=False, indent=2) + "\n")
+        return {"id": cid, "active_id": active}
+
+    async def rollback_last_turn(self, project_id: str, conversation_id: str = "") -> Dict[str, Any]:
+        cid = self._conversation_id(project_id, conversation_id)
+        messages = await self.load(project_id, conversation_id=cid)
+        cut = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), None)
+        if cut is None:
+            return {"removed": 0, "conversation_id": cid, "restored_input": ""}
+        path = self._path(project_id, cid)
+        event_path = self._event_path(project_id, cid)
+        removed_messages = messages[cut:]
+        removed_event_ids = {str(item.get("event_id") or "") for item in removed_messages if item.get("event_id")}
+        async with self.content_transaction(project_id):
+            kept = messages[:cut]
+            await self._atomic_write(path, "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in kept))
+            if removed_event_ids:
+                archived = await self.read_jsonl(event_path)
+                kept_events = [
+                    item for item in archived if str(item.get("event_id") or "") not in removed_event_ids
+                ]
+                await self._atomic_write(
+                    event_path,
+                    "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in kept_events),
+                )
+        restored_input = str(removed_messages[0].get("content") or "") if removed_messages else ""
+        return {
+            "removed": len(removed_messages),
+            "conversation_id": cid,
+            "restored_input": restored_input,
+        }
 
     def _compact_state_path(self, project_id: str) -> Path:
         return self._compact_dir(project_id) / "state.json"
@@ -80,17 +206,31 @@ class SessionHistoryStorage(BaseStorage):
             item["tool_calls"] = list(message["tool_calls"])
         return item
 
-    async def append(self, project_id: str, message: Dict[str, Any]) -> Dict[str, Any]:
+    async def append(self, project_id: str, message: Dict[str, Any], *, conversation_id: str = "") -> Dict[str, Any]:
         """追加一条消息并返回规范化后的条目（带锁，并发安全）。"""
         item = self._normalize(message)
+        cid = self._conversation_id(project_id, conversation_id)
         async with self.content_transaction(project_id):
-            await self.append_jsonl(self._event_path(project_id), item)
-            await self.append_jsonl(self._path(project_id), item)
+            await self.append_jsonl(self._event_path(project_id, cid), item)
+            await self.append_jsonl(self._path(project_id, cid), item)
+            if cid != "legacy":
+                index = self._read_index_sync(project_id)
+                items = [dict(row) for row in index.get("items") or [] if isinstance(row, dict)]
+                for row in items:
+                    if str(row.get("id") or "") != cid:
+                        continue
+                    row["updated_at"] = int(item["ts"])
+                    if row.get("title") == "新对话" and item["role"] == "user" and item["content"].strip():
+                        row["title"] = item["content"].strip().replace("\n", " ")[:32]
+                await self._atomic_write(
+                    self._index_path(project_id),
+                    json.dumps({"active_id": cid, "items": items}, ensure_ascii=False, indent=2) + "\n",
+                )
         return item
 
-    async def load(self, project_id: str, *, limit: int = 0) -> List[Dict[str, Any]]:
+    async def load(self, project_id: str, *, limit: int = 0, conversation_id: str = "") -> List[Dict[str, Any]]:
         """读取对话历史；limit>0 时只返回最近 limit 条。"""
-        path = self._path(project_id)
+        path = self._path(project_id, conversation_id)
         await self._repair_projection_from_archive(project_id)
         items = await self.read_jsonl(path)
         if limit and limit > 0:
@@ -104,8 +244,8 @@ class SessionHistoryStorage(BaseStorage):
             await self.write_jsonl(self._event_path(project_id), normalized)
             await self.write_jsonl(self._path(project_id), normalized)
 
-    async def count(self, project_id: str) -> int:
-        return len(await self.read_jsonl(self._path(project_id)))
+    async def count(self, project_id: str, *, conversation_id: str = "") -> int:
+        return len(await self.read_jsonl(self._path(project_id, conversation_id)))
 
     async def compact(
         self,

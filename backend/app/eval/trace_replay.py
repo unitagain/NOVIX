@@ -105,8 +105,6 @@ def summarize_trace(payload: Dict[str, Any]) -> Dict[str, Any]:
             route_path = str(data.get("route_path") or "").strip()
             if route_path:
                 route_counts[route_path] = route_counts.get(route_path, 0) + 1
-                if route_path == "fallback_workflow":
-                    fallback_count += 1
             for item in data.get("degradation") or []:
                 if isinstance(item, dict) and item.get("status") == "fallback":
                     fallback_count += 1

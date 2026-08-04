@@ -68,23 +68,6 @@ class BaseAgent(ABC):
         self.language = language
 
     @abstractmethod
-    async def execute(self, project_id: str, chapter: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行智能体的核心任务 - 由子类实现
-
-        Execute the agent's main task. Must be implemented by subclasses.
-
-        Args:
-            project_id: Unique project identifier.
-            chapter: Chapter ID for context.
-            context: Context dictionary with task-specific parameters.
-
-        Returns:
-            Dictionary with execution results (success status, output data, etc).
-        """
-        pass
-
-    @abstractmethod
     def get_agent_name(self) -> str:
         """
         获取智能体标识名 - 用于配置和日志
@@ -92,7 +75,7 @@ class BaseAgent(ABC):
         Get the agent's unique name identifier for configuration and logging.
 
         Returns:
-            Agent name string (e.g., "writer", "editor", "archivist").
+            Agent name string ("writer").
         """
         pass
 

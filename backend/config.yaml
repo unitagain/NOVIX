@@ -92,6 +92,10 @@ archivist:
 writer:
   # 默认目标字数 / Default target word count
   default_target_word_count: 3000
+  # Writer 规范化反问工具策略：auto=模型按需判断；always=主动检查关键缺口；off=不主动触发。
+  # 无论策略如何，ask_clarification 始终是同一个 Writer 工具；单次由模型自主提出 1-3 个问题。
+  clarification:
+    auto_trigger: auto
   # 上下文截断上限 / Context truncation limits
   context_limits:
     fact_summary_items: 2       # 事实摘要最多条数 / Max fact summary items
@@ -155,6 +159,9 @@ retrieval:
   # Phase 4: 关系图（GraphRAG-lite），读 canon/relations.jsonl，本地遍历查询
   relations:
     enabled: true
+    # U4：卡片层作者设定关系边（cards/relations.yaml）默认注入 writer 稳定前缀的条数上限。
+    # 超出部分显式标注剩余条数，AI 可用 query_relations 按人物补查（不静默截断）。
+    max_push_edges: 80
 
 # Governance / 治理配置
 governance:
@@ -163,6 +170,15 @@ governance:
     min_confidence: 0.85
     allowed_types: [preference, progress]
     allowed_scopes: [project, chapter]
+
+# 大纲（Outline）—— 全文规划资产（见 plan.md §9 U1）。全局默认，项目可在 project.yaml 的 outline 键覆盖。
+# enabled=false 时：禁用大纲（不推送、read_outline 工具返回已禁用）。
+# require_consult=true 时：每次撰写把大纲推进 writer 稳定上下文前缀（缓存友好），要求 AI 先查阅再落笔。
+# 大纲永不进入 Canon/Summary 事实提取——它是规划意图，不是已发生事实。
+outline:
+  enabled: true
+  require_consult: false
+  max_push_tokens: 2000        # require_consult 推送时的 token 上限；超出截断为「大纲摘要 + 恢复入口」
 
 # 深度思考能力表 / Thinking capability map（对话栏「深度思考」按钮）
 # 只覆盖「能用请求参数切换 thinking」的厂商；DeepSeek 等靠换模型的不在此（用户规则：需换模型的不做）。
@@ -191,10 +207,7 @@ thinking:
 
 # Session Configuration / 会话配置
 session:
-  max_iterations: 5
-  max_question_rounds: 2
-  max_research_rounds: 5
-  auto_save_interval: 60  # seconds / 秒
+  timeout_seconds: 600
 
 # Storage Configuration / 存储配置
 storage:

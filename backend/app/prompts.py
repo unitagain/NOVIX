@@ -5,7 +5,6 @@ Backward-compatible prompt exports.
 """
 
 from app.prompt_templates.archivist import *  # noqa: F401,F403
-from app.prompt_templates.editor import *  # noqa: F401,F403
 from app.prompt_templates.extractor import *  # noqa: F401,F403
 from app.prompt_templates.retrieval import *  # noqa: F401,F403
 from app.prompt_templates.shared import *  # noqa: F401,F403

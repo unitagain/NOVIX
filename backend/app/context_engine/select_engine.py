@@ -647,9 +647,25 @@ class ContextSelectEngine:
                 sem_scores = None
 
         if sem_scores is not None:
-            fused = self._fuse_scores(candidates, sem_scores)
+            # _fuse_scores 按「原始候选下标」返回融合分；过滤后需重排为与新候选序等长的列表，
+            # 两者类型不同（Dict[int, float] vs List[float]），用不同变量名保持契约清晰。
+            fused_by_index = self._fuse_scores(candidates, sem_scores)
+            filtered_candidates = []
+            filtered_scores = []
             for idx, item in enumerate(candidates):
-                item.relevance_score = fused[idx] * float(item.metadata.pop("_decay", 1.0))
+                lexical = float(item.metadata.get("_lex") or 0.0)
+                semantic_score = float(sem_scores[idx] or 0.0)
+                # 语义模式下仍拒绝“词法完全无关且语义相似度极低”的候选，
+                # 避免宽泛查询把历史角色卡批量注入上下文。
+                if lexical <= 0.0 and semantic_score < 0.0:
+                    continue
+                filtered_candidates.append(item)
+                filtered_scores.append(idx)
+            candidates = filtered_candidates
+            fused_scores = [fused_by_index[idx] for idx in filtered_scores]
+            sem_scores = [sem_scores[idx] for idx in filtered_scores]
+            for idx, item in enumerate(candidates):
+                item.relevance_score = fused_scores[idx] * float(item.metadata.pop("_decay", 1.0))
                 item.metadata["_sem"] = sem_scores[idx]  # 暂存语义分供 rerank
         else:
             # 词法路径（原生纯词法，或语义打分失败后的降级）：施加衰减并丢弃零分项，

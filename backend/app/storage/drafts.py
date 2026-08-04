@@ -5,6 +5,7 @@ Draft Storage
 Manages scene briefs, drafts, reviews, and summaries.
 """
 
+import re
 import shutil
 import hashlib
 from pathlib import Path
@@ -91,6 +92,39 @@ class DraftStorage(BaseStorage):
         if not candidates:
             return None
         return max(candidates, key=lambda path: path.stat().st_mtime)
+
+    async def get_working_text(self, project_id: str, chapter: str) -> Tuple[str, Optional[Path]]:
+        """Return the newest chapter prose the user currently sees, with its file.
+
+        中文说明：写作/编辑/分析的「当前正文」唯一 owner。在 final.md（用户在编辑器
+        中保存/接受的真相）与 draft_*.md（AI 工作流中间产物）之间按修改时间取最新，
+        mtime 相等时偏向 final.md——避免旧 draft 版本永久遮蔽用户在编辑器里的修改与
+        删除（这是「中断后续写基于已删除旧文」缺陷的根因）。
+        """
+        try:
+            draft_dir = self.get_chapter_draft_dir(project_id, chapter)
+            if not draft_dir.exists():
+                return "", None
+            final_path = draft_dir / "final.md"
+            draft_files = [path for path in draft_dir.glob("draft_*.md") if path.is_file()]
+            newest_draft = (
+                max(draft_files, key=lambda path: path.stat().st_mtime) if draft_files else None
+            )
+            if final_path.is_file() and newest_draft is not None:
+                chosen = (
+                    final_path
+                    if final_path.stat().st_mtime >= newest_draft.stat().st_mtime
+                    else newest_draft
+                )
+            elif final_path.is_file():
+                chosen = final_path
+            else:
+                chosen = newest_draft
+            if chosen is None:
+                return "", None
+            return await self.read_text(chosen), chosen
+        except (OSError, UnicodeError, ValueError):
+            return "", None
 
     def _final_paths(self, project_id: str, chapter: str) -> Tuple[Path, Path]:
         canonical = self._canonicalize_chapter_id(chapter)
@@ -293,13 +327,6 @@ class DraftStorage(BaseStorage):
         if source_path.exists() and source_path != target_path:
             source_path.rename(target_path)
 
-    async def save_scene_brief(self, project_id: str, chapter: str, brief: SceneBrief) -> None:
-        """Save a scene brief."""
-        canonical = self._canonicalize_chapter_id(chapter)
-        self._migrate_chapter_dir(project_id, chapter, canonical)
-        file_path = self.get_project_path(project_id) / "drafts" / canonical / "scene_brief.yaml"
-        await self.write_yaml(file_path, brief.model_dump())
-
     async def get_scene_brief(self, project_id: str, chapter: str) -> Optional[SceneBrief]:
         """Get a scene brief."""
         resolved = self._resolve_chapter_dir_name(project_id, chapter)
@@ -409,7 +436,13 @@ class DraftStorage(BaseStorage):
         for file_path in drafts_dir.glob("draft_*.md"):
             versions.append(file_path.stem.replace("draft_", ""))
 
-        return sorted(versions)
+        def version_sort_key(version: str) -> Tuple[int, int, str]:
+            match = re.fullmatch(r"v(\d+)", version)
+            if match:
+                return (0, int(match.group(1)), version)
+            return (1, 0, version)
+
+        return sorted(versions, key=version_sort_key)
 
     async def save_review(self, project_id: str, chapter: str, review: ReviewResult) -> None:
         """Save a review result."""

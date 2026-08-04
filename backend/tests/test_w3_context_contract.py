@@ -64,7 +64,7 @@ def _gateway(provider: RecordingProvider, tmp_path: Path) -> LLMGateway:
     return gateway
 
 
-def _manual_plan(turn_id: str, *, input_tokens: int = 1000, tools=()) -> ContextPlanV2:
+def _manual_plan(turn_id: str, *, input_tokens: int = 1000, context_limit: int | None = None, tools=()) -> ContextPlanV2:
     return ContextPlanV2(
         plan_id=f"plan_{turn_id}",
         turn_id=turn_id,
@@ -74,7 +74,11 @@ def _manual_plan(turn_id: str, *, input_tokens: int = 1000, tools=()) -> Context
         route_path="agentic_writer",
         context_epoch="0",
         provider={"profile_id": "profile", "provider": "deepseek", "model": "deepseek-chat"},
-        budget={"context_limit_tokens": input_tokens + 100, "input_tokens": input_tokens, "output_reserve_tokens": 100},
+        budget={
+            "context_limit_tokens": context_limit if context_limit is not None else input_tokens + 100,
+            "input_tokens": input_tokens,
+            "output_reserve_tokens": 100,
+        },
         tool_loadout=[{"name": name} for name in tools],
         fingerprints={"plan": "frozen"},
     )
@@ -284,6 +288,7 @@ def test_context_plan_declares_all_h1_source_classes(tmp_path: Path):
         "chapter",
         "draft",
         "project_config",
+        "clarification_request",
         "prompt",
         "procedural_knowledge",
         "tool_schema",
@@ -521,7 +526,9 @@ def test_final_payload_rejects_oversized_nonrecoverable_prose(monkeypatch, tmp_p
     provider = RecordingProvider()
     gateway = _gateway(provider, tmp_path)
     scope = new_turn_scope(project_id="p", turn_id="turn-overflow")
-    scope.activate_plan(_manual_plan(scope.turn_id, input_tokens=100))
+    # 显式压小硬窗口，使「点估计 tokens」无论 tokenizer 都远超 hard_ceiling 而稳定触发拒绝；
+    # 不再依赖 1.35x 悲观上界勉强越过 8000（判据已改为点估计，见 payload_accounting）。
+    scope.activate_plan(_manual_plan(scope.turn_id, input_tokens=100, context_limit=500))
 
     async def scenario():
         with bind_turn_scope(scope):

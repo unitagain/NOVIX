@@ -1,81 +1,94 @@
 export type AgentTerminalState =
   | 'completed'
   | 'requires_input'
-  | 'requires_approval'
   | 'incomplete'
   | 'failed'
   | 'cancelled';
-
-export interface PendingAgentAction {
-  id: string;
-  operation: string;
-  status: string;
-  token: string;
-  decisionFingerprint?: string;
-  expiresAt?: string;
-}
 
 export interface ChatTurnRequest {
   chapter?: string;
   message: string;
   has_selection?: boolean;
+  /** 当前选区的有限文本，随本轮 Writer 上下文注入，用于确定修改范围。 */
+  selection_text?: string;
   has_draft?: boolean;
   target_word_count?: number;
   auto_execute_plan?: boolean;
   thinking?: boolean;
-  fallback_approval_action_id?: string;
-  fallback_approval_token?: string;
+  reasoning_level?: 'auto' | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 }
 
 export interface ChatTurnResponse {
   success?: boolean;
   action?: string;
   message?: string;
+  summary?: string;
   changed?: boolean;
+  partial?: boolean;
+  content?: string;
+  questions?: Array<{
+    type?: string;
+    key?: string;
+    text?: string;
+    reason?: string;
+    impact?: string;
+    impact_score?: number;
+    options?: string[];
+    default?: string;
+  }>;
+  clarification?: {
+    decision?: 'ask' | 'proceed';
+    reason?: string;
+    question_count?: number;
+    questions?: Array<Record<string, unknown>>;
+    tool?: 'ask_clarification' | string;
+  };
+  /** Compatibility aliases; the active contract is the Writer tool payload above. */
+  clarify_decision?: 'ask' | 'proceed';
+  clarify_mode?: 'always' | 'auto' | 'off';
   cancelled?: boolean;
   incomplete?: boolean;
   reason?: string;
   terminal_state?: AgentTerminalState;
-  pending_action?: Record<string, unknown>;
   plan?: Record<string, unknown>;
   context_plan?: Record<string, unknown>;
   runtime?: Record<string, unknown>;
-  fallback_decision?: Record<string, unknown>;
-  fallback_execution?: Record<string, unknown>;
-  compatibility?: Record<string, unknown>;
+  writing_memory?: Record<string, unknown>;
+  turn_effect?: Record<string, unknown>;
+  chapter_target?: {
+    chapter?: string;
+    title?: string;
+    create?: boolean;
+  };
+  auto_commit?: {
+    committed?: boolean;
+    chapter?: string;
+    title?: string;
+    word_count?: number;
+    reason?: string;
+    canon_sync?: Record<string, unknown>;
+  };
+}
+
+export function shouldRecoverChangedTurn(data: ChatTurnResponse, streamUsed: boolean, streamActive: boolean): boolean {
+  return data.changed === true && typeof data.content === 'string' && (!streamUsed || streamActive);
 }
 
 export interface AgentTurnView {
   terminalState: AgentTerminalState | null;
-  pendingAction: PendingAgentAction | null;
   contextPlan: Record<string, unknown> | null;
   runtime: Record<string, unknown> | null;
   reason: string;
-  isBackendAuthoritative: boolean;
 }
 
 const text = (value: unknown): string => (typeof value === 'string' ? value : '');
 
 export function normalizeChatTurnResponse(data: ChatTurnResponse | null | undefined): AgentTurnView {
-  const rawAction = data?.pending_action;
-  const pendingAction = rawAction
-    ? {
-        id: text(rawAction.id),
-        operation: text(rawAction.operation),
-        status: text(rawAction.status) || 'pending',
-        token: text(rawAction.token),
-        decisionFingerprint: text(rawAction.decision_fingerprint) || undefined,
-        expiresAt: text(rawAction.expires_at) || undefined,
-      }
-    : null;
-
   return {
     terminalState: data?.terminal_state || null,
-    pendingAction: pendingAction?.id && pendingAction.token ? pendingAction : null,
     contextPlan: data?.context_plan || null,
     runtime: data?.runtime || null,
     reason: text(data?.reason),
-    isBackendAuthoritative: data?.compatibility?.backend_authoritative === true,
   };
 }
 

@@ -270,10 +270,17 @@ class LLMGateway:
         last_exception = None
 
         attempts = max(1, self.max_retries + 1)
+        provider_key = f"{provider.get_provider_name()}:{getattr(provider, 'model', '')}"
+
+        def _note_terminal_failure(exc: BaseException) -> None:
+            # 熔断本身触发的 open/half_open_busy 不是新的 provider 失败，不再计数（避免自我延长熔断）。
+            if str(exc) not in {"provider_circuit_open", "provider_circuit_half_open_busy"}:
+                self.reliability.note_failure(provider_key)
+
         for attempt in range(attempts):
             try:
                 return await self._execute_chat(
-                    provider, messages, temperature, max_tokens, options, request_trace=request_trace
+                    provider, messages, temperature, max_tokens, options, request_trace=request_trace, count_on_failure=False
                 )
             except Exception as e:
                 last_exception = e
@@ -284,7 +291,8 @@ class LLMGateway:
                 is_retryable, reason = contract.retryable, contract.category
 
                 if not is_retryable:
-                    # Non-retryable error - fail immediately
+                    # Non-retryable error - fail immediately (count one terminal failure)
+                    _note_terminal_failure(e)
                     logger.error("LLM non-retryable error (reason=%s): %s", reason, e, exc_info=True)
                     raise LLMError(
                         str(e),
@@ -322,6 +330,7 @@ class LLMGateway:
                         await asyncio.sleep(delay)
 
         # All retries exhausted
+        _note_terminal_failure(last_exception)
         logger.error("LLM request failed after %d attempts: %s", attempts, last_exception)
         runtime_metrics.increment("gateway.retry_exhausted")
         provider_name = provider.get_provider_name() if hasattr(provider, "get_provider_name") else "unknown"
@@ -344,6 +353,7 @@ class LLMGateway:
         max_tokens: Optional[int],
         options: Optional[Dict[str, Any]] = None,
         request_trace: Optional[Dict[str, Any]] = None,
+        count_on_failure: bool = True,
     ) -> Dict[str, Any]:
         """Execute single chat request"""
         start_time = time.time()
@@ -384,7 +394,12 @@ class LLMGateway:
             self.reliability.cancelled(lease)
             raise
         except Exception:
-            self.reliability.failure(lease)
+            # 重试上下文里逐次尝试不各自记熔断失败（否则一个请求就顶开熔断）；
+            # 由调用方 _chat_with_retry 在请求终态时经 note_failure 计一次。
+            if count_on_failure:
+                self.reliability.failure(lease)
+            else:
+                self.reliability.retry_release(lease)
             runtime_metrics.increment("gateway.failure")
             raise
         self.reliability.success(lease)
@@ -1022,12 +1037,18 @@ class LLMGateway:
             return profile.get("temperature", 0.7)
         return 0.7
 
-    def thinking_param_for_agent(self, agent_name: str, enabled: bool) -> Optional[Dict[str, Any]]:
+    def thinking_param_for_agent(
+        self,
+        agent_name: str,
+        enabled: bool = False,
+        *,
+        reasoning_level: str = "auto",
+    ) -> Optional[Dict[str, Any]]:
         """构建该 agent 当前模型开启 thinking 时要传给 ``chat(thinking=...)`` 的参数 dict。
 
         未开启 / 模型不支持「参数级」thinking 切换 → None（能力降级，调用方不传 thinking 即正常）。
         """
-        if not enabled:
+        if not enabled and reasoning_level == "auto":
             return None
         try:
             profile = self.get_profile_for_agent(agent_name)
@@ -1035,9 +1056,15 @@ class LLMGateway:
             return None
         if not profile:
             return None
-        from app.llm_gateway.thinking import build_thinking_param
+        from app.llm_gateway.thinking import build_reasoning_param
 
-        return build_thinking_param(profile.get("provider", ""), profile.get("model", ""))
+        level = reasoning_level if reasoning_level != "auto" else "high"
+        return build_reasoning_param(
+            profile.get("provider", ""),
+            profile.get("model", ""),
+            level,
+            dialect=str(profile.get("reasoning_dialect") or ""),
+        )
 
     def get_profile_for_agent(self, agent_name: str) -> Optional[Dict[str, Any]]:
         """

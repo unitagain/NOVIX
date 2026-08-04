@@ -82,10 +82,6 @@ def build_context_assembly_plan(
     for source_type in source_types or []:
         sources.append({"type": str(source_type), "role": "route_context", "fresh": True})
 
-    degradation: List[Dict[str, str]] = []
-    if route_path == "fallback_workflow":
-        degradation.append({"type": "fresh_context", "status": "partial", "reason": "fallback_workflow"})
-
     return ContextAssemblyPlan(
         strategy=strategy,
         budget={
@@ -94,5 +90,5 @@ def build_context_assembly_plan(
             "context_budget_tokens": int(context_budget_tokens or 0),
         },
         sources=sources,
-        degradation=degradation,
+        degradation=[],
     )

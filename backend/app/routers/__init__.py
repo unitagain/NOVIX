@@ -17,6 +17,7 @@ from .memory_pack import router as memory_pack_router
 from .memory import router as memory_router
 from .actions import router as actions_router
 from .export import router as export_router
+from .outline import router as outline_router
 
 __all__ = [
     "projects_router",
@@ -34,4 +35,5 @@ __all__ = [
     "memory_router",
     "actions_router",
     "export_router",
+    "outline_router",
 ]

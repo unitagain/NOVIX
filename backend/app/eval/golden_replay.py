@@ -247,16 +247,15 @@ async def _component_cases() -> List[Dict[str, Any]]:
 
 async def _route_cases() -> List[Dict[str, Any]]:
     specs = [
-        ("write", False, False, "agentic_writer"),
-        ("edit", False, False, "agentic_writer"),
-        ("continue", False, False, "agentic_writer"),
-        ("plan", False, False, "plan_workflow"),
-        ("plan", False, True, "plan_workflow"),
-        ("review", True, False, "fallback_workflow"),
+        ("write", False, "agentic_writer"),
+        ("edit", False, "agentic_writer"),
+        ("continue", False, "agentic_writer"),
+        ("plan", False, "plan_workflow"),
+        ("plan", True, "plan_workflow"),
     ]
     cases = []
-    for idx, (action, fallback, auto_execute_plan, expected_path) in enumerate(specs, start=1):
-        contract = route_contract(action, fallback=fallback, auto_execute_plan=auto_execute_plan)
+    for idx, (action, auto_execute_plan, expected_path) in enumerate(specs, start=1):
+        contract = route_contract(action, auto_execute_plan=auto_execute_plan)
         cases.append(
             _case(
                 f"route-{idx:02d}",
@@ -391,7 +390,6 @@ def _evidence_baseline(cases: List[Dict[str, Any]]) -> Dict[str, Any]:
         },
     ]
     resolved_gaps = [
-        "backend_fallback_execution_owner",
         "provider_adapter_conformance",
     ]
     gaps = [
@@ -472,7 +470,6 @@ async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> D
 
     thresholds = {
         "retrieval_recall_min": 0.6,
-        "fallback_rate_max": 0.35,
         "invalid_tool_rate_max": 0.1,
         "latency_ms_max": 300000,
         "tokens_max": 500000,
@@ -486,18 +483,11 @@ async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> D
 
     retrieval_cases = [case for case in cases if case["category"] == "retrieval"]
     retrieval_pass = [case for case in retrieval_cases if case["passed"]]
-    fallback_route_cases = [
-        case
-        for case in cases
-        if case["category"] == "route" and (case.get("metrics", {}).get("contract") or {}).get("fallback")
-    ]
-    fallback_rate = len(fallback_route_cases) / len([case for case in cases if case["category"] == "route"])
     aggregate_checks = {
         "case_count_ok": len(cases) >= 30,
         "retrieval_recall_ok": (len(retrieval_pass) / len(retrieval_cases)) >= thresholds["retrieval_recall_min"]
         if retrieval_cases
         else False,
-        "fallback_rate_ok": fallback_rate <= thresholds["fallback_rate_max"],
     }
     failures = [case for case in cases if case.get("gate", True) and not case["passed"]]
     aggregate_failures = [name for name, ok in aggregate_checks.items() if not ok]
@@ -505,7 +495,7 @@ async def run_golden_replay_suite(thresholds: Dict[str, Any] | None = None) -> D
         "success": not failures and not aggregate_failures,
         "num_cases": len(cases),
         "thresholds": thresholds,
-        "aggregate": {"checks": aggregate_checks, "fallback_rate": fallback_rate},
+        "aggregate": {"checks": aggregate_checks},
         "failures": failures,
         "aggregate_failures": aggregate_failures,
         "evidence_baseline": _evidence_baseline(cases),

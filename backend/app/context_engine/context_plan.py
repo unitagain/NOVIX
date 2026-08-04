@@ -111,9 +111,15 @@ class ContextPlanV2:
 
         accounting = dict(token_accounting or {})
         estimated = int(accounting.get("upper_bound_tokens") or accounting.get("tokens") or 0)
+        point_estimate = int(accounting.get("tokens") or accounting.get("upper_bound_tokens") or 0)
         input_budget = int(self.budget.get("input_tokens") or 0)
-        if input_budget > 0 and estimated > input_budget:
-            raise ValueError(f"context_budget_exceeded:{estimated}>{input_budget}")
+        # 硬上限=模型真实上下文窗口；input_budget 仅是「给输出留位」的软目标。
+        # 硬失败只在点估计真超窗口时触发；estimated（1.35x 悲观上界）仅用于 trace 记录与软目标，
+        # 不用于拦截整轮（否则小窗口模型下 payload 远低于窗口也会假性 context_budget_exceeded）。
+        context_limit = int(self.budget.get("context_limit_tokens") or 0)
+        hard_ceiling = max(context_limit, input_budget)
+        if hard_ceiling > 0 and point_estimate > hard_ceiling:
+            raise ValueError(f"context_budget_exceeded:{point_estimate}>{hard_ceiling}")
 
         requested_tools = _tool_names(tools)
         disallowed = sorted(set(requested_tools) - self.allowed_tool_names)
@@ -208,7 +214,6 @@ def build_context_plan_v2(
     provider_profile: Optional[Dict[str, Any]] = None,
     target_word_count: int = 3000,
     auto_execute_plan: bool = False,
-    fallback_reason: str = "",
     context_epoch: int = 0,
 ) -> ContextPlanV2:
     profile = dict(provider_profile or {})
@@ -222,8 +227,6 @@ def build_context_plan_v2(
     loadout = tool_loadout_for_route(route_path, auto_execute_plan=auto_execute_plan)
     snapshot: List[Dict[str, Any]] = []
     degradation: List[Dict[str, str]] = []
-    if fallback_reason:
-        degradation.append({"type": "route", "status": "fallback", "reason": fallback_reason})
     sources = _sources_for_route(
         route_path,
         has_draft=bool(chapter_id),
@@ -394,6 +397,26 @@ def _sources_for_route(
                     selection_reason="provider_tool_contract",
                     required=True,
                 ),
+                SourceDescriptor.planned(
+                    source_id="input.selection",
+                    asset_type="selection",
+                    selection_reason="editor_selection_for_writer_context",
+                ),
+                SourceDescriptor.planned(
+                    source_id="session.history",
+                    asset_type="session_history",
+                    selection_reason="recent_author_decisions_for_writer_context",
+                ),
+                SourceDescriptor.planned(
+                    source_id="project.outline",
+                    asset_type="outline",
+                    selection_reason="author_plan_for_writer_context",
+                ),
+                SourceDescriptor.planned(
+                    source_id="interaction.clarification",
+                    asset_type="clarification_request",
+                    selection_reason="writer_tool_input_request",
+                ),
                 SourceDescriptor.planned(source_id="jit.cards", asset_type="cards", selection_reason="tool_jit"),
                 SourceDescriptor.planned(source_id="jit.canon", asset_type="canon", selection_reason="tool_jit"),
                 SourceDescriptor.planned(
@@ -423,46 +446,6 @@ def _sources_for_route(
                 ),
                 SourceDescriptor.planned(
                     source_id="plan.volume_order", asset_type="volume_order", selection_reason="chapter_grounding"
-                ),
-            ]
-        )
-    elif route_path == "fallback_workflow":
-        sources.extend(
-            [
-                SourceDescriptor.planned(
-                    source_id="fallback.scene_brief",
-                    asset_type="scene_brief",
-                    selection_reason="writing_context",
-                    required=True,
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.summaries", asset_type="summaries", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.cards", asset_type="cards", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.canon", asset_type="canon", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.memory", asset_type="memory", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.volume_order", asset_type="volume_order", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.chapter_goal", asset_type="chapter_goal", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.prose", asset_type="prose", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.evidence", asset_type="evidence", selection_reason="writing_context"
-                ),
-                SourceDescriptor.planned(
-                    source_id="fallback.assembled",
-                    asset_type="assembled_context",
-                    selection_reason="agent_message_projection",
                 ),
             ]
         )

@@ -44,7 +44,6 @@ class ContextPlanningService:
         route_path: str,
         target_word_count: int = 3000,
         auto_execute_plan: bool = False,
-        fallback_reason: str = "",
         agent_name: str = "writer",
     ) -> ContextPlanV2:
         """Build and activate the executable plan before any provider request."""
@@ -60,7 +59,6 @@ class ContextPlanningService:
             provider_profile=profile,
             target_word_count=target_word_count,
             auto_execute_plan=auto_execute_plan,
-            fallback_reason=fallback_reason,
             context_epoch=scope.context_epoch,
         )
         scope.activate_plan(plan)
@@ -86,13 +84,12 @@ class ContextPlanningService:
         intent: str,
         target_word_count: int,
         auto_execute_plan: bool = False,
-        fallback_reason: str = "",
         trace_start_index: int = 0,
         trace_started_at: float = 0.0,
     ) -> Dict[str, Any]:
         """Build, enrich, persist, and attach a ContextPlan."""
 
-        route = result.get("route_contract") or route_contract(intent, fallback=bool(result.get("fallback")))
+        route = result.get("route_contract") or route_contract(intent)
         scope = current_turn_scope()
         active_v2 = scope.active_plan if scope is not None else None
         task_id = scope.turn_id if scope is not None else f"chat_{int(time.time() * 1000)}"
@@ -101,12 +98,11 @@ class ContextPlanningService:
             project_id=project_id,
             chapter_id=chapter,
             intent=intent,
-            route_path=str(route.get("path") or "fallback_workflow"),
+            route_path=str(route.get("path") or "agentic_writer"),
             project_root=self.draft_storage.get_project_path(project_id),
             provider_profile=self._provider_profile(),
             target_word_count=target_word_count,
             auto_execute_plan=auto_execute_plan,
-            fallback_reason=fallback_reason,
             context_epoch=scope.context_epoch if scope is not None else 0,
         )
 
@@ -141,13 +137,28 @@ class ContextPlanningService:
             payload["ranking"]["actual"] = ranking_trace
         payload["actual"] = actual_metrics
         payload["turn_trace"] = scope.turn_trace.to_dict() if scope is not None and scope.turn_trace else {}
+        clarification = result.get("clarification")
+        if isinstance(clarification, dict):
+            clarification_questions = clarification.get("questions")
+            if not isinstance(clarification_questions, list):
+                clarification_questions = result.get("questions")
+            if not isinstance(clarification_questions, list):
+                clarification_questions = []
+            payload["clarification"] = {
+                "decision": "ask" if clarification_questions else "proceed",
+                "reason": str(clarification.get("reason") or "")[:240],
+                "question_count": min(3, len(clarification_questions)),
+                "tool": "ask_clarification",
+            }
         payload["reconciliation"] = {
             "sources": (
                 scope.source_registry.reconcile()
                 if scope is not None and scope.source_registry is not None
                 else {}
             ),
-            "requests": list(scope.model_requests) if scope is not None else [],
+            "requests": (
+                scope.turn_trace.to_dict().get("model_requests", []) if scope is not None and scope.turn_trace else []
+            ),
         }
         payload["trace_ref"] = trace_ref
         try:

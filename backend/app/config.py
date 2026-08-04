@@ -115,15 +115,13 @@ class Settings(BaseSettings):
     custom_base_url: str = ""
     custom_model_name: str = ""
 
-    openai_model: str = "gpt-4o"
-    anthropic_model: str = "claude-3-5-sonnet-20241022"
-    deepseek_model: str = "deepseek-chat"
+    openai_model: str = "gpt-5.6-terra"
+    anthropic_model: str = "claude-sonnet-5"
+    deepseek_model: str = "deepseek-v4-flash"
     gemini_model: str = "gemini-2.5-flash"
 
     wenshape_llm_provider: str = ""
-    wenshape_agent_archivist_provider: str = ""
     wenshape_agent_writer_provider: str = ""
-    wenshape_agent_editor_provider: str = ""
 
     data_dir: str = _resolve_data_dir()
 
@@ -182,7 +180,6 @@ def _fallback_config() -> Dict[str, Any]:
             "providers": {},
         },
         "session": {
-            "max_iterations": 5,
             "timeout_seconds": 600,
         },
         "context_budget": {

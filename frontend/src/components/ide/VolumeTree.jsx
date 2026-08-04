@@ -162,9 +162,8 @@ export default function VolumeTree({ projectId, onChapterSelect, selectedChapter
 
     try {
       await draftsAPI.deleteChapter(projectId, chapterId);
-      if (isActive) {
-        dispatch({ type: 'SET_ACTIVE_DOCUMENT', payload: null });
-      }
+      // 章节已不存在：同步关掉它的标签，否则会留下点开即报错的死标签。
+      dispatch({ type: 'CLOSE_TAB', payload: `chapter:${chapterId}` });
       await mutate(`/drafts/${projectId}/chapters`);
       await mutate(`/drafts/${projectId}/summaries`);
     } catch (e) {

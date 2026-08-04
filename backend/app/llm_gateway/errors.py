@@ -240,6 +240,10 @@ def classify_error(error: Exception) -> Tuple[bool, str]:
     if structured.status is not None or structured.provider_code or structured.category != "provider":
         return structured.retryable, structured.category
     error_str = str(error).lower()
+
+    # 熔断器状态是瞬时可恢复状态：允许退避重试，避免把内部保护机制暴露为永久失败。
+    if "provider_circuit_open" in error_str or "provider_circuit_half_open_busy" in error_str:
+        return True, "provider_circuit"
     error_type = type(error).__name__.lower()
 
     # Check exception type first

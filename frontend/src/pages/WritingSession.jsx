@@ -6,17 +6,16 @@
  * License: PolyForm Noncommercial License 1.0.0
  */
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import useSWR from 'swr';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
+import useSWR, { mutate as mutateSWR } from 'swr';
 import { useParams } from 'react-router-dom';
-import { sessionAPI, draftsAPI, cardsAPI, projectsAPI, volumesAPI, configAPI } from '../api';
+import { sessionAPI, draftsAPI, cardsAPI, projectsAPI, volumesAPI, configAPI, memoryPackAPI } from '../api';
 import { Button } from '../components/ui/core';
 import { ChapterCreateDialog } from '../components/project/ChapterCreateDialog';
 import { IDELayout } from '../components/ide/IDELayout';
 import { IDEProvider } from '../context/IDEContext';
 import { useIDE } from '../context/IDEContext';
 import AnalysisReviewDialog from '../components/writing/AnalysisReviewDialog';
-import PreWritingQuestionsDialog from '../components/PreWritingQuestionsDialog';
 import WritingSessionAgentPanel from '../components/writing/WritingSessionAgentPanel';
 import WritingSessionMainContent from '../components/writing/WritingSessionMainContent';
 import { buildLineDiff, applyDiffOpsWithDecisions } from '../lib/diffUtils';
@@ -24,14 +23,30 @@ import SaveMenu from '../components/writing/SaveMenu';
 import logger from '../utils/logger';
 import { extractErrorDetail } from '../utils/extractError';
 import { useLocale } from '../i18n';
-import {
-  getStreamingPreference,
-  getDialogMaxCharsPreference,
-  getDeepThinkingPreference,
-  setDeepThinkingPreference,
-} from '../components/ide/TitleBar';
+import { getDialogMaxCharsPreference } from '../components/ide/TitleBar';
 import { useWritingSessionRealtime } from '../hooks/useWritingSessionRealtime';
-import { normalizeChatTurnResponse, terminalStateMessage } from '../features/agent/model/agentProtocol';
+import {
+  normalizeChatTurnResponse,
+  shouldRecoverChangedTurn,
+  terminalStateMessage,
+} from '../features/agent/model/agentProtocol';
+import { mergeWritingMemoryStatus, shouldShowWritingMemory } from '../features/agent/model/writingMemory';
+import { appendAgentProgressEvent } from '../lib/agentProgress';
+import { createLatestTaskQueue } from '../lib/latestTaskQueue';
+import { documentOf, tabKeyOf } from '../lib/editorTabs';
+import {
+  canSendKeepaliveDraft,
+  clearDraftRecovery,
+  readDraftRecovery,
+  resolveDraftRecovery,
+  writeDraftRecovery,
+} from '../lib/draftRecovery';
+import {
+  canAutosaveLoadedChapter,
+  lastChapterStorageKey,
+  resolveRestoredChapter,
+  shouldApplyLoadedChapter,
+} from '../lib/chapterHydration';
 import {
   fetchChapterContent,
   countWords,
@@ -39,7 +54,6 @@ import {
   normalizeStars,
   parseListInput,
   formatListInput,
-  stabilizeRevisionTail,
 } from '../utils/writingSessionHelpers';
 
 /**
@@ -87,20 +101,21 @@ function WritingSessionContent() {
       // 项目真正切换了：清理所有写作会话状态
       setDiffReview(null);
       setDiffDecisions({});
-      setCurrentDraft(null);
       setManualContent('');
       setManualContentByChapter({});
+      setChapters([]);
       setMessagesByChapter({});
       setProgressEventsByChapter({});
-      setDraftV1(null);
-      setSceneBrief(null);
-      setFeedback('');
       setChapterInfo({ chapter: null, chapter_title: null, content: null });
       setStatus('idle');
       setSelectionInfo({ start: 0, end: 0, text: '' });
       setAttachedSelection(null);
       setEditScope('document');
-      setAiLockedChapter(null);
+      setWritingMemoryTurn(null);
+      setCanonTurnState(null);
+      // 标签是会话内资产：换项目等于换工作区，连同视图位置一起丢弃。
+      dispatch({ type: 'CLOSE_ALL_TABS' });
+      viewStateByChapterRef.current = {};
       if (streamingRef.current?.timer) {
         streamingRef.current.timer();
       }
@@ -108,7 +123,7 @@ function WritingSessionContent() {
       setStreamingState({ active: false, progress: 0, current: 0, total: 0 });
     }
     prevProjectIdRef.current = projectId;
-  }, [projectId]);
+  }, [dispatch, projectId]);
 
   // UI State
   const [showChapterDialog, setShowChapterDialog] = useState(false);
@@ -122,25 +137,18 @@ function WritingSessionContent() {
   const [analysisSaving, setAnalysisSaving] = useState(false);
 
   // Proposal State
-  const [, setProposals] = useState([]);
-
   // Logic State
   const [status, setStatus] = useState('idle'); // idle, starting, editing, waiting_feedback, completed
   const [messagesByChapter, setMessagesByChapter] = useState({});
   const [progressEventsByChapter, setProgressEventsByChapter] = useState({});
-  const [, setCurrentDraft] = useState(null);
   const [manualContent, setManualContent] = useState(''); // Textarea content
   const [manualContentByChapter, setManualContentByChapter] = useState({});
   const [selectionInfo, setSelectionInfo] = useState({ start: 0, end: 0, text: '' });
   const [attachedSelection, setAttachedSelection] = useState(null); // { start, end, text }
   const [editScope, setEditScope] = useState('document'); // document | selection
-  const [, setSceneBrief] = useState(null);
-  const [, setDraftV1] = useState(null);
-  const [feedback, setFeedback] = useState('');
   const [dialogMaxChars, setDialogMaxChars] = useState(getDialogMaxCharsPreference);
   const [diffReview, setDiffReview] = useState(null);
   const [diffDecisions, setDiffDecisions] = useState({});
-  const lastFeedbackRef = useRef('');
   const lastGeneratedByChapterRef = useRef({});
   const streamBufferByChapterRef = useRef({});
   const streamTextByChapterRef = useRef({});
@@ -149,10 +157,31 @@ function WritingSessionContent() {
   const serverStreamUsedRef = useRef(false);
   const streamingChapterKeyRef = useRef(null);
   const streamOriginalByChapterRef = useRef({}); // 流式前各章原文快照，用于结束时生成 diff 提议
+  const autosaveTimerRef = useRef(null);
+  const autosaveRetryTimerRef = useRef(null);
+  const autosaveLastPayloadRef = useRef({ chapter: null, content: null, title: null });
+  const latestAutosavePayloadRef = useRef(null);
+  const autosaveWorkerRef = useRef(null);
+  const autosaveQueueRef = useRef(null);
+  const canonSyncPendingRef = useRef(new Map());
+  const canonSyncInFlightRef = useRef(new Map());
+  const backupRequiredRef = useRef(new Set());
 
+  // 编辑器视图位置记忆：{ [chapterKey]: { scrollTop, selectionStart, selectionEnd } }。
+  // 与 manualContentByChapter 同生命周期（会话内、随标签关闭回收），刻意不落盘。
+  const editorRef = useRef(null);
+  const viewStateByChapterRef = useRef({});
+  // 当前 textarea 已经按哪一章摆好位置；未摆位前不得回写位置，否则会把刚挂载的 0 当成用户位置。
+  const restoredKeyRef = useRef(null);
+  const [viewRestoreKey, setViewRestoreKey] = useState(null);
+
+  // Writer 反问：内联渲染在对话流中（U5），不再使用全屏 modal。
+  // showPreWriteDialog 表示「当前有一张待回答的反问卡」；resolved 后转为只读摘要保留在历史里。
   const [showPreWriteDialog, setShowPreWriteDialog] = useState(false);
   const [preWriteQuestions, setPreWriteQuestions] = useState([]);
-  const [pendingStartPayload, setPendingStartPayload] = useState(null);
+  const [clarificationMeta, setClarificationMeta] = useState(null);
+  const [clarificationResolved, setClarificationResolved] = useState(null);
+  const [pendingChatPrompt, setPendingChatPrompt] = useState(null);
 
   useEffect(() => {
     const onDialogMaxCharsChanged = (event) => {
@@ -173,16 +202,13 @@ function WritingSessionContent() {
   }, []);
 
   const manualContentByChapterRef = useRef(manualContentByChapter);
+  const manualContentRef = useRef(manualContent);
   useEffect(() => {
     manualContentByChapterRef.current = manualContentByChapter;
   }, [manualContentByChapter]);
-
-  // AI 锁定章：写作/编辑进行中时，右侧面板锁死在该章节（中央可切换查看/手改其他章节）
-  const [aiLockedChapter, setAiLockedChapter] = useState(null);
-  const aiLockedChapterRef = useRef(aiLockedChapter);
   useEffect(() => {
-    aiLockedChapterRef.current = aiLockedChapter;
-  }, [aiLockedChapter]);
+    manualContentRef.current = manualContent;
+  }, [manualContent]);
 
   // 轻提示（不打断、不强跳转）
   const [notice, setNotice] = useState(null);
@@ -207,12 +233,18 @@ function WritingSessionContent() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const streamingRef = useRef(null);
+  const chatRecoveryTimerRef = useRef(null);
   const [streamingState, setStreamingState] = useState({
     active: false,
     progress: 0,
     current: 0,
     total: 0,
   });
+  useEffect(() => {
+    return () => {
+      if (chatRecoveryTimerRef.current) window.clearTimeout(chatRecoveryTimerRef.current);
+    };
+  }, []);
 
   // Trace Events for AgentTimeline
   const [traceEvents, setTraceEvents] = useState([]);
@@ -229,39 +261,34 @@ function WritingSessionContent() {
   const activeChapterKey = chapterInfo.chapter ? String(chapterInfo.chapter) : NO_CHAPTER_KEY;
 
   const activeChapterKeyRef = useRef(activeChapterKey);
+  const chapterInfoRef = useRef(chapterInfo);
+  const chapterLoadStateRef = useRef({ chapter: NO_CHAPTER_KEY, ready: false });
+  const unsavedChangesRef = useRef(state.unsavedChanges);
   useEffect(() => {
     activeChapterKeyRef.current = activeChapterKey;
   }, [activeChapterKey]);
-
-  // Draft version state
-  const [currentDraftVersion, setCurrentDraftVersion] = useState('v1');
+  useEffect(() => {
+    chapterInfoRef.current = chapterInfo;
+  }, [chapterInfo]);
+  useEffect(() => {
+    unsavedChangesRef.current = state.unsavedChanges;
+  }, [state.unsavedChanges]);
 
   // Agent mode (for AgentStatusPanel)
   const [agentMode, setAgentMode] = useState('create'); // 'create' | 'edit'
-  const [contextDebugByChapter, setContextDebugByChapter] = useState({});
 
   const agentBusy =
-    Boolean(aiLockedChapter) &&
-    (Boolean(diffReview) ||
-      showPreWriteDialog ||
-      status === 'starting' ||
-      status === 'waiting_user_input' ||
-      isGenerating ||
-      streamingState.active);
-
-  const agentChapterKey = agentBusy ? String(aiLockedChapter) : activeChapterKey;
+    Boolean(diffReview) ||
+    status === 'starting' ||
+    status === 'waiting_user_input' ||
+    isGenerating ||
+    streamingState.active;
 
   const isStreamingForActiveChapter = streamingState.active && streamingChapterKeyRef.current === activeChapterKey;
 
   const isDiffReviewForActiveChapter = Boolean(diffReview) && String(diffReview?.chapterKey || '') === activeChapterKey;
 
-  const lockedOnActiveChapter = agentBusy && String(aiLockedChapter || '') === activeChapterKey;
-
-  const canUseWriter =
-    countWords(
-      agentBusy ? (manualContentByChapter[String(aiLockedChapter || '')] ?? '') : manualContent,
-      writingLanguage,
-    ) === 0;
+  const canUseWriter = countWords(manualContent, writingLanguage) === 0;
 
   // 对话以「项目」为单位（而非章节）：整个项目一份长青对话，AI 的撰写/编辑动作仍作用于当前激活章节。
   const projectChatKey = String(projectId || '');
@@ -270,7 +297,6 @@ function WritingSessionContent() {
     () => progressEventsByChapter[projectChatKey] || [],
     [progressEventsByChapter, projectChatKey],
   );
-  const contextDebug = contextDebugByChapter[projectChatKey] || null;
 
   // 深度思考开关：仅当「写作角色」绑定的模型支持参数级 thinking 切换时，对话栏才显示按钮（能力门控）。
   const { data: llmProfilesData } = useSWR('llm-profiles', () => configAPI.getProfiles().then((r) => r.data), {
@@ -282,22 +308,116 @@ function WritingSessionContent() {
     { revalidateOnFocus: false },
   );
   const writerProfileId = agentAssignmentsData?.writer;
-  const writerSupportsThinking = Boolean(
-    (Array.isArray(llmProfilesData) ? llmProfilesData.find((p) => p?.id === writerProfileId) : null)?.supports_thinking,
+  const writerProfile = Array.isArray(llmProfilesData)
+    ? llmProfilesData.find((profile) => profile?.id === writerProfileId)
+    : null;
+  const reasoningCapability = writerProfile?.reasoning_capability || null;
+  const agentMention = writerProfile?.provider && writerProfile.provider !== 'custom' ? writerProfile.provider : 'Agent';
+  const reasoningCanDisable = reasoningCapability?.can_disable !== false;
+  const reasoningLevels = useMemo(
+    () => {
+      const raw = Array.isArray(reasoningCapability?.levels) ? reasoningCapability.levels : [];
+      const explicit = raw.filter((level) => level !== 'auto');
+      if (reasoningCanDisable && !explicit.includes('off')) explicit.unshift('off');
+      return explicit.length ? explicit : ['off'];
+    },
+    [reasoningCanDisable, reasoningCapability?.levels],
   );
-  const [deepThinking, setDeepThinking] = useState(getDeepThinkingPreference);
-  const toggleDeepThinking = useCallback(() => {
-    setDeepThinking((v) => {
-      const next = !v;
-      setDeepThinkingPreference(next);
-      return next;
-    });
-  }, []);
+  const [reasoningLevel, setReasoningLevel] = useState('off');
+  useEffect(() => {
+    const storageKey = `wenshape_reasoning_level_${writerProfileId || 'default'}`;
+    const capabilityDefault = String(reasoningCapability?.default_level || 'high');
+    const defaultLevel = reasoningCanDisable
+      ? 'off'
+      : reasoningLevels.includes(capabilityDefault)
+        ? capabilityDefault
+        : reasoningLevels[0];
+    let stored = defaultLevel;
+    try {
+      stored = window.localStorage.getItem(storageKey) || defaultLevel;
+    } catch {
+      stored = defaultLevel;
+    }
+    setReasoningLevel(reasoningLevels.includes(stored) ? stored : defaultLevel);
+  }, [writerProfileId, reasoningCanDisable, reasoningCapability?.default_level, reasoningLevels]);
+  const handleReasoningLevelChange = useCallback(
+    (level) => {
+      if (!reasoningLevels.includes(level)) return;
+      setReasoningLevel(level);
+      try {
+        window.localStorage.setItem(`wenshape_reasoning_level_${writerProfileId || 'default'}`, level);
+      } catch {
+        /* ignore storage failures */
+      }
+    },
+    [reasoningLevels, writerProfileId],
+  );
   // 待执行的 plan（仿 Claude Code：生成后展示步骤 + 等用户「执行」批准；执行走串行编排器）。
   const [pendingPlan, setPendingPlan] = useState(null);
   const [planExecuting, setPlanExecuting] = useState(false);
-  const [pendingApproval, setPendingApproval] = useState(null);
+
+  // 计划执行进度：后端 plan_step 事件已带 step_id（PR-1 放行白名单），取最近一条即当前步。
+  const planActiveStepId = useMemo(() => {
+    if (!planExecuting) return null;
+    for (let i = progressEvents.length - 1; i >= 0; i -= 1) {
+      const event = progressEvents[i];
+      if (event?.stage === 'plan_step' && event.step_id !== undefined) return event.step_id;
+    }
+    return null;
+  }, [planExecuting, progressEvents]);
+
+  // Writer 反问内联卡：待回答时可交互，回答/跳过后转为只读摘要留在对话历史中。
+  const clarification = useMemo(() => {
+    if (!preWriteQuestions.length) return null;
+    if (!showPreWriteDialog && !clarificationResolved) return null;
+    return {
+      questions: preWriteQuestions,
+      reason: clarificationMeta?.reason || '',
+      resolved: showPreWriteDialog ? null : clarificationResolved,
+    };
+  }, [showPreWriteDialog, clarificationResolved, preWriteQuestions, clarificationMeta]);
+
   const [agentTurnMeta, setAgentTurnMeta] = useState(null);
+  const [writingMemoryTurn, setWritingMemoryTurn] = useState(null);
+  const [canonTurnState, setCanonTurnState] = useState(null);
+  const [conversations, setConversations] = useState([]);
+  const [activeConversationId, setActiveConversationId] = useState('');
+
+  const addMessage = useCallback(
+    (type, content) => {
+      const key = projectChatKey;
+      if (!key) {
+        return;
+      }
+      setMessagesByChapter((prev) => {
+        const next = { ...(prev || {}) };
+        const existing = Array.isArray(next[key]) ? next[key] : [];
+        next[key] = [...existing, { type, content, time: new Date() }].slice(-200);
+        return next;
+      });
+      if (type === 'user' && activeConversationId) {
+        setConversations((prev) =>
+          prev.map((item) =>
+            item.id === activeConversationId && item.title === '新对话'
+              ? { ...item, title: String(content || '').replace(/\s+/g, ' ').trim().slice(0, 32) || item.title }
+              : item,
+          ),
+        );
+      }
+      // Git-Native 持久化：追加到后端会话历史（fire-and-forget，失败不影响交互；localStorage 仍作离线缓存）。
+      const role = type === 'user' || type === 'assistant' || type === 'system' ? type : 'system';
+      sessionAPI
+        .appendHistory(key, {
+          role,
+          content: String(content ?? ''),
+          type: role === type ? undefined : type,
+          ts: Date.now(),
+          conversation_id: activeConversationId || undefined,
+        })
+        .catch(() => {});
+    },
+    [projectChatKey, activeConversationId],
+  );
 
   // 本地长存 + Git-Native 持久化：开项目时优先从后端加载对话历史（扛刷新/重启/清缓存/换机），
   // 失败或空则回退 localStorage 缓存。progressEvents（过程轨迹）仍走本地缓存。
@@ -308,43 +428,47 @@ function WritingSessionContent() {
 
     const fromLocal = () => {
       try {
-        const raw = window.localStorage.getItem(`wenshape_chat_v1_${key}`);
+        const raw = window.localStorage.getItem(`wenshape_chat_v2_${key}`);
         if (raw) {
           const parsed = JSON.parse(raw);
           const msgs = Array.isArray(parsed?.messages)
             ? parsed.messages.map((m) => ({ ...m, time: m?.time ? new Date(m.time) : new Date() }))
             : [];
           // 过滤掉旧的连接状态事件（已废弃的「连接中断/重连」提示，避免 localStorage 残留再显示）。
-          const evs = Array.isArray(parsed?.progressEvents)
-            ? parsed.progressEvents.filter((e) => e?.stage !== 'connection')
-            : [];
-          return { msgs, evs };
+          return { msgs };
         }
       } catch {
         /* 忽略损坏的本地缓存 */
       }
-      return { msgs: [], evs: [] };
+        return { msgs: [] };
     };
 
     const hydrate = async () => {
       let serverMsgs = null;
       try {
-        const resp = await sessionAPI.getHistory(key);
-        const list = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
-        if (list.length) {
-          serverMsgs = list.map((m) => ({
-            type: m?.type === 'error' ? 'error' : m?.role || 'system',
-            content: String(m?.content ?? ''),
-            time: m?.ts ? new Date(m.ts) : new Date(),
-          }));
+        const conversationsResp = await sessionAPI.listConversations(key);
+        const conversationList = Array.isArray(conversationsResp?.data?.conversations)
+          ? conversationsResp.data.conversations
+          : [];
+        const activeId = conversationList.find((item) => item.active)?.id || '';
+        if (!cancelled) {
+          setConversations(conversationList);
+          setActiveConversationId(activeId);
         }
+        const resp = await sessionAPI.getHistory(key, 0, activeId);
+        const list = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
+        serverMsgs = list.map((m) => ({
+          type: m?.type === 'error' ? 'error' : m?.role || 'system',
+          content: String(m?.content ?? ''),
+          time: m?.ts ? new Date(m.ts) : new Date(),
+        }));
       } catch {
         /* 后端不可用 → 回退本地缓存 */
       }
       if (cancelled) return;
       const local = fromLocal();
       setMessagesByChapter((prev) => ({ ...(prev || {}), [key]: serverMsgs !== null ? serverMsgs : local.msgs }));
-      setProgressEventsByChapter((prev) => ({ ...(prev || {}), [key]: local.evs }));
+      setProgressEventsByChapter((prev) => ({ ...(prev || {}), [key]: [] }));
       chatHydratedRef.current = key;
     };
 
@@ -358,11 +482,11 @@ function WritingSessionContent() {
     if (!projectId) return;
     if (chatHydratedRef.current !== projectChatKey) return; // 等水合完成再写，避免覆盖
     try {
-      window.localStorage.setItem(`wenshape_chat_v1_${projectChatKey}`, JSON.stringify({ messages, progressEvents }));
+      window.localStorage.setItem(`wenshape_chat_v2_${projectChatKey}`, JSON.stringify({ messages }));
     } catch {
       /* 忽略配额/序列化异常 */
     }
-  }, [messages, progressEvents, projectId, projectChatKey]);
+  }, [messages, projectId, projectChatKey]);
 
 
   useEffect(() => {
@@ -383,12 +507,6 @@ function WritingSessionContent() {
     if (editScope === 'document') setEditScope('selection');
   }, [agentMode, attachedSelection, editScope]);
 
-  useEffect(() => {
-    if (!aiLockedChapter) return;
-    if (agentBusy) return;
-    setAiLockedChapter(null);
-  }, [aiLockedChapter, agentBusy]);
-
   // Card State
   const [activeCard, setActiveCard] = useState(null);
   const [cardForm, setCardForm] = useState({
@@ -400,7 +518,11 @@ function WritingSessionContent() {
   });
 
   // SWR for Chapter Content
-  const { data: loadedContent, mutate: mutateChapter } = useSWR(
+  const {
+    data: loadedContent,
+    error: chapterLoadError,
+    isLoading: chapterLoading,
+  } = useSWR(
     chapterInfo.chapter ? ['chapter', projectId, chapterInfo.chapter] : null,
     fetchChapterContent,
     {
@@ -417,16 +539,224 @@ function WritingSessionContent() {
     { revalidateOnFocus: false },
   );
 
+  const memoryPackChapter =
+    writingMemoryTurn?.chapter || diffReview?.chapterKey || streamingChapterKeyRef.current || chapterInfo.chapter;
+  const {
+    data: memoryPackStatus,
+    isLoading: memoryPackLoading,
+    mutate: mutateMemoryPack,
+  } = useSWR(
+    projectId && memoryPackChapter ? ['memory-pack', projectId, String(memoryPackChapter)] : null,
+    () => memoryPackAPI.getStatus(projectId, String(memoryPackChapter)).then((response) => response.data),
+    { revalidateOnFocus: false, refreshInterval: agentBusy ? 1000 : 5000 },
+  );
+
+  const applyAcceptedTurnEffect = useCallback(
+    async (targetProjectId, chapter) => {
+      const key = `${targetProjectId}:${chapter}`;
+      const turnEffect = canonSyncPendingRef.current.get(key);
+      if (!turnEffect) return { success: true, skipped: true };
+      const existing = canonSyncInFlightRef.current.get(key);
+      if (existing) return existing;
+
+      setCanonTurnState({ chapter, effect: turnEffect, status: 'syncing', result: null });
+
+      const request = sessionAPI
+        .applyTurnEffect(targetProjectId, {
+          chapter,
+          language: requestLanguage,
+          turn_effect: turnEffect,
+        })
+        .then(async (response) => {
+          const result = response?.data || {};
+          if (!result.success) {
+            setCanonTurnState({ chapter, effect: turnEffect, status: 'failed', result });
+            pushNotice(
+              t('writingSession.factsAutoSyncFailed') +
+                (result.reason ? ` ${String(result.reason)}` : ''),
+            );
+            return result;
+          }
+
+          canonSyncPendingRef.current.delete(key);
+          const snapshot = readDraftRecovery(window.localStorage, targetProjectId, chapter);
+          if (snapshot) {
+            const last = autosaveLastPayloadRef.current || {};
+            if (
+              String(last.chapter || '') === String(chapter) &&
+              String(last.content ?? '') === String(snapshot.content ?? '')
+            ) {
+              clearDraftRecovery(window.localStorage, targetProjectId, chapter);
+            } else {
+              writeDraftRecovery(window.localStorage, {
+                ...snapshot,
+                needsCanonSync: false,
+                turnEffect: null,
+              });
+            }
+          }
+          await mutateSWR([targetProjectId, 'facts-tree']);
+          setCanonTurnState({
+            chapter,
+            effect: turnEffect,
+            status: result.applied ? 'applied' : 'skipped',
+            result,
+          });
+          pushNotice(t(result.applied ? 'writingSession.factsAutoSynced' : 'writingSession.factsAutoSkipped'));
+          return result;
+        })
+        .catch((error) => {
+          setCanonTurnState({ chapter, effect: turnEffect, status: 'failed', result: null });
+          pushNotice(t('writingSession.factsAutoSyncFailed') + extractErrorDetail(error));
+          return { success: false, error };
+        })
+        .finally(() => {
+          canonSyncInFlightRef.current.delete(key);
+        });
+
+      canonSyncInFlightRef.current.set(key, request);
+      return request;
+    },
+    [pushNotice, requestLanguage, t],
+  );
+
+  const saveAutosaveTask = useCallback(
+    async (task) => {
+      const payload = { content: task.content };
+      if (task.title) payload.title = task.title;
+      const response = task.createBackup
+        ? await draftsAPI.updateContent(task.projectId, task.chapter, payload)
+        : await draftsAPI.autosaveContent(task.projectId, task.chapter, payload);
+      if (!response?.data?.success) throw new Error('autosave_failed');
+
+      autosaveLastPayloadRef.current = {
+        chapter: task.chapter,
+        content: task.content,
+        title: task.title || null,
+      };
+      backupRequiredRef.current.delete(`${task.projectId}:${task.chapter}`);
+      await mutateSWR(['chapter', task.projectId, task.chapter], task.content, false);
+
+      const currentSnapshot = readDraftRecovery(window.localStorage, task.projectId, task.chapter);
+      const canonKey = `${task.projectId}:${task.chapter}`;
+      const pendingTurnEffect = canonSyncPendingRef.current.get(canonKey);
+      if (pendingTurnEffect) {
+        writeDraftRecovery(window.localStorage, {
+          ...(currentSnapshot || {}),
+          projectId: task.projectId,
+          chapter: task.chapter,
+          content: currentSnapshot?.content ?? task.content,
+          title: currentSnapshot?.title ?? task.title,
+          savedContent: task.content,
+          needsCanonSync: true,
+          turnEffect: pendingTurnEffect,
+        });
+        void applyAcceptedTurnEffect(task.projectId, task.chapter);
+      } else if (currentSnapshot && String(currentSnapshot.content ?? '') === String(task.content ?? '')) {
+        clearDraftRecovery(window.localStorage, task.projectId, task.chapter);
+      } else if (currentSnapshot) {
+        writeDraftRecovery(window.localStorage, {
+          ...currentSnapshot,
+          savedContent: task.content,
+          needsCanonSync: false,
+          turnEffect: null,
+        });
+      }
+
+      const isCurrent =
+        String(task.projectId) === String(projectId) &&
+        activeChapterKeyRef.current === String(task.chapter) &&
+        String(manualContentRef.current ?? '') === String(task.content ?? '');
+      if (isCurrent) dispatch({ type: 'SET_AUTOSAVED' });
+      if (
+        latestAutosavePayloadRef.current &&
+        String(latestAutosavePayloadRef.current.projectId) === String(task.projectId) &&
+        String(latestAutosavePayloadRef.current.chapter) === String(task.chapter) &&
+        String(latestAutosavePayloadRef.current.content ?? '') === String(task.content ?? '')
+      ) {
+        latestAutosavePayloadRef.current = null;
+      }
+      return response.data;
+    },
+    [applyAcceptedTurnEffect, dispatch, projectId],
+  );
+
+  autosaveWorkerRef.current = saveAutosaveTask;
+  if (!autosaveQueueRef.current) {
+    autosaveQueueRef.current = createLatestTaskQueue((task) => autosaveWorkerRef.current(task));
+  }
+
+  const flushAutosaveQueue = useCallback(async () => {
+    try {
+      await autosaveQueueRef.current.flush();
+      return true;
+    } catch (error) {
+      dispatch({ type: 'SET_UNSAVED' });
+      pushNotice(t('writingSession.autoSaveFailed') + extractErrorDetail(error));
+      if (autosaveRetryTimerRef.current) window.clearTimeout(autosaveRetryTimerRef.current);
+      autosaveRetryTimerRef.current = window.setTimeout(() => {
+        autosaveRetryTimerRef.current = null;
+        void flushAutosaveQueue();
+      }, 2500);
+      return false;
+    }
+  }, [dispatch, pushNotice, t]);
+
+  const queueAutosave = useCallback(
+    (payload, { immediate = false, createBackup = false, turnEffect = null } = {}) => {
+      const targetProjectId = String(payload.projectId || projectId || '');
+      const targetChapter = String(payload.chapter || '');
+      if (!targetProjectId || !targetChapter) return Promise.resolve(false);
+      const key = `${targetProjectId}:${targetChapter}`;
+      if (createBackup) backupRequiredRef.current.add(key);
+      if (turnEffect && typeof turnEffect === 'object') canonSyncPendingRef.current.set(key, turnEffect);
+
+      const task = {
+        projectId: targetProjectId,
+        chapter: targetChapter,
+        content: String(payload.content ?? ''),
+        title: payload.title ? String(payload.title) : null,
+        createBackup: backupRequiredRef.current.has(key),
+      };
+      latestAutosavePayloadRef.current = task;
+      const last = autosaveLastPayloadRef.current || {};
+      writeDraftRecovery(window.localStorage, {
+        ...task,
+        savedContent: String(last.chapter || '') === targetChapter ? String(last.content ?? '') : '',
+        needsCanonSync: canonSyncPendingRef.current.has(key),
+        turnEffect: canonSyncPendingRef.current.get(key) || null,
+      });
+      autosaveQueueRef.current.replace(task);
+
+      if (autosaveTimerRef.current) {
+        window.clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      if (immediate) return flushAutosaveQueue();
+      autosaveTimerRef.current = window.setTimeout(() => {
+        autosaveTimerRef.current = null;
+        void flushAutosaveQueue();
+      }, 1200);
+      return Promise.resolve(true);
+    },
+    [flushAutosaveQueue, projectId],
+  );
+
   // Sync SWR data to manualContent
   useEffect(() => {
-    if (loadedContent === undefined || state.unsavedChanges) {
-      return;
-    }
-    if (isStreamingForActiveChapter || lockedOnActiveChapter || isDiffReviewForActiveChapter) {
+    const chapterKey = activeChapterKey;
+    if (
+      !shouldApplyLoadedChapter({
+        selectedChapter: chapterKey,
+        loadState: chapterLoadStateRef.current,
+        loadedContent,
+        hasUnsavedChanges: state.unsavedChanges,
+      })
+    ) return;
+    if (isStreamingForActiveChapter || isDiffReviewForActiveChapter) {
       return;
     }
 
-    const chapterKey = activeChapterKey;
     if (chapterKey === NO_CHAPTER_KEY) return;
 
     const lastGeneratedForChapter = Boolean(lastGeneratedByChapterRef.current?.[chapterKey]);
@@ -434,10 +764,35 @@ function WritingSessionContent() {
       return;
     }
 
-    setManualContentByChapter((prev) => ({ ...(prev || {}), [chapterKey]: loadedContent }));
-    setManualContent(loadedContent);
-    dispatch({ type: 'SET_WORD_COUNT', payload: countWords(loadedContent, writingLanguage) });
+    const recoverySnapshot = readDraftRecovery(window.localStorage, projectId, chapterKey);
+    const recovery = resolveDraftRecovery(recoverySnapshot, loadedContent);
+    const resolvedContent = recovery.action === 'restore' ? recovery.content : loadedContent;
+    if (recovery.needsCanonSync && recovery.turnEffect) {
+      canonSyncPendingRef.current.set(`${projectId}:${chapterKey}`, recovery.turnEffect);
+    }
+    if (recovery.action === 'clear') {
+      clearDraftRecovery(window.localStorage, projectId, chapterKey);
+    } else if (recovery.action === 'sync_canon') {
+      void applyAcceptedTurnEffect(projectId, chapterKey);
+    } else if (recovery.action === 'restore') {
+      if (recovery.title) {
+        setChapterInfo((prev) => ({ ...prev, chapter_title: recovery.title }));
+      }
+      pushNotice(t('writingSession.localDraftRecovered'));
+    }
+
+    setManualContentByChapter((prev) => ({ ...(prev || {}), [chapterKey]: resolvedContent }));
+    setManualContent(resolvedContent);
+    chapterLoadStateRef.current = { chapter: chapterKey, ready: true };
+    setViewRestoreKey(chapterKey); // 正文就绪 → 下一帧恢复该章的滚动与光标位置
+    autosaveLastPayloadRef.current = {
+      chapter: chapterKey,
+      content: loadedContent,
+      title: String(chapterInfoRef.current?.chapter_title || '').trim() || null,
+    };
+    dispatch({ type: 'SET_WORD_COUNT', payload: countWords(resolvedContent, writingLanguage) });
     dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    dispatch({ type: recovery.action === 'restore' ? 'SET_UNSAVED' : 'SET_SAVED' });
     lastGeneratedByChapterRef.current[chapterKey] = false;
     // Only center cursor if we just switched chapters (optional optimization)
     // dispatch({ type: 'SET_CURSOR_POSITION', payload: { line: 1, column: 1 } });
@@ -448,9 +803,12 @@ function WritingSessionContent() {
     isDiffReviewForActiveChapter,
     isStreamingForActiveChapter,
     loadedContent,
-    lockedOnActiveChapter,
     manualContent,
+    projectId,
+    pushNotice,
     state.unsavedChanges,
+    applyAcceptedTurnEffect,
+    t,
     writingLanguage,
   ]);
 
@@ -467,6 +825,21 @@ function WritingSessionContent() {
   useEffect(() => {
     loadChapters();
   }, [loadChapters]);
+
+  // 重启后恢复该项目最后打开的章节；记录失效时回退到首个有效章节。
+  useEffect(() => {
+    if (!projectId || state.activeDocument || chapters.length === 0) return;
+    let storedChapter = '';
+    try {
+      storedChapter = window.localStorage.getItem(lastChapterStorageKey(projectId)) || '';
+    } catch {
+      storedChapter = '';
+    }
+    const chapter = resolveRestoredChapter(chapters, storedChapter);
+    if (chapter) {
+      dispatch({ type: 'SET_ACTIVE_DOCUMENT', payload: { type: 'chapter', id: chapter } });
+    }
+  }, [chapters, dispatch, projectId, state.activeDocument]);
 
   useEffect(() => {
     let active = true;
@@ -516,9 +889,9 @@ function WritingSessionContent() {
   }, []);
 
   // 将一次完整生成（写全章 / 续写）落为差异提议：原文 vs 生成文 → DiffReviewView 审阅。
-  // 与编辑(handleSubmitFeedback)统一为同一种 diff 采纳交互——真相在文件、提议可弃（红线 2）。
+  // 写作和编辑统一落为差异提议：真相在文件，Agent 提议可采纳或拒绝。
   const finalizeDraftAsDiff = useCallback(
-    (chapterKey, finalText) => {
+    (chapterKey, finalText, turnEffect = null, chapterTarget = null) => {
       const key = String(chapterKey || '');
       if (!key) return;
       const original = String(streamOriginalByChapterRef.current[key] ?? '');
@@ -553,6 +926,8 @@ function WritingSessionContent() {
         originalContent: original,
         revisedContent: revised,
         chapterKey: key,
+        turnEffect,
+        chapterTarget,
       });
       // 正文暂留原文，待用户采纳后才落地修订（接受全部 / 逐块 / 放弃）。
       setManualContentByChapter((prev) => ({ ...(prev || {}), [key]: original }));
@@ -562,16 +937,83 @@ function WritingSessionContent() {
     [dispatch, t, writingLanguage],
   );
 
+  // 记下当前章节在编辑器里的位置（滚动 + 光标），供标签切回时还原。
+  // 只写 ref，不进 React state：滚动事件很密集，不能触发重渲染。
+  const captureEditorViewState = useCallback(() => {
+    const element = editorRef.current;
+    const key = activeChapterKeyRef.current;
+    if (!element || !key || key === NO_CHAPTER_KEY) return;
+    if (restoredKeyRef.current !== key) return; // 尚未为该章摆位（刚挂载）→ 此刻的 0 不是用户位置
+    viewStateByChapterRef.current[key] = {
+      scrollTop: element.scrollTop,
+      selectionStart: element.selectionStart,
+      selectionEnd: element.selectionEnd,
+    };
+  }, [NO_CHAPTER_KEY]);
+
+  // 编辑器 ref 回调：从大纲/卡片切回时 textarea 会重新挂载，挂载即申请一次位置还原。
+  // 章节之间切换不会重建这个 DOM 节点，那条路径由 handleChapterSelect / SWR 就绪点触发。
+  const attachEditor = useCallback(
+    (element) => {
+      editorRef.current = element;
+      if (!element) {
+        restoredKeyRef.current = null;
+        return;
+      }
+      const key = activeChapterKeyRef.current;
+      if (key && key !== NO_CHAPTER_KEY) setViewRestoreKey(key);
+    },
+    [NO_CHAPTER_KEY],
+  );
+
   const handleChapterSelect = useCallback(
     async (chapter, presetTitle = '') => {
       const nextChapterKey = chapter ? String(chapter) : NO_CHAPTER_KEY;
-      const lockedKey = aiLockedChapterRef.current ? String(aiLockedChapterRef.current) : null;
-      const preserveAgent = Boolean(lockedKey) && agentBusy;
+      const currentInfo = chapterInfoRef.current || {};
+      const currentKey = currentInfo.chapter ? String(currentInfo.chapter) : NO_CHAPTER_KEY;
+      const currentContent = String(manualContentRef.current || '');
+      const preserveAgent = agentBusy;
+      captureEditorViewState();
+
+      if (
+        currentKey === nextChapterKey &&
+        chapterLoadStateRef.current.chapter === nextChapterKey &&
+        chapterLoadStateRef.current.ready
+      ) {
+        if (presetTitle && !currentInfo.chapter_title) {
+          setChapterInfo((prev) => ({ ...prev, chapter_title: presetTitle }));
+        }
+        return;
+      }
 
       // 缓存当前章节内容，避免切章丢失
-      if (chapterInfo.chapter) {
-        const currentKey = String(chapterInfo.chapter);
-        setManualContentByChapter((prev) => ({ ...(prev || {}), [currentKey]: manualContent }));
+      if (currentKey !== NO_CHAPTER_KEY) {
+        setManualContentByChapter((prev) => ({ ...(prev || {}), [currentKey]: currentContent }));
+
+        // 切换前尽力落盘当前章节，避免全局脏状态泄漏到下一章。
+        if (currentKey !== nextChapterKey && unsavedChangesRef.current) {
+          if (autosaveTimerRef.current) {
+            window.clearTimeout(autosaveTimerRef.current);
+            autosaveTimerRef.current = null;
+          }
+          const title = String(currentInfo.chapter_title || '').trim() || null;
+          // 只有正文真的变了才生成带时间戳的版本备份。标签栏让切章变得高频，
+          // 无条件备份会让 drafts/*.backup/ 迅速堆满内容完全相同的快照。
+          const lastSaved = autosaveLastPayloadRef.current || {};
+          const contentChanged =
+            String(lastSaved.chapter || '') !== currentKey || String(lastSaved.content ?? '') !== currentContent;
+          const saved = await queueAutosave(
+            { projectId, chapter: currentKey, content: currentContent, title },
+            { immediate: true, createBackup: contentChanged },
+          );
+          if (!saved) {
+            dispatch({
+              type: 'SET_ACTIVE_DOCUMENT',
+              payload: { type: 'chapter', id: currentKey, title: currentInfo.chapter_title || '' },
+            });
+            return;
+          }
+        }
       }
 
       // 非写作/编辑进行中：切章时清理流式与差异态
@@ -579,11 +1021,9 @@ function WritingSessionContent() {
         stopStreaming();
         clearDiffReview();
         setStatus('editing');
-      } else if (lockedKey && nextChapterKey !== lockedKey) {
-        pushNotice(t('writingSession.chapterLockedNotice').replace('{n}', lockedKey).replace('{m}', nextChapterKey));
       }
 
-      // Just set the chapter, let SWR handle fetching
+      chapterLoadStateRef.current = { chapter: nextChapterKey, ready: false };
       setChapterInfo({ chapter, chapter_title: presetTitle || '', content: '' }); // content will be filled by SWR
       setSelectionInfo({ start: 0, end: 0, text: '' });
       setAttachedSelection(null);
@@ -591,13 +1031,26 @@ function WritingSessionContent() {
 
       // 优先使用本地缓存，减少切章时的"空白闪烁"
       if (nextChapterKey && nextChapterKey !== NO_CHAPTER_KEY) {
+        try {
+          window.localStorage.setItem(lastChapterStorageKey(projectId), nextChapterKey);
+        } catch {
+          // 禁用本地存储时不影响章节加载。
+        }
         const cached = manualContentByChapterRef.current?.[nextChapterKey];
         if (typeof cached === 'string') {
+          chapterLoadStateRef.current = { chapter: nextChapterKey, ready: true };
+          autosaveLastPayloadRef.current = {
+            chapter: nextChapterKey,
+            content: cached,
+            title: presetTitle || null,
+          };
           setManualContent(cached);
+          setViewRestoreKey(nextChapterKey);
           dispatch({ type: 'SET_WORD_COUNT', payload: countWords(cached, writingLanguage) });
           dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
         } else {
           setManualContent('');
+          setViewRestoreKey(nextChapterKey);
           dispatch({ type: 'SET_WORD_COUNT', payload: 0 });
           dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
         }
@@ -613,6 +1066,11 @@ function WritingSessionContent() {
           chapter_title: title || prev.chapter_title || '',
         }));
         if (normalizedChapter !== chapter) {
+          try {
+            window.localStorage.setItem(lastChapterStorageKey(projectId), String(normalizedChapter));
+          } catch {
+            // 禁用本地存储时不影响章节加载。
+          }
           dispatch({
             type: 'SET_ACTIVE_DOCUMENT',
             payload: { type: 'chapter', id: normalizedChapter, title: title || presetTitle || '' },
@@ -625,17 +1083,47 @@ function WritingSessionContent() {
     [
       NO_CHAPTER_KEY,
       agentBusy,
-      chapterInfo.chapter,
+      captureEditorViewState,
       clearDiffReview,
       dispatch,
-      manualContent,
       projectId,
-      pushNotice,
+      queueAutosave,
       stopStreaming,
-      t,
       writingLanguage,
     ],
   );
+
+  // 正文写入 DOM 后立即还原视图位置：在 layout 阶段完成，用户看不到「先跳顶部再跳回」。
+  // 没有记忆的章节显式归零 —— 编辑器 textarea 在切章时是复用的同一个 DOM 节点，
+  // 不主动重置就会停留在上一章的滚动位置。
+  useLayoutEffect(() => {
+    if (!viewRestoreKey) return;
+    const element = editorRef.current;
+    if (!element) return;
+    if (activeChapterKeyRef.current !== viewRestoreKey) return;
+
+    const saved = viewStateByChapterRef.current[viewRestoreKey];
+    const length = element.value.length;
+    const start = Math.min(Math.max(0, saved?.selectionStart ?? 0), length);
+    const end = Math.min(Math.max(start, saved?.selectionEnd ?? start), length);
+    // 不 focus()：切标签不该抢走输入焦点，只把位置摆好。
+    element.setSelectionRange(start, end);
+    element.scrollTop = Math.max(0, saved?.scrollTop ?? 0);
+    restoredKeyRef.current = viewRestoreKey;
+
+    const lines = element.value.slice(0, start).split('\n');
+    dispatch({
+      type: 'SET_CURSOR_POSITION',
+      payload: { line: lines.length, column: lines[lines.length - 1].length + 1 },
+    });
+    setViewRestoreKey(null);
+  }, [dispatch, manualContent, viewRestoreKey]);
+
+  // 标签关闭（手动关闭或超出上限被 LRU 淘汰）后回收该章的正文副本与视图位置。
+  // 正在流式写入或有待审 diff 的章节不回收，避免打断进行中的写作。
+  // 必须排在下面的 activeDocument 副作用之后：关掉当前标签会顺带触发 handleChapterSelect
+  // 把「刚关掉的这一章」重新写回缓存，回收要后手才生效。
+  const previousTabKeysRef = useRef([]);
 
   const handleChapterCreate = async (chapterData) => {
     // Handle object from ChapterCreateDialog or direct arguments
@@ -671,32 +1159,6 @@ function WritingSessionContent() {
     await loadChapters();
   };
 
-  const addMessage = useCallback(
-    (type, content) => {
-      const key = projectChatKey;
-      if (!key) {
-        return;
-      }
-      setMessagesByChapter((prev) => {
-        const next = { ...(prev || {}) };
-        const existing = Array.isArray(next[key]) ? next[key] : [];
-        next[key] = [...existing, { type, content, time: new Date() }].slice(-200);
-        return next;
-      });
-      // Git-Native 持久化：追加到后端会话历史（fire-and-forget，失败不影响交互；localStorage 仍作离线缓存）。
-      const role = type === 'user' || type === 'assistant' || type === 'system' ? type : 'system';
-      sessionAPI
-        .appendHistory(key, {
-          role,
-          content: String(content ?? ''),
-          type: role === type ? undefined : type,
-          ts: Date.now(),
-        })
-        .catch(() => {});
-    },
-    [projectChatKey],
-  );
-
   const appendProgressEvent = useCallback(
     (partial) => {
       const key = projectChatKey;
@@ -706,25 +1168,7 @@ function WritingSessionContent() {
       setProgressEventsByChapter((prev) => {
         const next = { ...(prev || {}) };
         const existing = Array.isArray(next[key]) ? next[key] : [];
-        const last = existing[existing.length - 1];
-        // 修复：连续的流式 thinking token 累积到同一思考块（一个折叠头 + 完整推理），
-        // 而非每个 token 渲染成独立的「思考」块。被其它事件（工具调用等）打断后再思考则另起一块。
-        if (partial.stage === 'thinking' && last && last.stage === 'thinking') {
-          const mergedNote = `${last.note || ''}${partial.note || ''}`;
-          const updated = {
-            ...last,
-            note: mergedNote,
-            message: mergedNote.length > 80 ? `${mergedNote.slice(0, 80)}…` : mergedNote,
-          };
-          next[key] = [...existing.slice(0, -1), updated];
-          return next;
-        }
-        const event = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          timestamp: Date.now(),
-          ...partial,
-        };
-        next[key] = [...existing.slice(-199), event];
+        next[key] = appendAgentProgressEvent(existing, partial);
         return next;
       });
     },
@@ -732,14 +1176,16 @@ function WritingSessionContent() {
   );
 
   // Auto Save（类似 VSCode：检测到变更后自动保存）
-  const autosaveTimerRef = useRef(null);
-  const autosaveInFlightRef = useRef(false);
-  const autosaveLastPayloadRef = useRef({ chapter: null, content: null, title: null });
-
   useEffect(() => {
-    if (!state.unsavedChanges) return;
-    if (!projectId || !chapterInfo.chapter) return;
-    if (isStreamingForActiveChapter || lockedOnActiveChapter || isDiffReviewForActiveChapter) return;
+    if (
+      !canAutosaveLoadedChapter({
+        projectId,
+        chapter: chapterInfo.chapter,
+        loadState: chapterLoadStateRef.current,
+        hasUnsavedChanges: state.unsavedChanges,
+        blocked: isStreamingForActiveChapter || isDiffReviewForActiveChapter,
+      })
+    ) return;
 
     const nextContent = String(manualContent || '');
     const nextTitle = String(chapterInfo.chapter_title || '').trim() || null;
@@ -750,30 +1196,12 @@ function WritingSessionContent() {
     const sameTitle = sameChapter && (last.title || null) === nextTitle;
     if (sameContent && sameTitle) return;
 
-    if (autosaveTimerRef.current) {
-      window.clearTimeout(autosaveTimerRef.current);
-    }
-
-    autosaveTimerRef.current = window.setTimeout(async () => {
-      if (autosaveInFlightRef.current) return;
-      autosaveInFlightRef.current = true;
-      try {
-        const payload = { content: nextContent };
-        if (nextTitle) payload.title = nextTitle;
-
-        const resp = await draftsAPI.autosaveContent(projectId, chapterInfo.chapter, payload);
-        if (resp.data?.success) {
-          autosaveLastPayloadRef.current = { chapter: chapterInfo.chapter, content: nextContent, title: nextTitle };
-          await mutateChapter(nextContent, false);
-          dispatch({ type: 'SET_AUTOSAVED' });
-        }
-      } catch (e) {
-        dispatch({ type: 'SET_UNSAVED' });
-        addMessage('error', t('writingSession.autoSaveFailed') + extractErrorDetail(e));
-      } finally {
-        autosaveInFlightRef.current = false;
-      }
-    }, 1200);
+    void queueAutosave({
+      projectId,
+      chapter: chapterInfo.chapter,
+      content: nextContent,
+      title: nextTitle,
+    });
 
     return () => {
       if (autosaveTimerRef.current) {
@@ -782,19 +1210,88 @@ function WritingSessionContent() {
       }
     };
   }, [
-    addMessage,
     chapterInfo.chapter,
     chapterInfo.chapter_title,
-    dispatch,
     isDiffReviewForActiveChapter,
     isStreamingForActiveChapter,
-    lockedOnActiveChapter,
     manualContent,
-    mutateChapter,
     projectId,
+    queueAutosave,
     state.unsavedChanges,
-    t,
   ]);
+
+  useEffect(() => {
+    const currentPayload = () => {
+      if (!projectId || !chapterInfoRef.current?.chapter || !unsavedChangesRef.current) return null;
+      const latest = latestAutosavePayloadRef.current;
+      return (
+        (latest && String(latest.projectId) === String(projectId) ? latest : null) || {
+          projectId,
+          chapter: String(chapterInfoRef.current.chapter),
+          content: String(manualContentRef.current ?? ''),
+          title: String(chapterInfoRef.current.chapter_title || '').trim() || null,
+          createBackup: false,
+        }
+      );
+    };
+
+    const flushOnPageHide = () => {
+      const payload = currentPayload();
+      if (!payload) return;
+      const canonKey = `${payload.projectId}:${payload.chapter}`;
+      writeDraftRecovery(window.localStorage, {
+        ...payload,
+        savedContent: String(autosaveLastPayloadRef.current?.content ?? ''),
+        needsCanonSync: canonSyncPendingRef.current.has(canonKey),
+        turnEffect: canonSyncPendingRef.current.get(canonKey) || null,
+      });
+      autosaveQueueRef.current.replace(payload);
+      void autosaveQueueRef.current.flush().catch(() => {});
+
+      if (canSendKeepaliveDraft(payload)) {
+        const body = JSON.stringify({
+          content: payload.content,
+          ...(payload.title ? { title: payload.title } : {}),
+        });
+        void fetch(
+          `/api/projects/${encodeURIComponent(payload.projectId)}/drafts/${encodeURIComponent(payload.chapter)}/autosave`,
+          {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            keepalive: true,
+          },
+        ).catch(() => {});
+      }
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flushOnPageHide();
+    };
+    const onBeforeUnload = (event) => {
+      if (!currentPayload()) return;
+      flushOnPageHide();
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('pagehide', flushOnPageHide);
+    window.addEventListener('beforeunload', onBeforeUnload);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', flushOnPageHide);
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [projectId]);
+
+  useEffect(() => {
+    return () => {
+      if (autosaveTimerRef.current) window.clearTimeout(autosaveTimerRef.current);
+      if (autosaveRetryTimerRef.current) window.clearTimeout(autosaveRetryTimerRef.current);
+      autosaveQueueRef.current?.stop();
+    };
+  }, []);
 
   // 当资源管理器清空/删除当前章节时，主动回到空态，避免编辑区残留旧章节内容
   useEffect(() => {
@@ -806,126 +1303,6 @@ function WritingSessionContent() {
     setManualContent('');
     setStatus('idle');
   }, [clearDiffReview, state.activeDocument, stopStreaming]);
-
-  const startStreamingDraft = useCallback(
-    (targetText, options = {}) => {
-      const { onComplete, chapterKey } = options;
-      const resolvedChapterKey = chapterKey ? String(chapterKey) : activeChapterKeyRef.current;
-      stopStreaming();
-      streamingChapterKeyRef.current = resolvedChapterKey;
-
-      const safeText = targetText || '';
-      if (!safeText) {
-        setManualContentByChapter((prev) => ({ ...(prev || {}), [resolvedChapterKey]: '' }));
-        if (activeChapterKeyRef.current === resolvedChapterKey) {
-          setManualContent('');
-        }
-        setIsGenerating(false);
-        streamingChapterKeyRef.current = null;
-        onComplete?.();
-        return;
-      }
-
-      dispatch({ type: 'SET_UNSAVED' });
-      lastGeneratedByChapterRef.current[resolvedChapterKey] = true;
-
-      // 快照流式前原文（仅读取 prev，不改状态），结束时据此生成 diff 提议。
-      setManualContentByChapter((prev) => {
-        streamOriginalByChapterRef.current[resolvedChapterKey] = String(prev?.[resolvedChapterKey] ?? '');
-        return prev;
-      });
-
-      // 直出模式：无逐字动画，直接生成 diff 交付审阅。
-      if (!getStreamingPreference()) {
-        setStreamingState({ active: false, progress: 100, current: safeText.length, total: safeText.length });
-        setIsGenerating(false);
-        streamingChapterKeyRef.current = null;
-        finalizeDraftAsDiff(resolvedChapterKey, safeText);
-        if (activeChapterKeyRef.current !== resolvedChapterKey) {
-          pushNotice(t('writingSession.chapterDone').replace('{n}', resolvedChapterKey));
-        }
-        onComplete?.();
-        return;
-      }
-
-      // 流式动画模式：新文在 diff 绿块内逐字增长，结束转 DiffReviewView 审阅。
-      setIsGenerating(true);
-      const total = safeText.length;
-      const charsPerSecond = Math.min(420, Math.max(180, Math.round(total / 3)));
-      let index = 0;
-      let lastTs = performance.now();
-      let rafId = null;
-
-      setManualContentByChapter((prev) => ({ ...(prev || {}), [resolvedChapterKey]: '' }));
-      if (activeChapterKeyRef.current === resolvedChapterKey) {
-        setManualContent('');
-      }
-      setStreamingState({
-        active: true,
-        progress: 0,
-        current: 0,
-        total,
-      });
-      lastGeneratedByChapterRef.current[resolvedChapterKey] = true;
-
-      const initialBurst = Math.min(total, Math.max(12, Math.floor(total * 0.03)));
-      if (initialBurst > 0) {
-        index = initialBurst;
-        const burstText = safeText.slice(0, index);
-        setManualContentByChapter((prev) => ({ ...(prev || {}), [resolvedChapterKey]: burstText }));
-        if (activeChapterKeyRef.current === resolvedChapterKey) {
-          setManualContent(burstText);
-        }
-        setStreamingState({
-          active: index < total,
-          progress: Math.round((index / total) * 100),
-          current: index,
-          total,
-        });
-      }
-
-      const tick = (ts) => {
-        const delta = Math.max(0, ts - lastTs);
-        const increment = Math.max(1, Math.floor((delta / 1000) * charsPerSecond));
-        index = Math.min(total, index + increment);
-        lastTs = ts;
-
-        const partial = safeText.slice(0, index);
-        setManualContentByChapter((prev) => ({ ...(prev || {}), [resolvedChapterKey]: partial }));
-        if (activeChapterKeyRef.current === resolvedChapterKey) {
-          setManualContent(partial);
-        }
-        setStreamingState({
-          active: index < total,
-          progress: Math.round((index / total) * 100),
-          current: index,
-          total,
-        });
-
-        if (index >= total) {
-          streamingRef.current = null;
-          setIsGenerating(false);
-          streamingChapterKeyRef.current = null;
-          finalizeDraftAsDiff(resolvedChapterKey, safeText);
-          if (activeChapterKeyRef.current !== resolvedChapterKey) {
-            pushNotice(t('writingSession.chapterDone').replace('{n}', resolvedChapterKey));
-          }
-          onComplete?.();
-          return;
-        }
-
-        rafId = window.requestAnimationFrame(tick);
-      };
-
-      rafId = window.requestAnimationFrame(tick);
-      streamingRef.current = {
-        timer: () => {
-          if (rafId) window.cancelAnimationFrame(rafId);
-        },
-      };
-    },
-    [dispatch, pushNotice, stopStreaming, t, finalizeDraftAsDiff],
-  );
 
   useEffect(() => {
     return () => {
@@ -1000,116 +1377,38 @@ function WritingSessionContent() {
     }
   }, [addMessage, clearDiffReview, handleChapterSelect, projectId, state.activeDocument, stopStreaming, t]);
 
-  // Handlers
-  const handleStart = async (chapter, mode, instruction = null) => {
-    if (!chapter) {
-      alert(t('writingSession.selectChapterFirst'));
-      return;
-    }
-    const chapterKey = String(chapter);
-    setAiLockedChapter(chapterKey);
+  useEffect(() => {
+    const liveKeys = new Set(state.openTabs.map((tab) => tab.key));
+    const removed = previousTabKeysRef.current.filter((key) => !liveKeys.has(key));
+    previousTabKeysRef.current = state.openTabs.map((tab) => tab.key);
+    if (!removed.length) return;
+
+    const releasable = removed
+      .filter((key) => key.startsWith('chapter:'))
+      .map((key) => key.slice('chapter:'.length))
+      .filter((chapter) => chapter !== streamingChapterKeyRef.current && chapter !== diffReview?.chapterKey);
+    if (!releasable.length) return;
+
+    releasable.forEach((chapter) => {
+      delete viewStateByChapterRef.current[chapter];
+    });
     setManualContentByChapter((prev) => {
       const next = { ...(prev || {}) };
-      if (next[chapterKey] === undefined) {
-        next[chapterKey] = manualContent;
-      }
+      releasable.forEach((chapter) => delete next[chapter]);
       return next;
     });
+  }, [diffReview, state.openTabs]);
 
-    stopStreaming();
-    clearDiffReview();
-    serverStreamActiveRef.current = false;
-    serverStreamUsedRef.current = false;
-    setStatus('starting');
-    setIsGenerating(true);
-    setContextDebugByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: null }));
-
-    setAgentMode('create');
-    appendProgressEvent({ stage: 'session_start', message: t('writingSession.preparingContext') }, chapterKey);
-
-    try {
-      const payload = {
-        language: requestLanguage,
-        chapter: String(chapter),
-        chapter_title: chapterInfo.chapter_title || t('writingSession.chapterFallback').replace('{n}', chapter),
-        chapter_goal: instruction || 'Auto-generation based on context',
-        target_word_count: 3000,
-        dialog_max_chars: dialogMaxChars,
-      };
-
-      const resp = await sessionAPI.start(projectId, payload);
-      const result = resp.data;
-
-      if (!result.success) {
-        if (result.cancelled) return; // 用户主动取消，静默退出
-        throw new Error(result.error || t('writingSession.sessionStartFailed'));
-      }
-      if (result.status === 'waiting_user_input' && result.questions?.length) {
-        if (result.scene_brief) {
-          setSceneBrief(result.scene_brief);
-          appendProgressEvent(
-            { stage: 'scene_brief', message: t('writingSession.sceneBriefGenerated'), payload: result.scene_brief },
-            chapterKey,
-          );
-        }
-        setContextDebugByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: result.context_debug || null }));
-        setPreWriteQuestions(result.questions);
-        setPendingStartPayload(payload);
-        setShowPreWriteDialog(true);
-        setStatus('waiting_user_input');
-        setIsGenerating(false);
-        return;
-      }
-
-      if (result.scene_brief) {
-        setSceneBrief(result.scene_brief);
-        appendProgressEvent(
-          { stage: 'scene_brief', message: t('writingSession.sceneBriefGenerated'), payload: result.scene_brief },
-          chapterKey,
-        );
-      }
-      setContextDebugByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: result.context_debug || null }));
-
-      if (result.draft_v1) {
-        setDraftV1(result.draft_v1);
-      }
-
-      const finalDraft = result.draft_v2 || result.draft_v1;
-      const shouldUseHttpDraft = !serverStreamActiveRef.current && !serverStreamUsedRef.current;
-      if (finalDraft && shouldUseHttpDraft) {
-        setCurrentDraft(finalDraft);
-        setCurrentDraftVersion(result.draft_v2 ? 'v2' : 'v1');
-        startStreamingDraft(finalDraft.content || '', { chapterKey });
-      } else if (shouldUseHttpDraft) {
-        setIsGenerating(false);
-      }
-
-      if (result.proposals) {
-        setProposals(result.proposals);
-      }
-
-      setStatus('waiting_feedback');
-      if (!serverStreamActiveRef.current && !serverStreamUsedRef.current) {
-        addMessage('assistant', t('writingSession.draftGenerated'), chapterKey);
-      }
-      setPendingStartPayload(null);
-    } catch (e) {
-      addMessage('error', t('writingSession.startFailed') + extractErrorDetail(e), chapterKey);
-      setStatus('idle');
-      setIsGenerating(false);
-    }
-  };
-
+  // Handlers
   const handleCancel = async () => {
     if (isCancelling || !projectId) return;
     setIsCancelling(true);
     // 立即关闭写作前面板，防止取消后面板残留
     setShowPreWriteDialog(false);
     setPreWriteQuestions([]);
-    setPendingStartPayload(null);
-    // 同时清理编辑状态，防止编辑指令在后续流程中被重复应用
-    setFeedback('');
-    lastFeedbackRef.current = '';
+    setClarificationMeta(null);
+    setClarificationResolved(null);
+    setPendingChatPrompt(null);
     clearDiffReview();
     try {
       await sessionAPI.cancel(projectId);
@@ -1119,146 +1418,65 @@ function WritingSessionContent() {
       stopStreaming();
       setIsGenerating(false);
       setStatus('idle');
-      setAiLockedChapter(null);
       setIsCancelling(false);
     }
   };
 
-  const handlePreWriteConfirm = async (answers) => {
-    if (!pendingStartPayload) return;
-    const startPayload = pendingStartPayload;
-    const chapterKey = startPayload?.chapter ? String(startPayload.chapter) : activeChapterKey;
-    if (chapterKey && chapterKey !== NO_CHAPTER_KEY) {
-      setAiLockedChapter(chapterKey);
-    }
+  const handleChatClarificationConfirm = (answers) => {
+    const pending = pendingChatPrompt;
+    if (!pending) return;
+    setPendingChatPrompt(null);
     setShowPreWriteDialog(false);
-    stopStreaming();
-    clearDiffReview();
-    serverStreamActiveRef.current = false;
-    serverStreamUsedRef.current = false;
-    setIsGenerating(true);
+    // 内联卡转只读摘要（保留在对话历史中，不消失）；问题清单留着算「已回答 n / 总数」。
+    setClarificationResolved({
+      kind: 'answered',
+      answered: (answers || []).filter((item) => String(item?.answer || '').trim()).length,
+    });
+    setClarificationMeta(null);
+    setStatus('editing');
+    const labelledDetails = (answers || [])
+      .map((item) => {
+        const answer = String(item?.answer || '').trim();
+        const question = String(item?.question || '').trim();
+        return answer ? `${question ? `问题：${question}\n` : ''}作者回答：${answer}` : '';
+      })
+      .filter(Boolean)
+      .join('\n\n');
+    const unanswered = (answers || [])
+      .filter((item) => !String(item?.answer || '').trim())
+      .map((item) => String(item?.question || '').trim())
+      .filter(Boolean);
+    const unansweredNote = unanswered.length
+      ? `\n\n作者暂不补充以下问题，请不要重复询问相同问题，基于现有信息继续：\n${unanswered.map((item) => `- ${item}`).join('\n')}`
+      : '';
+    const followUp = labelledDetails
+      ? `${pending.text}\n\n补充信息：\n${labelledDetails}${unansweredNote}`
+      : `${pending.text}${unansweredNote}`;
+    // 问题—作者回答作为下一轮 Writer 输入；Writer 仍可基于新上下文自行判断是否还需反问。
+    handleChatSubmit(followUp);
+  };
 
-    try {
-      const resp = await sessionAPI.answerQuestions(projectId, {
-        ...startPayload,
-        answers,
-      });
-      const result = resp.data;
-
-      if (!result.success) {
-        if (result.cancelled) return; // 用户主动取消，静默退出
-        throw new Error(result.error || t('writingSession.answerFailed'));
-      }
-
-      if (result.status === 'waiting_user_input' && result.questions?.length) {
-        setContextDebugByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: result.context_debug || null }));
-        if (result.scene_brief) {
-          setSceneBrief(result.scene_brief);
-          appendProgressEvent(
-            { stage: 'scene_brief', message: t('writingSession.sceneBriefGenerated'), payload: result.scene_brief },
-            chapterKey,
-          );
-        }
-        setPreWriteQuestions(result.questions);
-        setPendingStartPayload(startPayload);
-        setShowPreWriteDialog(true);
-        setStatus('waiting_user_input');
-        setIsGenerating(false);
-        return;
-      }
-
-      if (result.scene_brief) {
-        setSceneBrief(result.scene_brief);
-        appendProgressEvent(
-          { stage: 'scene_brief', message: t('writingSession.sceneBriefGenerated'), payload: result.scene_brief },
-          chapterKey,
-        );
-      }
-      setContextDebugByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: result.context_debug || null }));
-      if (result.draft_v1) {
-        setDraftV1(result.draft_v1);
-      }
-
-      const finalDraft = result.draft_v2 || result.draft_v1;
-      const shouldUseHttpDraft = !serverStreamActiveRef.current && !serverStreamUsedRef.current;
-      if (finalDraft && shouldUseHttpDraft) {
-        setCurrentDraft(finalDraft);
-        setCurrentDraftVersion(result.draft_v2 ? 'v2' : 'v1');
-        startStreamingDraft(finalDraft.content || '', { chapterKey });
-      } else if (shouldUseHttpDraft) {
-        setIsGenerating(false);
-      }
-
-      if (result.proposals) {
-        setProposals(result.proposals);
-      }
-
-      setStatus('waiting_feedback');
-      if (!serverStreamActiveRef.current && !serverStreamUsedRef.current) {
-        addMessage('assistant', t('writingSession.draftGenerated'), chapterKey);
-      }
-      setPendingStartPayload(null);
-    } catch (e) {
-      addMessage('error', t('writingSession.generateFailed') + extractErrorDetail(e), chapterKey);
-      setStatus('idle');
-      setIsGenerating(false);
+  const handleChatClarificationSkip = () => {
+    const pending = pendingChatPrompt;
+    setPendingChatPrompt(null);
+    setShowPreWriteDialog(false);
+    setClarificationResolved({ kind: 'skipped', answered: 0 });
+    setClarificationMeta(null);
+    if (pending?.text) {
+      // 跳过仍作为下一轮 Writer 文本输入，不绕过工具或建立第二条 workflow。
+      addMessage('system', t('agentPanel.clarificationSkipped') || '已跳过反问，直接开始撰写。');
+      const skippedQuestions = (preWriteQuestions || [])
+        .map((item) => String(item?.text || '').trim())
+        .filter(Boolean);
+      const skippedNote = skippedQuestions.length
+        ? `\n\n作者暂不补充以下问题，请不要重复询问相同问题，基于现有信息继续：\n${skippedQuestions.map((item) => `- ${item}`).join('\n')}`
+        : '\n\n作者选择不补充反问，请基于现有信息继续完成本轮。';
+      handleChatSubmit(`${pending.text}${skippedNote}`);
+      return;
     }
+    setIsGenerating(false);
+    setStatus('idle');
   };
-
-  const handlePreWriteSkip = () => {
-    handlePreWriteConfirm([]);
-  };
-
-  const handleSceneBrief = useCallback(
-    (data, chapterOverride = null) => {
-      setSceneBrief(data);
-      appendProgressEvent(
-        { stage: 'scene_brief', message: t('writingSession.sceneBriefGenerated'), payload: data },
-        chapterOverride,
-      );
-    },
-    [appendProgressEvent, t],
-  );
-
-  const handleDraftV1 = useCallback(
-    (data, chapterOverride = null) => {
-      if (serverStreamActiveRef.current || serverStreamUsedRef.current) {
-        return;
-      }
-      setDraftV1(data);
-      clearDiffReview();
-      const chapterKey = chapterOverride ? String(chapterOverride) : activeChapterKeyRef.current;
-      if (chapterKey && chapterKey !== NO_CHAPTER_KEY) {
-        setAiLockedChapter(chapterKey);
-      }
-      startStreamingDraft(data.content || '', {
-        chapterKey,
-      });
-      setStatus('waiting_feedback');
-      addMessage('assistant', t('writingSession.draftGenerated'), chapterOverride);
-    },
-    [NO_CHAPTER_KEY, addMessage, clearDiffReview, startStreamingDraft, t],
-  );
-
-  const handleFinalDraft = useCallback(
-    (data, chapterOverride = null) => {
-      if (serverStreamActiveRef.current || serverStreamUsedRef.current) {
-        return;
-      }
-      setCurrentDraft(data);
-      clearDiffReview();
-      const chapterKey = chapterOverride ? String(chapterOverride) : activeChapterKeyRef.current;
-      if (chapterKey && chapterKey !== NO_CHAPTER_KEY) {
-        setAiLockedChapter(chapterKey);
-      }
-      startStreamingDraft(data.content || '', {
-        chapterKey,
-      });
-      setStatus('completed');
-      addMessage('assistant', t('writingSession.finalDraftDone'), chapterOverride);
-    },
-    [NO_CHAPTER_KEY, addMessage, clearDiffReview, startStreamingDraft, t],
-  );
 
   useWritingSessionRealtime({
     projectId,
@@ -1266,22 +1484,14 @@ function WritingSessionContent() {
     addMessage,
     appendProgressEvent,
     clearDiffReview,
-    currentDraftVersion,
     dispatch,
-    handleDraftV1,
-    handleFinalDraft,
-    handleSceneBrief,
     pushNotice,
     serverStreamActiveRef,
     serverStreamUsedRef,
     setAgentTraces,
-    setAiLockedChapter,
-    setCurrentDraft,
-    setCurrentDraftVersion,
     setIsGenerating,
     setManualContent,
     setManualContentByChapter,
-    setProposals,
     setStatus,
     setStreamingState,
     setTraceEvents,
@@ -1301,125 +1511,73 @@ function WritingSessionContent() {
     onStreamFinalize: finalizeDraftAsDiff,
   });
 
-  const handleSubmitFeedback = async (feedbackOverride, { skipUserMessage = false } = {}) => {
-    const textToSubmit = typeof feedbackOverride === 'string' ? feedbackOverride : feedback;
-    if (!textToSubmit?.trim()) return;
-
-    try {
-      const normalizeLineEndings = (text) => String(text || '').replace(/\r\n/g, '\n');
-      const baseContent = normalizeLineEndings(manualContent);
-      const chapterKey = chapterInfo.chapter ? String(chapterInfo.chapter) : activeChapterKey;
-      if (chapterKey && chapterKey !== NO_CHAPTER_KEY) {
-        setAiLockedChapter(chapterKey);
+  const persistAcceptedAgentContent = useCallback(
+    async (chapter, content, turnEffect = null, chapterTarget = null) => {
+      const targetChapter = String(chapter || '');
+      if (!targetChapter) return;
+      const currentInfo = chapterInfoRef.current || {};
+      const title =
+        String(chapterTarget?.title || '').trim() ||
+        (String(currentInfo.chapter || '') === targetChapter
+          ? String(currentInfo.chapter_title || '').trim() || null
+          : null);
+      if (turnEffect) {
+        setCanonTurnState({ chapter: targetChapter, effect: turnEffect, status: 'saving', result: null });
       }
-      setIsGenerating(true);
-      setStatus('editing');
-
-      setAgentMode('edit');
-
-      stopStreaming();
-      clearDiffReview();
-      lastFeedbackRef.current = textToSubmit;
-
-      if (!skipUserMessage) addMessage('user', t('writingSession.editInstruction') + textToSubmit);
-      appendProgressEvent({ stage: 'edit_suggest', message: t('writingSession.generatingDiff') });
-      setFeedback('');
-
-      const payload = {
-        chapter: chapterInfo.chapter ? String(chapterInfo.chapter) : null,
-        content: baseContent,
-        instruction: textToSubmit,
-        dialog_max_chars: dialogMaxChars,
-      };
-
-      // Cursor 式选区即编辑目标：优先用已附加选区；否则若编辑器有实时选区也直接用它；
-      // 两者皆无 → 整篇编辑（与历史行为一致）。让用户"划词 + 说改法"即可，无需手动附加。
-      const scopedSelection =
-        editScope === 'selection' && attachedSelection?.text?.trim()
-          ? attachedSelection
-          : selectionInfo?.text?.trim()
-            ? selectionInfo
-            : null;
-      if (scopedSelection) {
-        const selectionText = String(scopedSelection.text || '');
-        const selectionStart = Math.max(0, Math.min(Number(scopedSelection.start || 0), baseContent.length));
-        const selectionEnd = Math.max(0, Math.min(Number(scopedSelection.end || 0), baseContent.length));
-        payload.selection_text = selectionText;
-        payload.selection_start = Math.min(selectionStart, selectionEnd);
-        payload.selection_end = Math.max(selectionStart, selectionEnd);
-      }
-
-      const resp = await sessionAPI.suggestEdit(projectId, payload);
-
-      const result = resp.data;
-      if (result.success) {
-        let nextContent = normalizeLineEndings(result.revised_content);
-        const tailFix = stabilizeRevisionTail(baseContent, nextContent, textToSubmit);
-        if (tailFix.applied) {
-          nextContent = normalizeLineEndings(tailFix.text);
-          addMessage('system', t('writingSession.diffTruncationWarning'));
-        }
-
-        const diff = buildLineDiff(baseContent, nextContent, { contextLines: 2 });
-        const hasChanges = Boolean((diff.stats?.additions || 0) + (diff.stats?.deletions || 0));
-
-        if (!hasChanges) {
-          throw new Error(t('writingSession.diffGenerateFailed'));
-        }
-
-        appendProgressEvent({
-          stage: 'edit_suggest_done',
-          message: t('writingSession.diffGenerated')
-            .replace('{add}', diff.stats.additions || 0)
-            .replace('{del}', diff.stats.deletions || 0),
+      const saved = await queueAutosave(
+        { projectId, chapter: targetChapter, content, title },
+        { immediate: true, createBackup: true, turnEffect },
+      );
+      if (saved && chapterTarget?.create) {
+        await loadChapters();
+        dispatch({
+          type: 'SET_ACTIVE_DOCUMENT',
+          payload: { type: 'chapter', id: targetChapter, title: title || '' },
         });
-
-        // 统一收口：edit 与 write 走同一条流式 diff 管线。editor 的精确 patch 结果(nextContent)
-        // 作为目标正文，经 startStreamingDraft 流式呈现 + finalizeDraftAsDiff(原文 vs 目标 → diff 审阅)，
-        // 保留 editor 精确性的同时，体验与写全章完全统一(对齐 AI coding 的统一编辑形态)。
-        setManualContentByChapter((prev) => ({ ...(prev || {}), [chapterKey]: baseContent }));
-        startStreamingDraft(nextContent, { chapterKey });
-        setStatus('waiting_feedback');
-        addMessage('assistant', t('writingSession.diffReady'));
-      } else {
-        throw new Error(result.error || 'Edit failed');
       }
-    } catch (e) {
-      addMessage('error', t('writingSession.editFailed') + extractErrorDetail(e));
-      setIsGenerating(false);
-      setStatus('waiting_feedback');
-    }
-  };
+    },
+    [dispatch, loadChapters, projectId, queueAutosave],
+  );
 
   const handleAcceptAllDiff = () => {
     if (!diffReview) return;
     const nextContent = diffReview.revisedContent || '';
+    const targetChapter = String(diffReview.chapterKey || activeChapterKeyRef.current || '');
     if ((loadedContent ?? '') !== nextContent) {
       dispatch({ type: 'SET_UNSAVED' });
     }
-    setManualContent(nextContent);
-    if (diffReview.chapterKey) {
-      const key = String(diffReview.chapterKey);
-      setManualContentByChapter((prev) => ({ ...(prev || {}), [key]: nextContent }));
+    if (activeChapterKeyRef.current === targetChapter) setManualContent(nextContent);
+    if (targetChapter) {
+      setManualContentByChapter((prev) => ({ ...(prev || {}), [targetChapter]: nextContent }));
     }
-    dispatch({ type: 'SET_WORD_COUNT', payload: countWords(nextContent, writingLanguage) });
-    dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    if (activeChapterKeyRef.current === targetChapter) {
+      dispatch({ type: 'SET_WORD_COUNT', payload: countWords(nextContent, writingLanguage) });
+      dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    }
     clearDiffReview();
+    void persistAcceptedAgentContent(
+      targetChapter,
+      nextContent,
+      diffReview.turnEffect || null,
+      diffReview.chapterTarget || null,
+    );
   };
 
   const handleRejectAllDiff = () => {
     if (!diffReview) return;
     const nextContent = diffReview.originalContent || '';
+    const targetChapter = String(diffReview.chapterKey || activeChapterKeyRef.current || '');
     if ((loadedContent ?? '') !== nextContent) {
       dispatch({ type: 'SET_UNSAVED' });
     }
-    setManualContent(nextContent);
-    if (diffReview.chapterKey) {
-      const key = String(diffReview.chapterKey);
-      setManualContentByChapter((prev) => ({ ...(prev || {}), [key]: nextContent }));
+    if (activeChapterKeyRef.current === targetChapter) setManualContent(nextContent);
+    if (targetChapter) {
+      setManualContentByChapter((prev) => ({ ...(prev || {}), [targetChapter]: nextContent }));
     }
-    dispatch({ type: 'SET_WORD_COUNT', payload: countWords(nextContent, writingLanguage) });
-    dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    if (activeChapterKeyRef.current === targetChapter) {
+      dispatch({ type: 'SET_WORD_COUNT', payload: countWords(nextContent, writingLanguage) });
+      dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    }
     clearDiffReview();
   };
 
@@ -1443,6 +1601,7 @@ function WritingSessionContent() {
 
   const handleApplySelectedDiff = () => {
     if (!diffReview) return;
+    const targetChapter = String(diffReview.chapterKey || activeChapterKeyRef.current || '');
     const originalLines = diffReview.originalLines || (diffReview.originalContent || '').split('\n');
     const ops = diffReview.ops || [];
     const hasDecisions = Object.keys(diffDecisions || {}).length > 0;
@@ -1452,38 +1611,42 @@ function WritingSessionContent() {
     if ((loadedContent ?? '') !== nextContent) {
       dispatch({ type: 'SET_UNSAVED' });
     }
-    setManualContent(nextContent);
-    if (diffReview.chapterKey) {
-      const key = String(diffReview.chapterKey);
-      setManualContentByChapter((prev) => ({ ...(prev || {}), [key]: nextContent }));
+    if (activeChapterKeyRef.current === targetChapter) setManualContent(nextContent);
+    if (targetChapter) {
+      setManualContentByChapter((prev) => ({ ...(prev || {}), [targetChapter]: nextContent }));
     }
-    dispatch({ type: 'SET_WORD_COUNT', payload: countWords(nextContent, writingLanguage) });
-    dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    if (activeChapterKeyRef.current === targetChapter) {
+      dispatch({ type: 'SET_WORD_COUNT', payload: countWords(nextContent, writingLanguage) });
+      dispatch({ type: 'SET_SELECTION_COUNT', payload: 0 });
+    }
+    setCanonTurnState((prev) =>
+      prev?.status === 'pending_acceptance' && String(prev.chapter || '') === targetChapter ? null : prev,
+    );
     clearDiffReview();
+    void persistAcceptedAgentContent(
+      targetChapter,
+      nextContent,
+      diffReview.turnEffect || null,
+      diffReview.chapterTarget || null,
+    );
   };
 
   const saveDraftContent = async () => {
     if (!chapterInfo.chapter) return { success: false };
     const trimmedTitle = String(chapterInfo.chapter_title || '').trim();
-    const payload = { content: manualContent };
-    if (trimmedTitle) {
-      payload.title = trimmedTitle;
-    }
-    const resp = await draftsAPI.updateContent(projectId, chapterInfo.chapter, payload);
-    if (resp.data?.success) {
-      const normalizedChapter = resp.data?.chapter || chapterInfo.chapter;
-      if (normalizedChapter && normalizedChapter !== chapterInfo.chapter) {
-        setChapterInfo((prev) => ({ ...prev, chapter: normalizedChapter }));
-        dispatch({ type: 'SET_ACTIVE_DOCUMENT', payload: { type: 'chapter', id: normalizedChapter } });
-        await loadChapters();
-      }
-      if (typeof resp.data?.title === 'string' && resp.data.title.trim()) {
-        setChapterInfo((prev) => ({ ...prev, chapter_title: resp.data.title }));
-      }
+    const saved = await queueAutosave(
+      {
+        projectId,
+        chapter: chapterInfo.chapter,
+        content: manualContent,
+        title: trimmedTitle || null,
+      },
+      { immediate: true, createBackup: true },
+    );
+    if (saved) {
       dispatch({ type: 'SET_SAVED' });
-      mutateChapter(manualContent, false);
     }
-    return resp.data;
+    return { success: saved, chapter: chapterInfo.chapter, title: trimmedTitle || null };
   };
 
   const handleManualSave = async () => {
@@ -1649,6 +1812,67 @@ function WritingSessionContent() {
     setActiveCard(null);
   }, []);
 
+  // ── 编辑器标签 ─────────────────────────────────────────────
+  const handleSelectTab = useCallback(
+    (tab) => {
+      if (!tab || tab.key === tabKeyOf(state.activeDocument)) return;
+      captureEditorViewState();
+      dispatch({ type: 'SET_ACTIVE_DOCUMENT', payload: documentOf(tab) });
+    },
+    [captureEditorViewState, dispatch, state.activeDocument],
+  );
+
+  const handleCloseTab = useCallback(
+    (tab) => {
+      if (!tab) return;
+      captureEditorViewState();
+      dispatch({ type: 'CLOSE_TAB', payload: tab.key });
+    },
+    [captureEditorViewState, dispatch],
+  );
+
+  const handleCloseOtherTabs = useCallback(
+    (tab) => {
+      if (!tab) return;
+      captureEditorViewState();
+      dispatch({ type: 'CLOSE_OTHER_TABS', payload: tab.key });
+    },
+    [captureEditorViewState, dispatch],
+  );
+
+  // 章节标题栏已从写作区移除，双击当前章节标签是唯一改名入口。
+  // 这里只更新标题缓冲与标签显示，落盘仍走既有自动保存（标题随 chapterInfo 写进 summary）。
+  const handleRenameTab = useCallback(
+    (key, title) => {
+      const prefix = 'chapter:';
+      const chapter = String(key || '').startsWith(prefix) ? String(key).slice(prefix.length) : '';
+      if (!chapter || String(chapterInfoRef.current?.chapter || '') !== chapter) return;
+      const next = String(title || '').trim();
+      if (next === String(chapterInfoRef.current?.chapter_title || '').trim()) return;
+      setChapterInfo((prev) => ({ ...prev, chapter_title: next }));
+      dispatch({ type: 'RENAME_TAB', payload: { key, title: next } });
+      dispatch({ type: 'SET_UNSAVED' });
+    },
+    [dispatch],
+  );
+
+  const handleFontSizeChange = useCallback(
+    (delta) => dispatch({ type: 'SET_EDITOR_FONT_SIZE', payload: state.editorFontSize + delta }),
+    [dispatch, state.editorFontSize],
+  );
+
+  const tabStatusKeys = useMemo(
+    () => ({
+      active: tabKeyOf(state.activeDocument),
+      unsaved: state.unsavedChanges && chapterInfo.chapter ? `chapter:${chapterInfo.chapter}` : null,
+      streaming: streamingState.active && streamingChapterKeyRef.current
+        ? `chapter:${streamingChapterKeyRef.current}`
+        : null,
+      diff: diffReview?.chapterKey ? `chapter:${diffReview.chapterKey}` : null,
+    }),
+    [chapterInfo.chapter, diffReview, state.activeDocument, state.unsavedChanges, streamingState.active],
+  );
+
   const handleManualSelectionChange = useCallback(
     (value, selectionStart, selectionEnd) => {
       const stats = getSelectionStats(value, selectionStart, selectionEnd, writingLanguage);
@@ -1666,8 +1890,10 @@ function WritingSessionContent() {
           column: lines[lines.length - 1].length + 1,
         },
       });
+      // 持续记录位置：切到大纲/卡片不经过 handleChapterSelect，靠这里兜住。
+      captureEditorViewState();
     },
-    [dispatch, writingLanguage],
+    [captureEditorViewState, dispatch, writingLanguage],
   );
 
   const handleManualContentChange = useCallback(
@@ -1684,25 +1910,6 @@ function WritingSessionContent() {
     [chapterInfo.chapter, dispatch, handleManualSelectionChange, writingLanguage],
   );
 
-  // Phase 16（vibe writing）：单输入框统一入口——后端自判意图（write/edit/continue/plan）后路由，
-  // 替代前端 agentMode 手动开关。复用既有 handleStart / handleSubmitFeedback（已验证的写/改/反问/diff 流）。
-  const handlePlanFromChat = async (goal) => {
-    try {
-      addMessage('system', t('writingSession.planGenerating') || '正在规划执行步骤…');
-      const resp = await sessionAPI.plan(projectId, { goal, context_hint: chapterInfo.chapter || '' });
-      const plan = resp?.data?.plan;
-      const steps = Array.isArray(plan?.steps) ? plan.steps : [];
-      if (resp?.data?.success && plan?.id && steps.length) {
-        // 不直接执行：展示步骤 + 等用户在对话栏点「执行」批准（approval gate）。
-        setPendingPlan({ id: plan.id, goal: plan.goal || goal, steps });
-        return true;
-      }
-    } catch (err) {
-      console.warn('plan generation failed', err);
-    }
-    return false;
-  };
-
   const handleExecutePlan = async () => {
     if (!pendingPlan?.id || planExecuting) return;
     setPlanExecuting(true);
@@ -1712,6 +1919,9 @@ function WritingSessionContent() {
       const plan = resp?.data?.plan;
       const ok = resp?.data?.success;
       const stepsArr = Array.isArray(plan?.steps) ? plan.steps : [];
+      // 保留执行后的 per-step status：卡片据此渲染 done / failed / interrupted 终态，
+      // 中断不得伪装为完成（plan.md §4 / §9.6 Step 2）。
+      if (stepsArr.length) setPendingPlan((prev) => (prev ? { ...prev, ...plan } : prev));
       const done = stepsArr.filter((s) => s.status === 'done').length;
       const total = stepsArr.length;
       const failed = stepsArr.find((s) => s.status === 'failed');
@@ -1727,7 +1937,6 @@ function WritingSessionContent() {
       addMessage('error', (t('writingSession.planFailed') || '计划执行中断') + extractErrorDetail(err));
     } finally {
       setPlanExecuting(false);
-      setPendingPlan(null);
     }
   };
 
@@ -1736,53 +1945,107 @@ function WritingSessionContent() {
     setPendingPlan(null);
   };
 
-  const handleChatSubmit = async (text, approval = null) => {
-    if (!approval) addMessage('user', text);
+  const handleChatSubmit = async (text, options = {}) => {
+    const { silent = false } = options || {};
+    if (!silent) addMessage('user', text);
+    setWritingMemoryTurn(null);
+    setCanonTurnState(null);
     const chapterKey = chapterInfo.chapter ? String(chapterInfo.chapter) : '';
+    const requestChapterKey = chapterKey || NO_CHAPTER_KEY;
 
-    // 无章节：仅复杂规划可行（plan 不落具体章节）；写/改需章节作目标 → 友好引导。
-    if (!chapterKey) {
-      const planned = await handlePlanFromChat(text);
-      if (!planned) {
-        addMessage(
-          'system',
-          t('writingSession.needChapterForWrite') ||
-            '撰写或编辑需先选择 / 新建一章作为目标；复杂规划可直接说，我来拆解步骤。',
-        );
-      }
-      return;
-    }
-
-    // 有章节：统一交给后端 agent 主循环（write/edit/continue/plan 自判 + 自主用 write_content/edit_lines + 检索）。
-    // 对齐 AI coding：不再前端预判分流。agent 写作内容经 WS 流式 diff（useWritingSessionRealtime → finalizeDraftAsDiff）；
-    // 能力降级（provider 不支持工具）→ 后端返回 fallback 信号 → 前端用成熟的 write/edit 流程兜底（含反问 / 精确 diff）。
+    // 统一交给后端单 Writer 主循环；无当前章节时，Writer 可自行判断是否先调用 create_chapter。
+    // Agent 写作内容经 WS 流式 diff（useWritingSessionRealtime → finalizeDraftAsDiff），失败时明确返回未完成，
+    // 不再切换到旧的多 Agent workflow。
     setIsGenerating(true);
-    setAiLockedChapter(chapterKey);
+    if (chatRecoveryTimerRef.current) {
+      window.clearTimeout(chatRecoveryTimerRef.current);
+      chatRecoveryTimerRef.current = null;
+    }
+    serverStreamActiveRef.current = false;
+    serverStreamUsedRef.current = false;
+    streamOriginalByChapterRef.current[requestChapterKey] = String(
+      chapterKey ? (manualContentByChapterRef.current?.[chapterKey] ?? manualContent) : '',
+    );
     try {
       const resp = await sessionAPI.chat(projectId, {
         chapter: chapterKey,
         message: text,
         has_selection: Boolean(attachedSelection?.text?.trim() || selectionInfo?.text?.trim()),
+        selection_text: String(attachedSelection?.text || selectionInfo?.text || '').trim().slice(0, 6000),
         has_draft: Boolean(chapterKey) && !canUseWriter,
-        thinking: writerSupportsThinking && deepThinking,
-        ...(approval
-          ? {
-              fallback_approval_action_id: approval.id,
-              fallback_approval_token: approval.token,
-            }
-          : {}),
+        reasoning_level: reasoningLevel,
       });
       const data = resp?.data || {};
+      const chapterTarget = data.chapter_target || null;
+      const resultChapter = String(chapterTarget?.chapter || chapterKey || '');
+      const autoCommit = data.auto_commit?.committed ? data.auto_commit : null;
+      if (data.writing_memory) {
+        await mutateMemoryPack(data.writing_memory, false);
+        setWritingMemoryTurn({ chapter: resultChapter, status: data.writing_memory });
+      }
+      if (data.turn_effect) {
+        const canonSync = autoCommit?.canon_sync || null;
+        setCanonTurnState({
+          chapter: resultChapter,
+          effect: data.turn_effect,
+          status: autoCommit
+            ? canonSync?.success === false
+              ? 'failed'
+              : canonSync?.applied
+                ? 'applied'
+                : 'skipped'
+            : data.changed
+              ? 'pending_acceptance'
+              : 'skipped',
+          result: canonSync,
+        });
+        if (!autoCommit) {
+          setDiffReview((prev) =>
+            prev && String(prev.chapterKey || '') === resultChapter
+              ? { ...prev, turnEffect: data.turn_effect, chapterTarget }
+              : prev,
+          );
+        }
+      }
       const turnView = normalizeChatTurnResponse(data);
       setAgentTurnMeta(turnView.contextPlan || turnView.runtime ? turnView : null);
 
-      // fallback 的执行权属于后端。前端只展示审批，并将单次 token 原样回传。
-      if (turnView.terminalState === 'requires_approval' && turnView.pendingAction) {
-        setPendingApproval({ ...turnView.pendingAction, message: text, chapter: chapterKey });
+      if (turnView.terminalState === 'requires_input') {
+        const questions = (Array.isArray(data.questions) ? data.questions : [])
+          .map((question, index) => ({
+            type: question?.type || 'clarification',
+            key: question?.key || `${question?.type || 'clarification'}-${index}`,
+            text: String(question?.text || question?.question || '').trim(),
+            reason: question?.reason,
+            impact: question?.impact,
+            impact_score: question?.impact_score,
+            options: Array.isArray(question?.options) ? question.options : [],
+            default: question?.default,
+          }))
+          .filter((question) => question.text);
+        // 只有当后端真的给出（模型生成的）问题时才弹反问对话框；否则不伪造"固定问题"，
+        // 而是给一句清晰的系统提示并回到 idle，避免"有反问但模型没参与"+跳过后卡死。
+        if (questions.length) {
+          setPreWriteQuestions(questions);
+          setClarificationMeta(data.clarification || null);
+          setClarificationResolved(null);
+          setPendingChatPrompt({ text, chapter: resultChapter });
+          setShowPreWriteDialog(true);
+          setStatus('waiting_user_input');
+          setIsGenerating(false);
+          return;
+        }
+        const hint =
+          data.reason === 'draft_required'
+            ? '当前章节还没有正文。直接说「写这一章…」我就新建撰写；若要编辑，请先切换到已有正文的章节。'
+            : data.reason === 'chapter_required'
+              ? '请先选择或新建一个章节作为写作目标，再下达指令。'
+              : '我需要更明确的要求才能继续，请补充关键信息后重新发送。';
+        addMessage('system', hint);
+        setStatus('idle');
         setIsGenerating(false);
         return;
       }
-      setPendingApproval(null);
 
       const terminalCopy = terminalStateMessage(turnView);
       if (terminalCopy) {
@@ -1800,14 +2063,68 @@ function WritingSessionContent() {
       }
 
       if (data.action === 'reply') {
-        addMessage('assistant', data.message || '');
+        addMessage('assistant', data.message || '我已理解你的要求，正在结合当前正文继续处理。');
         setIsGenerating(false);
         return;
       }
 
-      // agentic_write：内容已经/将经 WS 流式 diff 推送（前端被动 finalizeDraftAsDiff），
-      // isGenerating 由 WS stream_end 收尾；未走流式的异常情形兜底关闭。
-      if (!data.changed) {
+      if (data.summary && !serverStreamUsedRef.current) {
+        addMessage('assistant', data.summary);
+      }
+
+      if (data.changed && autoCommit && resultChapter && typeof data.content === 'string') {
+        const finalText = data.content;
+        serverStreamActiveRef.current = false;
+        streamingChapterKeyRef.current = null;
+        streamBufferByChapterRef.current[requestChapterKey] = '';
+        streamTextByChapterRef.current[requestChapterKey] = '';
+        setManualContentByChapter((prev) => ({ ...(prev || {}), [resultChapter]: finalText }));
+        clearDiffReview();
+        await loadChapters();
+        await mutateSWR([projectId, 'facts-tree']);
+        dispatch({
+          type: 'SET_ACTIVE_DOCUMENT',
+          payload: {
+            type: 'chapter',
+            id: resultChapter,
+            title: String(autoCommit.title || chapterTarget?.title || ''),
+          },
+        });
+        setStreamingState({
+          active: false,
+          progress: 100,
+          current: finalText.length,
+          total: finalText.length,
+        });
+        setIsGenerating(false);
+        setStatus('waiting_feedback');
+        return;
+      }
+
+      // WebSocket 是主交付路径；HTTP 正文用于连接抖动、重连或缺少 stream_end 时恢复。
+      if (data.changed) {
+        chatRecoveryTimerRef.current = window.setTimeout(() => {
+          chatRecoveryTimerRef.current = null;
+          const streamCompleted = serverStreamUsedRef.current && !serverStreamActiveRef.current;
+          if (streamCompleted) return;
+
+          if (shouldRecoverChangedTurn(data, serverStreamUsedRef.current, serverStreamActiveRef.current)) {
+            serverStreamActiveRef.current = false;
+            streamingChapterKeyRef.current = null;
+            streamBufferByChapterRef.current[requestChapterKey] = '';
+            streamTextByChapterRef.current[requestChapterKey] = '';
+            setStreamingState({
+              active: false,
+              progress: 100,
+              current: data.content.length,
+              total: data.content.length,
+            });
+            finalizeDraftAsDiff(resultChapter, data.content, data.turn_effect || null, chapterTarget);
+          }
+          setIsGenerating(false);
+          setStatus('waiting_feedback');
+        }, 500);
+      } else {
         setIsGenerating(false);
       }
     } catch (e) {
@@ -1817,16 +2134,103 @@ function WritingSessionContent() {
     }
   };
 
-  const handleApproveFallback = () => {
-    if (!pendingApproval || isGenerating) return;
-    handleChatSubmit(pendingApproval.message, pendingApproval);
+  const handleNewConversation = async () => {
+    if (!projectId || isGenerating) return;
+    const response = await sessionAPI.createConversation(projectId);
+    const created = response?.data?.conversation;
+    if (!created?.id) return;
+    setActiveConversationId(created.id);
+    setConversations((prev) => [{ ...created, active: true }, ...prev.map((item) => ({ ...item, active: false }))]);
+    setMessagesByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: [] }));
+    setProgressEventsByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: [] }));
+    setPendingPlan(null);
+    setAgentTurnMeta(null);
+    setWritingMemoryTurn(null);
+    setCanonTurnState(null);
   };
 
-  const handleDismissFallback = () => {
-    if (isGenerating) return;
-    setPendingApproval(null);
-    addMessage('system', '已取消本次授权，未执行变更。');
+  const handleSelectConversation = async (conversationId) => {
+    if (!projectId || !conversationId || conversationId === activeConversationId || isGenerating) return;
+    await sessionAPI.activateConversation(projectId, conversationId);
+    const response = await sessionAPI.getHistory(projectId, 0, conversationId);
+    const list = Array.isArray(response?.data?.messages) ? response.data.messages : [];
+    setActiveConversationId(conversationId);
+    setConversations((prev) => prev.map((item) => ({ ...item, active: item.id === conversationId })));
+    setMessagesByChapter((prev) => ({
+      ...(prev || {}),
+      [projectChatKey]: list.map((message) => ({
+        type: message?.type === 'error' ? 'error' : message?.role || 'system',
+        content: String(message?.content ?? ''),
+        time: message?.ts ? new Date(message.ts) : new Date(),
+      })),
+    }));
+    setProgressEventsByChapter((prev) => ({ ...(prev || {}), [projectChatKey]: [] }));
+    setPendingPlan(null);
+    setAgentTurnMeta(null);
+    setWritingMemoryTurn(null);
+    setCanonTurnState(null);
   };
+
+  const handleRollbackConversation = async (startedAt = 0) => {
+    if (!projectId || isGenerating) return null;
+    const conversationId = activeConversationId || 'legacy';
+    try {
+      const response = await sessionAPI.rollbackConversation(projectId, conversationId);
+      if (!response?.data?.success) throw new Error(response?.data?.error || '回退失败');
+      const history = await sessionAPI.getHistory(projectId, 0, conversationId);
+      const list = Array.isArray(history?.data?.messages) ? history.data.messages : [];
+      setMessagesByChapter((prev) => ({
+        ...(prev || {}),
+        [projectChatKey]: list.map((message) => ({
+          type: message?.type === 'error' ? 'error' : message?.role || 'system',
+          content: String(message?.content ?? ''),
+          time: message?.ts ? new Date(message.ts) : new Date(),
+        })),
+      }));
+      setProgressEventsByChapter((prev) => ({
+        ...(prev || {}),
+        [projectChatKey]: (prev?.[projectChatKey] || []).filter(
+          (event) => Number(event?.timestamp || 0) < Number(startedAt || 0),
+        ),
+      }));
+      setPendingPlan(null);
+      setAgentTurnMeta(null);
+      setWritingMemoryTurn(null);
+      setCanonTurnState(null);
+      clearDiffReview();
+      setStatus('waiting_feedback');
+      pushNotice(t('agentPanel.rollbackDone'));
+      return String(response.data.restored_input || '');
+    } catch (error) {
+      addMessage('error', `${t('agentPanel.rollbackFailed')}${extractErrorDetail(error)}`);
+      return null;
+    }
+  };
+
+  const handleDeleteConversation = async (conversation) => {
+    if (!projectId || !conversation?.id || conversation.id === 'legacy' || isGenerating) return;
+    try {
+      await sessionAPI.deleteConversation(projectId, conversation.id);
+      const response = await sessionAPI.listConversations(projectId);
+      const list = Array.isArray(response?.data?.conversations) ? response.data.conversations : [];
+      setConversations(list);
+      const active = list.find((item) => item.active) || list[0];
+      if (active && active.id !== activeConversationId) await handleSelectConversation(active.id);
+    } catch (error) {
+      logger.error('delete conversation failed', error);
+    }
+  };
+
+  const showWritingMemory = shouldShowWritingMemory({
+    turn: writingMemoryTurn,
+    isGenerating,
+    isStreaming: streamingState.active,
+  });
+  const visibleMemoryStatus = showWritingMemory
+    ? mergeWritingMemoryStatus(writingMemoryTurn?.status, memoryPackStatus)
+    : null;
+  const visibleCanonTurnState =
+    canonTurnState?.effect && !isGenerating && !streamingState.active ? canonTurnState : null;
 
   const rightPanelContent = (
     <WritingSessionAgentPanel
@@ -1837,8 +2241,6 @@ function WritingSessionContent() {
         setAgentMode,
         canUseWriter,
         agentBusy,
-        aiLockedChapter,
-        activeChapterKey,
         t,
         isCancelling,
         handleCancel,
@@ -1847,40 +2249,50 @@ function WritingSessionContent() {
         setAttachedSelection,
         setEditScope,
         editScope,
-        contextDebug,
+        memoryPackStatus: visibleMemoryStatus,
+        memoryPackLoading: showWritingMemory && memoryPackLoading,
+        memoryPackChapter: writingMemoryTurn?.chapter || memoryPackChapter,
+        showWritingMemory,
+        canonTurnState: visibleCanonTurnState,
         progressEvents,
         messages,
         chapterInfo,
         diffReview,
-        agentChapterKey,
         diffDecisions,
         handleAcceptAllDiff,
         handleRejectAllDiff,
         handleApplySelectedDiff,
         addMessage,
-        handleStart,
-        handleSubmitFeedback,
         handleChatSubmit,
         countWords,
         writingLanguage,
         dialogMaxChars,
-        deepThinkingEnabled: writerSupportsThinking ? deepThinking : false,
-        deepThinkingSupported: writerSupportsThinking,
-        onToggleDeepThinking: toggleDeepThinking,
+        reasoningLevel,
+        reasoningLevels,
+        reasoningSupported: Boolean(reasoningCapability?.supported),
+        onReasoningLevelChange: handleReasoningLevelChange,
+        agentMention,
         pendingPlan,
-        pendingApproval,
         agentTurnMeta,
         planExecuting,
+        planActiveStepId,
         onExecutePlan: handleExecutePlan,
         onDismissPlan: handleDismissPlan,
-        onApproveFallback: handleApproveFallback,
-        onDismissFallback: handleDismissFallback,
+        clarification,
+        onClarificationConfirm: handleChatClarificationConfirm,
+        onClarificationSkip: handleChatClarificationSkip,
+        conversations,
+        onDeleteConversation: handleDeleteConversation,
+        activeConversationId,
+        onNewConversation: handleNewConversation,
+        onSelectConversation: handleSelectConversation,
+        onRollbackConversation: handleRollbackConversation,
       }}
     />
   );
 
   const saveBusy = isSaving || analysisLoading || analysisSaving;
-  const showSaveAction = (chapterInfo.chapter || status === 'card_editing') && !lockedOnActiveChapter;
+  const showSaveAction = chapterInfo.chapter || status === 'card_editing';
   const saveAction = showSaveAction ? (
     status === 'card_editing' ? (
       <Button onClick={handleCardSave} disabled={isSaving} className="shadow-sm" size="sm">
@@ -1907,18 +2319,17 @@ function WritingSessionContent() {
         : chapterInfo.chapter
           ? chapterInfo.chapter_title || t('writingSession.chapterFallback').replace('{n}', chapterInfo.chapter)
           : null,
-    aiHint:
-      agentBusy && aiLockedChapter
-        ? t('writingSession.aiLockedStatusHint').replace('{n}', String(aiLockedChapter))
-        : null,
+    aiHint: null,
   };
 
   return (
     <IDELayout rightPanelContent={rightPanelContent} titleBarProps={titleBarProps}>
-      <div className="w-full h-full px-8 py-6">
+      <div className="h-full w-full">
         <WritingSessionMainContent
           vm={{
             activeActivity: state.activeActivity,
+            activeDocument: state.activeDocument,
+            projectId,
             dispatch,
             status,
             activeCard,
@@ -1926,11 +2337,22 @@ function WritingSessionContent() {
             onCardFormChange: handleCardFormChange,
             onCloseCardEditor: handleCloseCardEditor,
             chapterInfo,
-            setChapterInfo,
+            chapterLoadError,
+            chapterLoading,
             manualContent,
             writingLanguage,
             t,
             state,
+            tabs: state.openTabs,
+            tabStatusKeys,
+            fontSize: state.editorFontSize,
+            onFontSizeChange: handleFontSizeChange,
+            onSelectTab: handleSelectTab,
+            onCloseTab: handleCloseTab,
+            onCloseOtherTabs: handleCloseOtherTabs,
+            onRenameTab: handleRenameTab,
+            editorRef: attachEditor,
+            onEditorScroll: captureEditorViewState,
             diffReview,
             diffDecisions,
             onAcceptDiffHunk: handleAcceptDiffHunk,
@@ -1938,7 +2360,6 @@ function WritingSessionContent() {
             isDiffReviewForActiveChapter,
             isStreamingForActiveChapter,
             streamOriginalContent: streamOriginalByChapterRef.current[activeChapterKey] || '',
-            lockedOnActiveChapter,
             onManualContentChange: handleManualContentChange,
             onManualSelectionChange: handleManualSelectionChange,
           }}
@@ -1964,13 +2385,6 @@ function WritingSessionContent() {
         existingChapters={chapters.map((c) => ({ id: c, title: '' }))}
         volumes={volumes}
         defaultVolumeId={state.selectedVolumeId || 'V1'}
-      />
-
-      <PreWritingQuestionsDialog
-        open={showPreWriteDialog}
-        questions={preWriteQuestions}
-        onConfirm={handlePreWriteConfirm}
-        onSkip={handlePreWriteSkip}
       />
 
       <AnalysisReviewDialog

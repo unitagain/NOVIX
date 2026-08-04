@@ -22,7 +22,6 @@ from app.llm_gateway.gateway import LLMGateway
 from app.llm_gateway.providers.base import BaseLLMProvider
 from app.llm_gateway.providers.anthropic_provider import AnthropicProvider
 from app.llm_gateway.providers.openai_provider import OpenAIProvider
-from app.agents.fallback_policy import build_fallback_context, fallback_category
 from app.agents.writing_actions import WritingActionToolset
 from app.orchestrator.architecture import maintenance_freeze_policies
 
@@ -137,25 +136,6 @@ def test_token_margin_recommendation_requires_fixed_evidence_and_never_applies()
     assert after["applied"] is False
 
 
-def test_fallback_context_preserves_reason_tools_sources_and_artifacts_without_content():
-    context = build_fallback_context(
-        reason="max_iterations",
-        agent_run={
-            "iterations": 6,
-            "tool_results": [
-                {"tool_name": "query_canon", "artifact_ref": "tool://artifact-1", "output_preview": "private"}
-            ],
-            "degradations": [{"type": "provider_agentic_stream_unavailable"}],
-        },
-        context_supply={"used": ["canon", "draft"]},
-    )
-    assert fallback_category("max_iterations") == "iteration_limit"
-    assert context["iterations"] == 6
-    assert context["tool_names"] == ["query_canon"]
-    assert context["artifact_refs"] == ["tool://artifact-1"]
-    assert "private" not in str(context)
-
-
 def test_memory_semantic_recall_remains_disabled_without_labeled_miss_evidence():
     blocked = memory_semantic_recall_decision(lexical_queries=100, labeled_semantic_misses=3)
     allowed = memory_semantic_recall_decision(lexical_queries=100, labeled_semantic_misses=20)
@@ -167,9 +147,8 @@ def test_memory_semantic_recall_remains_disabled_without_labeled_miss_evidence()
 
 def test_low_usage_maintenance_surfaces_have_explicit_expansion_gates():
     policies = {item["area"]: item for item in maintenance_freeze_policies()}
-    assert set(policies) == {"eval", "durable_queue", "legacy_fallback", "permission_policy"}
+    assert set(policies) == {"eval", "durable_queue", "permission_policy"}
     assert policies["durable_queue"]["policy"] == "existing_consumers_only"
-    assert policies["legacy_fallback"]["expansion_gate"] == "no_new_context_features"
 
 
 class _AsyncRows:

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, MutableMapping, Optional, Protocol, TypedDict
 
 from app.context_engine.turn_scope import TurnScope
+from app.schemas.draft import ChapterSummary
 
 
 class AgentStreamEvent(TypedDict, total=False):
@@ -20,44 +21,57 @@ class AgentStreamEvent(TypedDict, total=False):
 
 class WritingResult(TypedDict, total=False):
     success: bool
-    fallback: bool
+    terminal_state: str
     incomplete: bool
     cancelled: bool
     reason: str
     action: str
     changed: bool
+    partial: bool
+    content: str
     message: str
     summary: str
     assembly_fingerprint: str
     agent_run: Dict[str, Any]
     context_supply: Dict[str, Any]
-    fallback_context: Dict[str, Any]
     proposals: List[Dict[str, Any]]
     actions: List[Dict[str, Any]]
+    writing_memory: Dict[str, Any]
+    turn_effect: Dict[str, Any]
+    # 新建章节与自动提交只在对应路径产生；未发生时显式为 None，消费方按 isinstance(dict) 判定。
+    chapter_target: Optional[Dict[str, Any]]
+    auto_commit: Optional[Dict[str, Any]]
+    clarification: Dict[str, Any]
+    clarify_decision: str
+    questions: List[Dict[str, Any]]
 
 
 class ChatTurnResult(TypedDict, total=False):
     success: bool
     status: object
     action: str
+    changed: bool
+    partial: bool
+    content: str
     decision: Dict[str, Any]
     route_contract: Dict[str, Any]
     plan: Dict[str, Any]
     execution: Dict[str, Any]
     cancelled: bool
     incomplete: bool
-    fallback: bool
-    fallback_executed: bool
     reason: str
     terminal_state: str
-    fallback_context: Dict[str, Any]
-    fallback_decision: Dict[str, Any]
-    fallback_execution: Dict[str, Any]
-    pending_action: Dict[str, Any]
-    compatibility: Dict[str, Any]
     context_plan: Dict[str, Any]
     trace_ref: str
     runtime: Dict[str, Any]
+    writing_memory: Dict[str, Any]
+    turn_effect: Dict[str, Any]
+    chapter_target: Optional[Dict[str, Any]]
+    auto_commit: Optional[Dict[str, Any]]
+    clarification: Dict[str, Any]
+    clarify_decision: str
+    questions: List[Dict[str, Any]]
+    clarify_mode: str
 
 
 ProgressCallback = Callable[[Dict[str, Any]], Awaitable[None]]
@@ -67,7 +81,9 @@ ProposalDetector = Callable[[str, str], Awaitable[List[Dict[str, Any]]]]
 class GatewayPort(Protocol):
     def get_provider_for_agent(self, name: str) -> Optional[str]: ...
 
-    def thinking_param_for_agent(self, name: str, enabled: bool) -> object: ...
+    def thinking_param_for_agent(
+        self, name: str, enabled: bool = False, *, reasoning_level: str = "auto"
+    ) -> object: ...
 
 
 class WriterAgentPort(Protocol):
@@ -75,17 +91,15 @@ class WriterAgentPort(Protocol):
 
 
 class DraftStoragePort(Protocol):
-    async def list_draft_versions(self, project_id: str, chapter: str) -> List[str]: ...
+    async def get_working_text(self, project_id: str, chapter: str) -> tuple[str, Optional[Path]]: ...
 
-    async def get_draft(self, project_id: str, chapter: str, version: str) -> object: ...
+    async def list_chapters(self, project_id: str) -> List[str]: ...
 
-    def get_latest_draft_file(self, project_id: str, chapter: str) -> Optional[Path]: ...
+    async def save_current_draft(self, project_id: str, chapter: str, content: str, **kwargs: Any) -> object: ...
 
+    async def get_chapter_summary(self, project_id: str, chapter: str) -> Optional[ChapterSummary]: ...
 
-class FallbackDraftStoragePort(Protocol):
-    async def list_draft_versions(self, project_id: str, chapter: str) -> List[str]: ...
-
-    def get_draft_revision(self, project_id: str, chapter: str, version: str) -> Dict[str, Any]: ...
+    async def save_chapter_summary(self, project_id: str, summary: ChapterSummary) -> None: ...
 
 
 class ContextPlanPort(Protocol):
@@ -128,28 +142,25 @@ class CommandsPort(Protocol):
     async def run(self, **kwargs: Any) -> Dict[str, Any]: ...
 
 
+class AnalysisPort(Protocol):
+    """Turn-effect write-back seam consumed by the chat turn path."""
+
+    async def apply_turn_effect(
+        self,
+        project_id: str,
+        chapter: str,
+        turn_effect: Dict[str, Any],
+    ) -> Dict[str, Any]: ...
+
+
 class ApplicationPort(Protocol):
     plans: PlansPort
     commands: CommandsPort
+    analysis: AnalysisPort
 
 
 class WritingServicePort(Protocol):
     async def run(self, project_id: str, chapter: str, message: str, **kwargs: Any) -> WritingResult: ...
-
-
-class FallbackExecutionPort(Protocol):
-    async def execute(
-        self,
-        *,
-        project_id: str,
-        chapter: str,
-        message: str,
-        action: str,
-        fallback_context: Dict[str, Any],
-        target_word_count: int,
-        approval_action_id: str = "",
-        approval_token: str = "",
-    ) -> ChatTurnResult: ...
 
 
 class PendingActionPort(Protocol):
@@ -177,38 +188,15 @@ class PendingActionPort(Protocol):
     ) -> Dict[str, Any]: ...
 
 
-class FallbackOwnerPort(Protocol):
-    application: ApplicationPort
-    draft_storage: FallbackDraftStoragePort
-
-    async def start_session(
-        self,
-        *,
-        project_id: str,
-        chapter: str,
-        chapter_title: str,
-        chapter_goal: str,
-        target_word_count: int = 3000,
-    ) -> Dict[str, Any]: ...
-
-    async def process_feedback(
-        self,
-        *,
-        project_id: str,
-        chapter: str,
-        feedback: str,
-        action: str = "revise",
-    ) -> Dict[str, Any]: ...
-
-
 class ChatTurnOwnerPort(Protocol):
     session_history: SessionHistoryPort
     context_planning_service: ContextPlanningPort
     select_engine: RankingTracePort
     application: ApplicationPort
     writing_service: WritingServicePort
-    fallback_execution_service: FallbackExecutionPort
     draft_storage: DraftStoragePort
+    gateway: GatewayPort
+    writer: WriterAgentPort
     _active_turn_scopes: MutableMapping[str, TurnScope]
 
     async def decide_writing_action(

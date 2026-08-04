@@ -166,9 +166,9 @@ def test_capability_negotiation_is_inventory_driven_and_fail_closed():
             "thinking": {"budget_tokens": 100},
         },
     )
-    assert negotiated["options"] == {}
+    assert negotiated["options"] == {"thinking": {"budget_tokens": 100}}
     assert negotiated["capabilities"]["stream_mode"] == "non_stream_fallback"
-    assert {row["capability"] for row in negotiated["degradation"]} == {"tools", "json_mode", "thinking"}
+    assert {row["capability"] for row in negotiated["degradation"]} == {"tools", "json_mode"}
 
     class UnknownProvider(BaseLLMProvider):
         async def chat(self, messages, temperature=None, max_tokens=None, **kwargs):

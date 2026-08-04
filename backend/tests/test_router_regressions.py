@@ -8,7 +8,6 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.routers import fanfiction as fanfiction_router
-from app.routers import session as session_router
 
 
 @pytest.fixture
@@ -68,41 +67,3 @@ async def test_test_model_rejects_empty_model(client) -> None:
     )
     assert response.status_code == 400
     assert response.json()["detail"] == "Model is required."
-
-
-@pytest.mark.asyncio
-async def test_edit_suggest_returns_user_facing_error_when_revision_unchanged(monkeypatch, client) -> None:
-    class FakeEditor:
-        async def suggest_revision(self, **kwargs):
-            return kwargs["original_draft"]
-
-    class FakeOrchestrator:
-        editor = FakeEditor()
-
-        class Application:
-            class Context:
-                async def ensure_memory_pack(self, **kwargs):
-                    return {"summary": "cached"}
-
-            context = Context()
-
-        application = Application()
-
-    monkeypatch.setattr(
-        session_router, "get_orchestrator", lambda project_id, request_language=None: FakeOrchestrator()
-    )
-
-    response = await client.post(
-        "/projects/demo/session/edit-suggest",
-        json={
-            "chapter": "1",
-            "content": "原文内容",
-            "instruction": "优化开头",
-            "context_mode": "quick",
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["success"] is False
-    assert "未能生成可应用的差异修改" in payload["error"]

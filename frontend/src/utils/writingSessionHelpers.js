@@ -4,7 +4,6 @@
  * 从 WritingSession.jsx 提取的纯工具函数，不含 React 状态逻辑。
  */
 import { draftsAPI } from '../api';
-import { buildLineDiff } from '../lib/diffUtils';
 import logger from '../utils/logger';
 
 /** 异步获取章节内容（SWR fetcher） */
@@ -13,6 +12,7 @@ export const fetchChapterContent = async ([_, projectId, chapter]) => {
     const resp = await draftsAPI.getFinal(projectId, chapter);
     return resp.data?.content || '';
   } catch (e) {
+    if (e?.response?.status !== 404) throw e;
     try {
       const versionsResp = await draftsAPI.listVersions(projectId, chapter);
       const versions = versionsResp.data || [];
@@ -21,7 +21,8 @@ export const fetchChapterContent = async ([_, projectId, chapter]) => {
         const draftResp = await draftsAPI.getDraft(projectId, chapter, latestVer);
         return draftResp.data?.content || '';
       }
-    } catch (_vErr) {
+    } catch (versionError) {
+      if (versionError?.response?.status !== 404) throw versionError;
       logger.debug('No drafts found, starting fresh.');
     }
   }
@@ -84,53 +85,4 @@ export const formatListInput = (value) => {
 export const formatRulesInput = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
   return value || '';
-};
-
-/** 检测指令中是否包含删除意图 */
-export const hasDeletionIntent = (text) => {
-  const content = String(text || '');
-  return /删除|删掉|删去|去掉|裁剪|截断|缩短|精简|删减|减少篇幅|去除后半段|删除结尾|删去结尾|去掉结尾/.test(content);
-};
-
-/** 检测末尾删除操作 */
-export const detectTrailingDeletes = (ops = []) => {
-  let index = ops.length - 1;
-  while (index >= 0 && ops[index].type === 'context') {
-    index -= 1;
-  }
-  if (index < 0) return null;
-  const tailHunkId = ops[index].hunkId;
-  if (!tailHunkId) return null;
-  const deletedLines = [];
-  let hasAdd = false;
-  while (index >= 0 && ops[index].hunkId === tailHunkId) {
-    if (ops[index].type === 'add') {
-      hasAdd = true;
-    } else if (ops[index].type === 'delete') {
-      deletedLines.push(ops[index].content);
-    }
-    index -= 1;
-  }
-  if (hasAdd || deletedLines.length === 0) return null;
-  return deletedLines.reverse();
-};
-
-/** 稳定化修改建议的尾部内容 */
-export const stabilizeRevisionTail = (original, revised, instruction) => {
-  if (hasDeletionIntent(instruction)) {
-    return { text: revised || '', applied: false };
-  }
-  const rawDiff = buildLineDiff(original || '', revised || '', { contextLines: 1 });
-  const tailDeletes = detectTrailingDeletes(rawDiff.ops || []);
-  if (!tailDeletes) {
-    return { text: revised || '', applied: false };
-  }
-  const tailText = tailDeletes.join('\n');
-  const tailChars = tailText.replace(/\s/g, '').length;
-  if (tailChars < 120 && tailDeletes.length < 2) {
-    return { text: revised || '', applied: false };
-  }
-  const normalized = String(revised || '').replace(/\r\n/g, '\n');
-  const separator = normalized.endsWith('\n') || normalized === '' ? '' : '\n';
-  return { text: normalized + separator + tailText, applied: true };
 };

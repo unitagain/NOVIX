@@ -38,8 +38,8 @@ class ConversationPort:
         self.session_history = session_history
         self.post_turn_service = post_turn_service
 
-    async def append(self, project_id: str, message: Dict[str, Any]) -> Dict[str, Any]:
-        return await self.session_history.append(project_id, message)
+    async def append(self, project_id: str, message: Dict[str, Any], *, conversation_id: str = "") -> Dict[str, Any]:
+        return await self.session_history.append(project_id, message, conversation_id=conversation_id)
 
     async def load(self, project_id: str, *, limit: int = 0) -> List[Dict[str, Any]]:
         return await self.session_history.load(project_id, limit=limit)
@@ -72,6 +72,9 @@ class AnalysisPort:
     async def save_analysis(self, **kwargs: Any) -> Dict[str, Any]:
         return await self.owner.save_analysis(**kwargs)
 
+    async def apply_turn_effect(self, project_id: str, chapter: str, turn_effect: Dict[str, Any]) -> Dict[str, Any]:
+        return await self.owner.apply_turn_effect(project_id, chapter, turn_effect)
+
     async def analyze_sync(self, project_id: str, chapters: List[str]) -> Dict[str, Any]:
         return await self.owner.analyze_sync(project_id, chapters)
 
@@ -80,14 +83,6 @@ class AnalysisPort:
 
     async def save_analysis_batch(self, **kwargs: Any) -> Dict[str, Any]:
         return await self.owner.save_analysis_batch(**kwargs)
-
-
-class ContextPort:
-    def __init__(self, ensure_memory_pack: Callable[..., Awaitable[Dict[str, Any]]]) -> None:
-        self._ensure_memory_pack = ensure_memory_pack
-
-    async def ensure_memory_pack(self, **kwargs: Any) -> Dict[str, Any]:
-        return await self._ensure_memory_pack(**kwargs)
 
 
 class VolumeSummaryService:
@@ -123,6 +118,5 @@ class OrchestratorApplicationPorts:
     conversation: ConversationPort
     commands: CommandPort
     analysis: AnalysisPort
-    context: ContextPort
     volumes: VolumeSummaryService
     plans: Any

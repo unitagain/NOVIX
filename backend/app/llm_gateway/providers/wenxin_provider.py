@@ -13,7 +13,7 @@ class WenxinProvider(CustomProvider):
         self,
         api_key: str,
         base_url: str = None,
-        model: str = "ernie-4.5-turbo-32k",
+        model: str = "ernie-5.0",
         max_tokens: int = 8000,
         temperature: float = 0.7,
     ):

@@ -16,7 +16,7 @@ from app.utils.openai_client import create_async_openai_client
 class DeepSeekProvider(BaseLLMProvider):
     """DeepSeek API provider (OpenAI-compatible) / DeepSeek API 提供商（兼容OpenAI）"""
 
-    def __init__(self, api_key: str, model: str = "deepseek-chat", max_tokens: int = 8000, temperature: float = 0.7):
+    def __init__(self, api_key: str, model: str = "deepseek-v4-flash", max_tokens: int = 8000, temperature: float = 0.7):
         super().__init__(api_key, model, max_tokens, temperature)
         self.client = create_async_openai_client(api_key=api_key, base_url="https://api.deepseek.com/v1")
 

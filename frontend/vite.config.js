@@ -30,6 +30,16 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks(id) {
             if (!id.includes('node_modules')) return undefined;
+            // 关系图谱画布依赖（React Flow + d3/zustand）只被懒加载组件引用，必须最先判定：
+            // `@xyflow/react` 的路径含 `/react/`，若排在 react 规则之后会被并进首屏 chunk。
+            if (
+              id.includes('@xyflow') ||
+              id.includes('/d3-') ||
+              id.includes('/zustand/') ||
+              id.includes('/classcat/')
+            ) {
+              return 'vendor-flow';
+            }
             // Keep router packages together to avoid circular chunk deps with React core.
             // 将路由相关包单独聚合，避免与 React 核心切块后形成循环依赖。
             if (

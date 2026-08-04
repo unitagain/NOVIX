@@ -6,11 +6,8 @@ import asyncio
 from app.agents.agent_task import AgentTask
 from app.context_engine.trace_collector import trace_collector
 from app.orchestrator.context_planning_service import ContextPlanningService
-from app.orchestrator.finalize_pipeline import FinalizePipeline
 from app.orchestrator.orchestrator import Orchestrator
 from app.orchestrator.worker_task_service import WorkerTaskService
-from app.storage.drafts import DraftStorage
-from app.orchestrator.contracts import SessionStatus
 
 
 class _SelectEngine:
@@ -33,7 +30,6 @@ def test_orchestrator_exposes_p7_services(tmp_path):
     orch = Orchestrator(str(tmp_path))
     assert orch.context_planning_service is not None
     assert orch.plan_execution_service is not None
-    assert orch.finalize_pipeline is not None
     assert orch.worker_task_service is not None
 
 
@@ -83,23 +79,3 @@ def test_plan_research_uses_worker_trace(tmp_path):
     events = trace_collector.get_recent_events(1000)[before:]
     assert "玉佩" in note
     assert any(event.get("type") == "agent_task" for event in events)
-
-
-def test_finalize_pipeline_saves_final_and_updates_status(tmp_path):
-    storage = DraftStorage(str(tmp_path))
-    statuses = []
-    analyzed = []
-
-    async def analyze(project_id, chapter, content):
-        analyzed.append((project_id, chapter, content))
-
-    async def update_status(status, message):
-        statuses.append((status, message))
-
-    asyncio.run(storage.save_draft("p", "V1C001", "v1", "正文", 2))
-    pipeline = FinalizePipeline(draft_storage=storage, analyze_content=analyze, update_status=update_status)
-    result = asyncio.run(pipeline.finalize_chapter("p", "V1C001"))
-    assert result["success"] is True
-    assert statuses[-1][0] == SessionStatus.COMPLETED
-    assert analyzed == [("p", "V1C001", "正文")]
-    assert asyncio.run(storage.get_final_draft("p", "V1C001")) == "正文"

@@ -17,6 +17,23 @@ from app.error_contract import record_degradation
 logger = get_logger(__name__)
 
 
+def _json_safe_trace_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """把事件数据投影为 JSON-safe：剔除内部 `_` 前缀键（如 gateway 注入的 `_deadline`
+    RequestDeadline 对象），并对残余非序列化值兜底为 str，避免订阅者 `to_json()` 崩溃。"""
+
+    def _strip_private(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: _strip_private(v) for k, v in value.items() if not str(k).startswith("_")}
+        if isinstance(value, (list, tuple)):
+            return [_strip_private(item) for item in value]
+        return value
+
+    try:
+        return json.loads(json.dumps(_strip_private(data), ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return {"_trace_serialization": "unavailable"}
+
+
 class TraceEventType(str, Enum):
     """追踪事件类型"""
 
@@ -221,7 +238,7 @@ class TraceCollector:
                 type=event_type,
                 agent_name=agent_name,
                 timestamp=datetime.now().timestamp(),
-                data=data or {},
+                data=_json_safe_trace_data(data or {}),
                 parent_id=parent_id,
                 trace_id=turn_scope.trace_id if turn_scope is not None else self._trace_id,
                 span_id=span_id,

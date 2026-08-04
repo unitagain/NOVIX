@@ -61,8 +61,8 @@ const StreamingDiffView = ({ originalContent = '', content = '', active = false,
       </div>
 
       {/* 内容区：原文（灰 context）在上，新文（绿 add 块，流式增长）在下 */}
-      <div className="flex-1 overflow-y-auto editor-scrollbar p-6">
-        <div className="font-serif text-base leading-relaxed text-[var(--vscode-fg)] space-y-0.5">
+      <div className="flex-1 overflow-y-auto editor-scrollbar px-[clamp(16px,3.5vw,56px)] py-5">
+        <div className="font-serif text-[length:var(--editor-font-size,16px)] leading-relaxed text-[var(--vscode-fg)] space-y-0.5">
           {originalLines.length > 0
             ? originalLines.map((line, idx) => (
                 <div

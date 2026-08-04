@@ -40,6 +40,7 @@ from app.routers import (
     actions_router,
     export_router,
 )
+from app.routers import outline_router
 from app.routers.fanfiction import router as fanfiction_router
 from app.routers.websocket import router as websocket_router
 from app.routers.volumes import router as volumes_router
@@ -203,6 +204,7 @@ routers = [
     memory_router,
     actions_router,
     export_router,
+    outline_router,
 ]
 
 for router in routers:

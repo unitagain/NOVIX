@@ -54,8 +54,26 @@ def _toolset():
 # ----------------------------------------------------------- Toolset tests --
 
 
-def test_schemas_cover_five_tools():
-    names = {s["function"]["name"] for s in WriterToolset.schemas()}
+def test_schemas_cover_expected_tools():
+    # 启用大纲时含 read_outline / edit_outline（共 7 个工具）；schemas 现为实例方法（受 outline_enabled 影响）。
+    enabled = {s["function"]["name"] for s in _toolset().schemas()}
+    assert enabled == {
+        "lookup_card",
+        "query_canon",
+        "query_relations",
+        "read_chapter",
+        "search_prose",
+        "read_outline",
+        "edit_outline",
+    }
+
+
+def test_schemas_omit_read_outline_when_disabled():
+    ts = _toolset()
+    ts.outline_enabled = False
+    names = {s["function"]["name"] for s in ts.schemas()}
+    assert "read_outline" not in names
+    assert "edit_outline" not in names
     assert names == {"lookup_card", "query_canon", "query_relations", "read_chapter", "search_prose"}
 
 
@@ -223,6 +241,52 @@ def test_agentic_loop_executes_tool_then_finishes():
     assert "tool_call" in events and "tool_result" in events
 
 
+class _CommentaryGateway:
+    def __init__(self):
+        self.calls = 0
+
+    async def chat(self, _messages, **_kwargs):
+        self.calls += 1
+        if self.calls <= 2:
+            return {
+                "content": "先检查设定。" if self.calls == 1 else "现在继续检查并准备写作。",
+                "tool_calls": [
+                    {
+                        "id": f"lookup-{self.calls}",
+                        "type": "function",
+                        "name": "lookup_card",
+                        "arguments": '{"name":"张三"}',
+                    }
+                ],
+                "usage": {},
+                "model": "fake",
+                "finish_reason": "tool_calls",
+            }
+        return {"content": "最终答复", "tool_calls": None, "usage": {}, "model": "fake", "finish_reason": "stop"}
+
+
+def test_agentic_emits_at_most_one_tool_loop_commentary():
+    events = []
+
+    async def _on(event):
+        events.append(event)
+
+    response = asyncio.run(
+        run_agentic_chat(
+            _CommentaryGateway(),
+            "fake",
+            [{"role": "user", "content": "检查"}],
+            _toolset(),
+            max_iterations=4,
+            on_event=_on,
+        )
+    )
+
+    commentary = [event["content"] for event in events if event["type"] == "assistant_text"]
+    assert response["content"] == "最终答复"
+    assert commentary == ["先检查设定。"]
+
+
 class _StreamingActionGateway:
     def __init__(self):
         self.calls = 0
@@ -255,13 +319,23 @@ class _StreamingActionGateway:
                 "usage": {},
                 "finish_reason": "tool_calls",
             }
-        await on_stream_event({"type": "content_delta", "content": "完成"})
         return {
             "provider": "openai",
-            "content": "完成",
-            "tool_calls": None,
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-2",
+                    "type": "function",
+                    "name": "finish_turn",
+                    "arguments": (
+                        '{"change_type":"chapter_write","fact_operation":"replace_chapter",'
+                        '"chapter_summary":"流式正文第一段。","fact_candidates":[],'
+                        '"message":"完成"}'
+                    ),
+                }
+            ],
             "usage": {},
-            "finish_reason": "stop",
+            "finish_reason": "tool_calls",
         }
 
 
@@ -351,6 +425,54 @@ def test_agentic_emits_thinking_event():
     assert "thinking" in types and "tool_call" in types and "tool_result" in types
     thinking_ev = next(e for e in events if e["type"] == "thinking")
     assert "张三" in thinking_ev["content"]  # 真实思考内容（非伪进度）
+
+
+def test_agentic_can_suppress_reasoning_events():
+    gw = _ThinkingGateway()
+    events = []
+
+    async def _on(ev):
+        events.append(ev)
+
+    resp = asyncio.run(
+        run_agentic_chat(
+            gw,
+            "fake",
+            [{"role": "user", "content": "写"}],
+            _toolset(),
+            max_iterations=3,
+            on_event=_on,
+            emit_reasoning=False,
+        )
+    )
+
+    assert resp["content"].startswith("写作须知")
+    assert "thinking" not in [event["type"] for event in events]
+
+
+class _TaggedReasoningGateway:
+    async def chat(self, messages, **kwargs):
+        return {
+            "content": "<think>内部推理不应进入正文</think>对用户可见的答复",
+            "tool_calls": None,
+            "usage": {},
+            "model": "fake",
+            "finish_reason": "stop",
+        }
+
+
+def test_agentic_strips_tagged_reasoning_from_visible_content():
+    resp = asyncio.run(
+        run_agentic_chat(
+            _TaggedReasoningGateway(),
+            "fake",
+            [{"role": "user", "content": "回答"}],
+            _toolset(),
+            emit_reasoning=False,
+        )
+    )
+
+    assert resp["content"] == "对用户可见的答复"
 
 
 def test_agentic_anthropic_replay_uses_block_format():

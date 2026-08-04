@@ -98,8 +98,8 @@ const DiffReviewView = ({
       </div>
 
       {/* 内容区：在全文对应位置展示内联差异 */}
-      <div className="flex-1 overflow-y-scroll editor-scrollbar p-6">
-        <div className="font-serif text-base leading-relaxed text-[var(--vscode-fg)] space-y-0.5">
+      <div className="flex-1 overflow-y-scroll editor-scrollbar px-[clamp(16px,3.5vw,56px)] py-5">
+        <div className="font-serif text-[length:var(--editor-font-size,16px)] leading-relaxed text-[var(--vscode-fg)] space-y-0.5">
           {segments.map((segment, index) => {
             if (segment.type === 'context') {
               return (

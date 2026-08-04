@@ -46,8 +46,24 @@ class PayloadAccountingPort:
             model=model,
             budget=input_budget,
         )
-        if accounting.upper_bound_tokens > input_budget:
-            raise ValueError(f"context_budget_exceeded:{accounting.upper_bound_tokens}>{input_budget}")
+        # input_budget 只是「给输出留位」的软目标；硬上限是模型真实上下文窗口。
+        # 硬失败只在「点估计 tokens」真的超过窗口时触发：upper_bound_tokens 是 1.35x 悲观上界，
+        # 用它比较硬窗口会把实际远低于窗口的 payload（尤其 32K 等小窗口模型）误判为超预算。
+        # 悲观上界仅继续服务软目标预警（下方 degradation），不再用于拦截整轮；
+        # 点估计偶尔低估时由 provider 侧结构化错误 + retry/降级兜底，好过假性失败拦死整轮。
+        hard_ceiling = max(int(input_budget), int(context_limit))
+        if accounting.tokens > hard_ceiling:
+            raise ValueError(f"context_budget_exceeded:{accounting.tokens}>{hard_ceiling}")
+        if input_budget and accounting.upper_bound_tokens > input_budget:
+            degradation = [
+                *degradation,
+                {
+                    "type": "input_budget_soft_overflow",
+                    "upper_bound_tokens": int(accounting.upper_bound_tokens),
+                    "input_budget": int(input_budget),
+                    "context_limit": int(hard_ceiling),
+                },
+            ]
         if scope is not None and scope.source_closure_required:
             scope.register_provider_payload(
                 fitted,

@@ -19,6 +19,13 @@ from typing import Any, Dict, Iterator, List, Optional
 from app.context_engine.source_snapshot import SourceDescriptor, SourceRegistry
 
 
+def _public_request_view(request: Dict[str, Any]) -> Dict[str, Any]:
+    """剔除 model_request 记录里的内部 `_` 前缀键（如 gateway 注入的 `_deadline`
+    RequestDeadline 活对象），确保 turn_trace 序列化进响应/trace 时是 JSON-safe。"""
+
+    return {key: value for key, value in request.items() if not str(key).startswith("_")}
+
+
 @dataclass
 class TurnTrace:
     """Mutable execution facts kept separate from frozen context plans."""
@@ -35,7 +42,7 @@ class TurnTrace:
         return {
             "turn_id": self.turn_id,
             "trace_id": self.trace_id,
-            "model_requests": list(self.model_requests),
+            "model_requests": [_public_request_view(request) for request in self.model_requests],
             "source_verifications": list(self.source_verifications),
             "assembly_fingerprints": list(self.assembly_fingerprints),
             "ranking_actual": list(self.ranking_actual),

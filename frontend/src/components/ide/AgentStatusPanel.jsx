@@ -1,366 +1,20 @@
 /**
- * AgentStatusPanel - Agent 状态面板（带消息历史和输入框）
+ * AgentStatusPanel - Agent 面板组装壳
  *
- * 保留对话形式的同时，在 Agent 工作时显示状态卡片
- * - 消息历史记录（用户可追溯修改意见）
- * - 动态 Agent 状态卡片
- * - 底部输入框用于用户交互
+ * 对话流渲染已抽出到 `components/agent/`（AgentTranscript + parts）：本文件只负责
+ * 组装 —— transcript、写作记忆/Canon 卡、diff 审阅、plan 卡与底部输入区。
  */
 
 import React, { useMemo, useState, useRef, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import {
-  ChevronDown,
-  ChevronRight,
-  Sparkles,
-  Copy,
-  X,
-  Square,
-  Brain,
-  Search,
-  PenLine,
-  Check,
-  Loader2,
-  Bot,
-  ArrowUp,
-  User,
-  ShieldCheck,
-  Wrench,
-} from 'lucide-react';
+import { motion } from 'framer-motion';
+import { ChevronDown, X, Square, Brain, Check, Bot, ArrowUp } from 'lucide-react';
 import { useLocale } from '../../i18n';
 import { buildAgentThread } from '../../lib/agentThread';
-
-// 复制按钮：悬停浮现，复制纯文本（用于 Agent 正文）。
-const CopyButton = ({ text }) => {
-  const { t } = useLocale();
-  const [done, setDone] = useState(false);
-  const onCopy = async () => {
-    if (!navigator?.clipboard?.writeText) return;
-    try {
-      await navigator.clipboard.writeText(String(text || ''));
-      setDone(true);
-      setTimeout(() => setDone(false), 1200);
-    } catch (_e) {
-      /* noop */
-    }
-  };
-  return (
-    <button
-      type="button"
-      onClick={onCopy}
-      title={t('common.copy')}
-      className="opacity-0 group-hover:opacity-100 transition-opacity text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]"
-    >
-      {done ? <Check size={12} /> : <Copy size={12} />}
-    </button>
-  );
-};
-
-// 步骤图标：按阶段映射为语义图标（思考/检索/工具/撰写/完成），未知阶段用小圆点
-const stageIconFor = (stage) => {
-  const map = {
-    thinking: Brain,
-    tool_call: Search,
-    tool_result: Check,
-    read_previous: Search,
-    read_facts: Search,
-    lookup_cards: Search,
-    prepare_retrieval: Search,
-    execute_retrieval: Search,
-    generate_plan: Search,
-    self_check: Check,
-    memory_pack: Search,
-    writing: PenLine,
-    edit_suggest: PenLine,
-    edit_suggest_done: Check,
-    persist: Check,
-    scene_brief: Sparkles,
-  };
-  const Icon = map[stage];
-  if (!Icon) return <span className="inline-block w-1.5 h-1.5 rounded-full bg-[var(--vscode-fg-subtle)]" />;
-  return <Icon size={12} className="text-[var(--vscode-fg-subtle)]" />;
-};
-
-// 内联过程步骤（Trae 式）：思考 = 灰色「思考过程」药丸，展开为整段推理正文；
-// 工具/检索/读文件 = 左侧 › 箭头行，展开为等宽结果。
-const StepRow = ({ event, isOpen, onToggle, formatStageLabel }) => {
-  const isThinking = event.stage === 'thinking';
-  const hasNote = Boolean(event.note);
-  const Chevron = (
-    <motion.span
-      animate={{ rotate: isOpen ? 90 : 0 }}
-      transition={{ duration: 0.15 }}
-      className="shrink-0 text-[var(--vscode-fg-subtle)]"
-    >
-      <ChevronRight size={13} />
-    </motion.span>
-  );
-
-  if (isThinking) {
-    return (
-      <div>
-        <button
-          type="button"
-          onClick={hasNote ? onToggle : undefined}
-          className={[
-            'inline-flex items-center gap-1 px-2 py-1 rounded-[6px] text-[12px] bg-[var(--vscode-list-hover)] text-[var(--vscode-fg-subtle)] transition-colors',
-            hasNote ? 'hover:text-[var(--vscode-fg)] cursor-pointer' : 'cursor-default',
-          ].join(' ')}
-        >
-          {hasNote ? Chevron : null}
-          <span>{formatStageLabel('thinking')}</span>
-        </button>
-        <AnimatePresence initial={false}>
-          {hasNote && isOpen ? (
-            <motion.div
-              initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
-              exit={{ opacity: 0, height: 0 }}
-              transition={{ duration: 0.18 }}
-              className="overflow-hidden"
-            >
-              <div className="mt-1.5 text-xs leading-relaxed text-[var(--vscode-fg)] whitespace-pre-wrap break-words">
-                {event.note}
-              </div>
-            </motion.div>
-          ) : null}
-        </AnimatePresence>
-      </div>
-    );
-  }
-
-  return (
-    <div className="text-[12px]">
-      <button
-        type="button"
-        onClick={hasNote ? onToggle : undefined}
-        className={[
-          'w-full flex items-center gap-1.5 text-left rounded-[6px] px-1 py-0.5 -mx-1',
-          hasNote ? 'hover:bg-[var(--vscode-list-hover)] cursor-pointer' : 'cursor-default',
-        ].join(' ')}
-      >
-        {hasNote ? Chevron : <span className="w-[13px] shrink-0" />}
-        <span className="shrink-0">{stageIconFor(event.stage)}</span>
-        <span className="text-[var(--vscode-fg)] shrink-0">{formatStageLabel(event.stage)}</span>
-        {event.message ? (
-          <span className="text-[var(--vscode-fg-subtle)] font-mono truncate min-w-0">{event.message}</span>
-        ) : null}
-      </button>
-      <AnimatePresence initial={false}>
-        {hasNote && isOpen ? (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.18 }}
-            className="overflow-hidden"
-          >
-            <div className="ml-[22px] mt-0.5 mb-1 whitespace-pre-wrap break-words border-l border-[var(--vscode-sidebar-border)] pl-2 text-[11px] text-[var(--vscode-fg-subtle)] font-mono">
-              {event.note}
-            </div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
-    </div>
-  );
-};
-
-// Agent 正文：无气泡、全宽、文档式（对标 Trae/ChatGPT），悬停显示复制。
-const AgentProse = ({ content }) => (
-  <div className="group relative text-xs leading-relaxed text-[var(--vscode-fg)] whitespace-pre-wrap break-words pr-5">
-    {content}
-    <span className="absolute top-0 right-0">
-      <CopyButton text={content} />
-    </span>
-  </div>
-);
-
-// 系统/错误小行：紧凑、低存在感。
-const MetaLine = ({ type, content }) => (
-  <div
-    className={[
-      'text-[11px] px-2 py-1 rounded-[6px] border',
-      type === 'error'
-        ? 'bg-red-50 text-red-700 border-red-200'
-        : 'bg-[var(--vscode-input-bg)] text-[var(--vscode-fg-subtle)] border-[var(--vscode-sidebar-border)] font-mono',
-    ].join(' ')}
-  >
-    {content}
-  </div>
-);
-
-// 一轮对话：用户气泡（右）→ Agent 头（机器人图标 + 进行中转圈）→ 内联时间线（步骤/正文交织）
-// 把时间线里连续的工具步骤折叠成一组（思考/正文保持独立），避免「数十个工具调用」刷屏。
-const _TOOL_STAGES = new Set(['tool_call', 'tool_result']);
-
-function groupTimeline(timeline) {
-  const out = [];
-  let buf = [];
-  const flush = () => {
-    if (!buf.length) return;
-    out.push({ kind: 'tool-group', id: `grp-${buf[0].id}`, steps: buf });
-    buf = [];
-  };
-  (timeline || []).forEach((item) => {
-    if (item.kind === 'progress' && _TOOL_STAGES.has(item.event?.stage)) {
-      buf.push(item);
-    } else {
-      flush();
-      out.push(item);
-    }
-  });
-  flush();
-  return out;
-}
-
-// AI IDE 式工具入口：主时间线只显示小图标，展开后查看逐项状态。
-const ToolGroupRow = ({ steps, isOpen, onToggle, expandedSteps, onToggleStep, defaultStepOpen, formatStageLabel }) => {
-  const { t } = useLocale();
-  const callCount = steps.filter((s) => s.event?.stage === 'tool_call').length || steps.length;
-  return (
-    <div>
-      <button
-        type="button"
-        onClick={onToggle}
-        title={(t('agentPanel.toolGroup') || '调用工具 · {n} 次').replace('{n}', callCount)}
-        aria-label={(t('agentPanel.toolGroup') || '调用工具 · {n} 次').replace('{n}', callCount)}
-        aria-expanded={isOpen}
-        className="relative inline-flex h-6 w-6 items-center justify-center rounded-[6px] text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)] transition-colors"
-      >
-        <Wrench size={13} />
-        {callCount > 1 ? (
-          <span className="absolute -right-1 -top-1 min-w-3 rounded-full bg-[var(--vscode-list-active)] px-0.5 text-center text-[8px] leading-3 text-[var(--vscode-list-active-fg)]">
-            {callCount}
-          </span>
-        ) : null}
-      </button>
-      <AnimatePresence initial={false}>
-        {isOpen ? (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.18 }}
-            className="overflow-hidden"
-          >
-            <div className="mt-1 space-y-1 pl-2 border-l border-[var(--vscode-sidebar-border)]">
-              {steps.map((s) => (
-                <StepRow
-                  key={s.id}
-                  event={s.event}
-                  isOpen={expandedSteps[s.id] !== undefined ? expandedSteps[s.id] : defaultStepOpen(s.event.stage)}
-                  onToggle={() =>
-                    onToggleStep(
-                      s.id,
-                      expandedSteps[s.id] !== undefined ? expandedSteps[s.id] : defaultStepOpen(s.event.stage),
-                    )
-                  }
-                  formatStageLabel={formatStageLabel}
-                />
-              ))}
-            </div>
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
-    </div>
-  );
-};
-
-const ChatTurn = ({ run, active, expandedSteps, onToggleStep, defaultStepOpen, formatStageLabel }) => {
-  const { t } = useLocale();
-  const hasAgent = run.timeline.length > 0 || active;
-  return (
-    <div className="my-3">
-      {run.userContent ? (
-        <div className="mb-3">
-          <div className="flex items-center justify-end gap-1.5 mb-1 text-[var(--vscode-fg-subtle)]">
-            <span className="text-[11px]">{t('agentPanel.userRole')}</span>
-            <span className="w-4 h-4 rounded-[4px] bg-[var(--vscode-list-active)] flex items-center justify-center">
-              <User size={11} className="text-[var(--vscode-fg-subtle)]" />
-            </span>
-          </div>
-          <div className="flex items-start justify-end gap-1.5">
-            <div className="max-w-[85%] px-3 py-2 rounded-[10px] text-xs leading-relaxed bg-[var(--vscode-list-hover)] text-[var(--vscode-fg)] whitespace-pre-wrap break-words">
-              {run.userContent}
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {hasAgent ? (
-        <div>
-          <div className="flex items-center gap-1.5 mb-2">
-            <span className="w-5 h-5 rounded-[5px] bg-[var(--vscode-fg)] flex items-center justify-center">
-              <Bot size={12} className="text-[var(--vscode-bg)]" />
-            </span>
-            <span className="text-sm font-bold text-[var(--vscode-fg)]">{t('agentPanel.agentRole')}</span>
-            {active ? <Loader2 size={12} className="animate-spin text-[var(--vscode-focus-border)]" /> : null}
-          </div>
-          <div className="space-y-1.5">
-            <AnimatePresence initial={false}>
-              {groupTimeline(run.timeline).map((item) => (
-                <motion.div
-                  key={item.id}
-                  initial={{ opacity: 0, x: -4 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.16 }}
-                >
-                  {item.kind === 'tool-group' ? (
-                    <ToolGroupRow
-                      steps={item.steps}
-                      isOpen={expandedSteps[item.id] !== undefined ? expandedSteps[item.id] : false}
-                      onToggle={() =>
-                        onToggleStep(item.id, expandedSteps[item.id] !== undefined ? expandedSteps[item.id] : false)
-                      }
-                      expandedSteps={expandedSteps}
-                      onToggleStep={onToggleStep}
-                      defaultStepOpen={defaultStepOpen}
-                      formatStageLabel={formatStageLabel}
-                    />
-                  ) : item.kind === 'progress' ? (
-                    <StepRow
-                      event={item.event}
-                      isOpen={
-                        expandedSteps[item.id] !== undefined
-                          ? expandedSteps[item.id]
-                          : defaultStepOpen(item.event.stage)
-                      }
-                      onToggle={() =>
-                        onToggleStep(
-                          item.id,
-                          expandedSteps[item.id] !== undefined
-                            ? expandedSteps[item.id]
-                            : defaultStepOpen(item.event.stage),
-                        )
-                      }
-                      formatStageLabel={formatStageLabel}
-                    />
-                  ) : item.type === 'assistant' ? (
-                    <AgentProse content={item.content} />
-                  ) : (
-                    <MetaLine type={item.type} content={item.content} />
-                  )}
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            {active ? (
-              <div className="flex items-center gap-1 pl-0.5 text-[var(--vscode-fg-subtle)]">
-                <span className="w-1 h-1 rounded-full bg-[var(--vscode-fg-subtle)] animate-pulse" />
-                <span
-                  className="w-1 h-1 rounded-full bg-[var(--vscode-fg-subtle)] animate-pulse"
-                  style={{ animationDelay: '0.15s' }}
-                />
-                <span
-                  className="w-1 h-1 rounded-full bg-[var(--vscode-fg-subtle)] animate-pulse"
-                  style={{ animationDelay: '0.3s' }}
-                />
-              </div>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-};
+import { AgentTranscript } from '../agent/AgentTranscript';
+import { PlanTaskCard } from '../agent/parts/PlanTaskCard';
+import { ClarificationPart } from '../agent/parts/ClarificationPart';
+import { WritingMemoryCard } from '../../features/agent/components/WritingMemoryCard';
+import { CanonTurnCard } from '../../features/agent/components/CanonTurnCard';
 
 // 主面板组件
 const AgentStatusPanel = ({
@@ -374,7 +28,11 @@ const AgentStatusPanel = ({
   onClearAttachedSelection = () => {},
   editScope = 'document',
   onEditScopeChange = () => {},
-  contextDebug = null,
+  memoryPackStatus = null,
+  memoryPackLoading = false,
+  activeChapter = '',
+  showWritingMemory = false,
+  canonTurnState = null,
   progressEvents = [],
   messages = [],
   diffReview = null,
@@ -384,24 +42,26 @@ const AgentStatusPanel = ({
   onApplySelectedDiff = () => {},
   onSubmit = () => {},
   inputMaxLength = 2000,
-  deepThinkingEnabled = false,
-  deepThinkingSupported = false,
-  onToggleDeepThinking = () => {},
+  reasoningLevel = 'off',
+  reasoningLevels = ['off'],
+  reasoningSupported = false,
+  onReasoningLevelChange = () => {},
+  agentMention = 'Agent',
   pendingPlan = null,
-  pendingApproval = null,
-  agentTurnMeta = null,
   planExecuting = false,
+  planActiveStepId = null,
   onExecutePlan = () => {},
   onDismissPlan = () => {},
-  onApproveFallback = () => {},
-  onDismissFallback = () => {},
+  clarification = null,
+  onClarificationConfirm = () => {},
+  onClarificationSkip = () => {},
+  onRollbackConversation = () => {},
   isGenerating = false,
   isCancelling = false,
   onCancel = () => {},
   className = '',
 }) => {
   const [inputValue, setInputValue] = useState('');
-  const [copyStatus, setCopyStatus] = useState('');
   const [expandedSteps, setExpandedSteps] = useState({});
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -409,34 +69,34 @@ const AgentStatusPanel = ({
   const scrollAreaRef = useRef(null);
   const [composerH, setComposerH] = useState(140);
   const [scrollH, setScrollH] = useState(0);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
   const { t } = useLocale();
 
-  const runs = useMemo(() => buildAgentThread(messages, progressEvents), [messages, progressEvents]);
+  useEffect(() => {
+    if (!reasoningOpen) return undefined;
+    const close = (event) => {
+      if (!composerRef.current?.contains(event.target)) {
+        setReasoningOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [reasoningOpen]);
 
-  const feedItems = useMemo(() => {
-    const runItems = runs.map((run) => ({
-      kind: 'run',
-      id: run.id,
-      ts: run.startedAt || 0,
-      run,
-    }));
-    const contextItems = contextDebug
-      ? [
-          {
-            kind: 'context',
-            id: 'context-debug',
-            ts: Number.MAX_SAFE_INTEGER,
-            debug: contextDebug,
-          },
-        ]
-      : [];
-    return [...runItems, ...contextItems].sort((a, b) => a.ts - b.ts);
-  }, [runs, contextDebug]);
+  const runs = useMemo(() => buildAgentThread(messages, progressEvents), [messages, progressEvents]);
+  const latestRunId = runs[runs.length - 1]?.id;
+  const activeRunId = isGenerating ? latestRunId : undefined;
 
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, progressEvents.length, contextDebug, diffReview]);
+  }, [
+    messages.length,
+    progressEvents.length,
+    diffReview,
+    memoryPackStatus?.built_at,
+    canonTurnState?.status,
+  ]);
 
   // 测量输入框实际高度 + 对话区可视高度 → 消息区动态底部留白：
   // = 输入框高度 + 半屏冗余，既不被悬浮输入框遮挡，又能自由上滑约半个页面。
@@ -477,11 +137,10 @@ const AgentStatusPanel = ({
   const hasDiffActions = Boolean(diffSummary);
   const hasAnyContent =
     runs.length > 0 ||
-    Boolean(contextDebug) ||
+    showWritingMemory ||
+    Boolean(canonTurnState) ||
     hasDiffActions ||
-    Boolean(pendingPlan) ||
-    Boolean(pendingApproval) ||
-    Boolean(agentTurnMeta);
+    Boolean(pendingPlan);
 
   const handleSubmit = () => {
     if (inputDisabled) return;
@@ -509,35 +168,29 @@ const AgentStatusPanel = ({
     el.style.overflowY = el.scrollHeight > maxHeight ? 'auto' : 'hidden';
   };
 
-  const handleCopyContextDebug = async () => {
-    if (!contextDebug) return;
-    const text = typeof contextDebug === 'string' ? contextDebug : JSON.stringify(contextDebug, null, 2);
-    if (!navigator?.clipboard?.writeText) {
-      window.alert(t('agentPanel.clipboardNotSupported'));
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopyStatus(t('common.copied'));
-      setTimeout(() => setCopyStatus(''), 1500);
-    } catch (_error) {
-      setCopyStatus(t('common.copyFailed'));
-      setTimeout(() => setCopyStatus(''), 2000);
-    }
+  const handleRollback = async (run) => {
+    const restored = await onRollbackConversation(run?.startedAt || 0);
+    if (typeof restored !== 'string') return;
+    setInputValue(restored);
+    window.requestAnimationFrame(() => {
+      updateInputHeight(inputRef.current);
+      inputRef.current?.focus();
+      if (inputRef.current) {
+        const end = restored.length;
+        inputRef.current.setSelectionRange(end, end);
+      }
+    });
   };
 
   // 步骤展开：显式记录 true/false（覆盖默认值）。current 为当前可见状态，点击则取反。
   const toggleStep = (id, current) => {
     setExpandedSteps((prev) => ({ ...prev, [id]: !current }));
   };
-  // AI IDE 模式：思考与工具过程默认折叠，仅保留紧凑状态入口。
-  const defaultStepOpen = () => false;
 
-  const formatStageLabel = (stage) => {
-    return t(`agentPanel.stageLabels.${stage}`) !== `agentPanel.stageLabels.${stage}`
-      ? t(`agentPanel.stageLabels.${stage}`)
-      : stage || t('agentPanel.stageLabels.default');
-  };
+  const reasoningLabel = (level) =>
+    ({ auto: 'AUTO', off: 'OFF', minimal: 'MINIMAL', low: 'LOW', medium: 'MEDIUM', high: 'HIGH', xhigh: 'XHIGH', max: 'MAX' })[
+      level
+    ] || level;
 
   return (
     <div className={`relative flex flex-col h-full ${className}`}>
@@ -549,87 +202,31 @@ const AgentStatusPanel = ({
       >
         {!hasAnyContent ? (
           /* 欢迎提示 */
-          <div className="h-full flex flex-col items-center justify-center text-center p-6">
-            <div className="w-16 h-16 rounded-[6px] bg-[var(--vscode-list-hover)] border border-[var(--vscode-sidebar-border)] flex items-center justify-center mb-4">
-              <Sparkles size={28} className="text-[var(--vscode-focus-border)]" />
-            </div>
-            <h3 className="text-sm font-bold text-[var(--vscode-fg)] mb-2">{t('agentPanel.welcome')}</h3>
-            <p className="text-xs text-[var(--vscode-fg-subtle)] max-w-[200px]">{t('agentPanel.welcomeHint')}</p>
+          <div
+            className="flex items-center justify-center p-6 text-center"
+            style={{ height: Math.max(180, scrollH - composerH - 24) }}
+          >
+            <h3 className="text-lg font-semibold tracking-tight text-[var(--vscode-fg)]">{t('agentPanel.welcome')}</h3>
           </div>
         ) : (
           <>
-            {feedItems.map((item) => {
-              if (item.kind === 'run') {
-                return (
-                  <ChatTurn
-                    key={item.id}
-                    run={item.run}
-                    active={isGenerating && runs.length > 0 && item.run.id === runs[runs.length - 1].id}
-                    expandedSteps={expandedSteps}
-                    onToggleStep={toggleStep}
-                    defaultStepOpen={defaultStepOpen}
-                    formatStageLabel={formatStageLabel}
-                  />
-                );
-              }
-              if (item.kind === 'context') {
-                const expanded = Boolean(expandedSteps[item.id]);
-                return (
-                  <div
-                    key={item.id}
-                    className="border border-[var(--vscode-sidebar-border)] rounded-[6px] bg-[var(--vscode-input-bg)] my-2 overflow-hidden"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => toggleStep(item.id, expanded)}
-                      className="w-full text-left px-3 py-2 flex items-start justify-between gap-2 hover:bg-[var(--vscode-list-hover)]"
-                    >
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-bold text-[var(--vscode-fg)]">
-                            {t('agentPanel.workingMemory')}
-                          </span>
-                          <span className="text-[10px] text-[var(--vscode-fg-subtle)]">
-                            {t('agentPanel.workingMemoryHint')}
-                          </span>
-                        </div>
-                        <div className="text-xs text-[var(--vscode-fg-subtle)]">
-                          {t('agentPanel.workingMemoryDesc')}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 text-[10px] text-[var(--vscode-fg-subtle)]">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleCopyContextDebug();
-                          }}
-                          title={t('agentPanel.copyJson')}
-                          className="flex items-center gap-1 px-2 py-1 rounded-[6px] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)] hover:border-[var(--vscode-focus-border)]"
-                        >
-                          <Copy size={12} />
-                          <span>{copyStatus || t('common.copy')}</span>
-                        </button>
-                        <motion.div animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.15 }}>
-                          <ChevronDown size={14} />
-                        </motion.div>
-                      </div>
-                    </button>
-                    {expanded && (
-                      <div className="px-3 pb-3">
-                        <div className="bg-[var(--vscode-input-bg)] border border-[var(--vscode-sidebar-border)] rounded-[6px] p-3 max-h-64 overflow-y-auto custom-scrollbar">
-                          <pre className="text-[10px] text-[var(--vscode-fg-subtle)] font-mono whitespace-pre-wrap break-words">
-                            {typeof item.debug === 'string' ? item.debug : JSON.stringify(item.debug, null, 2)}
-                          </pre>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              }
-
-              return null;
-            })}
+            <AgentTranscript
+              runs={runs}
+              activeRunId={activeRunId}
+              latestRunId={latestRunId}
+              isGenerating={isGenerating}
+              expandedSteps={expandedSteps}
+              onToggleStep={toggleStep}
+              onRollback={handleRollback}
+            />
+            {showWritingMemory ? (
+              <WritingMemoryCard
+                status={memoryPackStatus}
+                loading={memoryPackLoading}
+                chapter={activeChapter}
+              />
+            ) : null}
+            {canonTurnState ? <CanonTurnCard state={canonTurnState} /> : null}
             {hasDiffActions ? (
               <div className="border border-[var(--vscode-sidebar-border)] rounded-[6px] bg-[var(--vscode-input-bg)] my-2 overflow-hidden">
                 <div className="px-3 py-2 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
@@ -676,96 +273,22 @@ const AgentStatusPanel = ({
               </div>
             ) : null}
             {pendingPlan ? (
-              <div className="border border-[var(--vscode-sidebar-border)] rounded-[6px] bg-[var(--vscode-input-bg)] my-2 overflow-hidden">
-                <div className="px-3 py-2 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
-                  <div className="text-xs font-bold text-[var(--vscode-fg)]">{t('agentPanel.planTitle')}</div>
-                  {pendingPlan.goal ? (
-                    <div className="text-[10px] text-[var(--vscode-fg-subtle)] mt-1 truncate">{pendingPlan.goal}</div>
-                  ) : null}
-                </div>
-                <div className="px-3 py-2 space-y-1 max-h-48 overflow-y-auto custom-scrollbar">
-                  {(pendingPlan.steps || []).map((step, i) => (
-                    <div key={i} className="flex items-start gap-2 text-[11px] text-[var(--vscode-fg)]">
-                      <span className="font-mono text-[var(--vscode-fg-subtle)] shrink-0">{i + 1}.</span>
-                      <span className="px-1.5 rounded-[4px] bg-[var(--vscode-list-hover)] text-[10px] text-[var(--vscode-fg-subtle)] shrink-0">
-                        {step.action}
-                      </span>
-                      <span className="min-w-0 break-words">
-                        {step.description}
-                        {step.chapter ? ` · ${step.chapter}` : ''}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-                <div className="px-3 pb-3 pt-1 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={onDismissPlan}
-                    disabled={planExecuting}
-                    className="text-[10px] px-3 py-1.5 rounded-[6px] border border-[var(--vscode-sidebar-border)] text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)] disabled:opacity-50 transition-colors"
-                  >
-                    {t('agentPanel.planDismiss')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onExecutePlan}
-                    disabled={planExecuting}
-                    className="text-[10px] px-3 py-1.5 rounded-[6px] border border-green-200 text-green-700 hover:bg-green-50 disabled:opacity-50 inline-flex items-center gap-1 transition-colors"
-                  >
-                    {planExecuting ? <Loader2 size={12} className="animate-spin" /> : null}
-                    {planExecuting ? t('agentPanel.planRunning') : t('agentPanel.planExecute')}
-                  </button>
-                </div>
-              </div>
+              <PlanTaskCard
+                plan={pendingPlan}
+                executing={planExecuting}
+                activeStepId={planActiveStepId}
+                onExecute={onExecutePlan}
+                onDismiss={onDismissPlan}
+              />
             ) : null}
-            {pendingApproval ? (
-              <div className="my-2 overflow-hidden rounded-[10px] border border-amber-200 bg-amber-50/70">
-                <div className="flex items-start gap-2.5 px-3 py-3">
-                  <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-amber-100 text-amber-700">
-                    <ShieldCheck size={15} />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-semibold text-amber-950">需要你的授权</div>
-                    <div className="mt-1 text-[11px] leading-5 text-amber-800">
-                      Agent 准备执行 {pendingApproval.operation || '受保护操作'}。授权仅对本次操作有效。
-                    </div>
-                    {pendingApproval.expiresAt ? (
-                      <div className="mt-1 text-[10px] text-amber-700/80">有效期至 {pendingApproval.expiresAt}</div>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="flex justify-end gap-2 border-t border-amber-200/80 px-3 py-2">
-                  <button
-                    type="button"
-                    onClick={onDismissFallback}
-                    className="rounded-[7px] px-3 py-1.5 text-[11px] text-amber-800 hover:bg-amber-100"
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onApproveFallback}
-                    className="rounded-[7px] bg-amber-700 px-3 py-1.5 text-[11px] font-medium text-white hover:bg-amber-800"
-                  >
-                    授权并继续
-                  </button>
-                </div>
-              </div>
-            ) : null}
-            {agentTurnMeta ? (
-              <details className="my-2 rounded-[8px] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)]">
-                <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[10px] text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]">
-                  <Wrench size={12} />
-                  <span>本轮上下文与运行信息</span>
-                </summary>
-                <pre className="max-h-48 overflow-auto border-t border-[var(--vscode-sidebar-border)] px-3 py-2 text-[10px] text-[var(--vscode-fg-subtle)]">
-                  {JSON.stringify(
-                    { contextPlan: agentTurnMeta.contextPlan, runtime: agentTurnMeta.runtime },
-                    null,
-                    2,
-                  )}
-                </pre>
-              </details>
+            {clarification ? (
+              <ClarificationPart
+                questions={clarification.questions || []}
+                reason={clarification.reason || ''}
+                resolved={clarification.resolved || null}
+                onConfirm={onClarificationConfirm}
+                onSkip={onClarificationSkip}
+              />
             ) : null}
           </>
         )}
@@ -774,7 +297,7 @@ const AgentStatusPanel = ({
       </div>
 
       {/* 底部输入框（Trae 式 · 悬浮于对话栏，左右下等距，液态玻璃） */}
-      <div ref={composerRef} className="absolute bottom-0 inset-x-0 p-3">
+      <div ref={composerRef} className="absolute bottom-0 inset-x-0 z-30 p-3">
         {inputDisabled && inputDisabledReason ? (
           <div className="mb-2 text-[10px] text-[var(--vscode-fg-subtle)] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)] rounded-[6px] px-3 py-2">
             {inputDisabledReason}
@@ -861,28 +384,46 @@ const AgentStatusPanel = ({
         ) : null}
 
         {/* Trae 式输入框：@Agent 顶条 + 无边框文本区 + 底排工具条 */}
-        <div className="rounded-[16px] overflow-hidden liquid-glass">
+        <div className="rounded-[16px] overflow-visible liquid-glass">
           <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
             <span className="w-[18px] h-[18px] rounded-[5px] bg-[var(--vscode-fg)] flex items-center justify-center">
               <Bot size={11} className="text-[var(--vscode-bg)]" />
             </span>
-            <span className="text-xs font-bold text-[var(--vscode-fg)]">{t('agentPanel.composerAgent')}</span>
-            {deepThinkingSupported ? (
-              <button
-                type="button"
-                onClick={onToggleDeepThinking}
-                title={t('agentPanel.deepThinkingHint')}
-                aria-pressed={deepThinkingEnabled}
-                className={[
-                  'ml-auto inline-flex items-center gap-1 px-2 h-6 rounded-full border text-[10px] transition-colors',
-                  deepThinkingEnabled
-                    ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)] border-[var(--vscode-focus-border)]'
-                    : 'bg-[var(--vscode-input-bg)] text-[var(--vscode-fg-subtle)] border-[var(--vscode-sidebar-border)] hover:text-[var(--vscode-fg)]',
-                ].join(' ')}
-              >
-                <Brain size={12} />
-                {t('agentPanel.deepThinking')}
-              </button>
+            <span className="text-xs font-bold text-[var(--vscode-fg)]">@{agentMention}</span>
+            {reasoningSupported ? (
+              <div className="relative ml-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReasoningOpen((value) => !value);
+                  }}
+                  title={t('agentPanel.deepThinkingHint')}
+                  aria-expanded={reasoningOpen}
+                  className="inline-flex h-6 items-center gap-1 rounded-full border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-input-bg)] px-2 text-[10px] text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]"
+                >
+                  <Brain size={12} />
+                  <span>思考 · {reasoningLabel(reasoningLevel)}</span>
+                  <ChevronDown size={11} />
+                </button>
+                {reasoningOpen ? (
+                  <div className="absolute bottom-full right-0 z-50 mb-2 min-w-32 rounded-[8px] border border-[var(--vscode-input-border)] bg-white p-1 shadow-[0_8px_24px_rgba(15,23,42,0.12)]">
+                    {reasoningLevels.map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        onClick={() => {
+                          onReasoningLevelChange(level);
+                          setReasoningOpen(false);
+                        }}
+                        className="flex w-full items-center justify-between rounded-[6px] px-2 py-1.5 text-left text-[11px] hover:bg-[var(--vscode-list-hover)]"
+                      >
+                        <span>{reasoningLabel(level)}</span>
+                        {level === reasoningLevel ? <Check size={11} /> : null}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
           </div>
           <textarea

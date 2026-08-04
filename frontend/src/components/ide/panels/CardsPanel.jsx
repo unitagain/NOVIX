@@ -25,14 +25,19 @@
  *
  * @returns {JSX.Element} 卡片面板 / Cards panel element
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useIDE } from '../../../context/IDEContext';
 import { useParams } from 'react-router-dom';
 import { cardsAPI } from '../../../api';
-import { Plus, RefreshCw, User, Globe, Trash2, FileText, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, RefreshCw, User, Globe, Trash2, FileText, ChevronDown, ChevronRight, Network, X } from 'lucide-react';
 import { cn } from '../../ui/core';
 import logger from '../../../utils/logger';
 import { useLocale } from '../../../i18n';
+import { SidebarPanelHeader } from '../SidebarPanelHeader';
+
+// 画布依赖较重（React Flow）：懒加载为独立 chunk，不打开关系图时主包零成本。
+const RelationGraphView = lazy(() => import('../../project/RelationGraphView'));
 
 const normalizeStars = (value) => {
   const parsed = parseInt(value, 10);
@@ -66,6 +71,7 @@ export default function CardsPanel() {
   const [styleExpanded, setStyleExpanded] = useState(true);
   const [styleSample, setStyleSample] = useState('');
   const [styleExtracting, setStyleExtracting] = useState(false);
+  const [relationGraphOpen, setRelationGraphOpen] = useState(false);
 
   const loadEntities = useCallback(async () => {
     setLoading(true);
@@ -136,9 +142,8 @@ export default function CardsPanel() {
 
       await loadEntities();
 
-      if (state.activeDocument?.id === entity.name) {
-        dispatch({ type: 'CLEAR_ACTIVE_DOCUMENT' });
-      }
+      // 卡片已删除：关闭对应标签（若正打开则自动接管到相邻标签）。
+      dispatch({ type: 'CLOSE_TAB', payload: `${entity.type}:${entity.name}` });
     } catch (error) {
       logger.error('Failed to delete card:', error);
       alert(t('panels.cards.deleteFailed').replace('{message}', error.response?.data?.detail || error.message));
@@ -199,12 +204,18 @@ export default function CardsPanel() {
 
   return (
     <div className="anti-theme h-full flex flex-col bg-[var(--vscode-bg)] text-[var(--vscode-fg)]">
-      <div className="p-2 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-bold uppercase tracking-wider pl-2 text-[var(--vscode-fg-subtle)]">
-            {t('panels.cards.libraryTitle')}
-          </span>
-          <div className="flex gap-1">
+      <div>
+        <SidebarPanelHeader
+          title={t('panels.cards.libraryTitle')}
+          actions={
+            <>
+            <button
+              onClick={() => setRelationGraphOpen(true)}
+              className="p-1 hover:bg-[var(--vscode-list-hover)] rounded-[4px]"
+              title={t('relationGraph.open')}
+            >
+              <Network size={12} />
+            </button>
             <button
               onClick={loadEntities}
               className="p-1 hover:bg-[var(--vscode-list-hover)] rounded-[4px]"
@@ -221,10 +232,11 @@ export default function CardsPanel() {
                 <Plus size={12} />
               </button>
             )}
-          </div>
-        </div>
+            </>
+          }
+        />
 
-        <div className="px-1 py-1">
+        <div className="px-3 pb-2">
           <div className="bg-[var(--vscode-bg)] rounded-[6px] p-0.5 border border-[var(--vscode-sidebar-border)]">
             <div className="flex">
               {typeOptions.map((opt) => {
@@ -268,7 +280,7 @@ export default function CardsPanel() {
             {styleExpanded && (
               <div className="pl-6 pr-2 space-y-3 pb-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase">
+                  <label className="ui-caption font-medium text-[var(--vscode-fg-subtle)]">
                     {t('panels.cards.style')}
                   </label>
                   <textarea
@@ -289,7 +301,7 @@ export default function CardsPanel() {
                 </div>
                 <div className="space-y-1">
                   <div className="flex items-center justify-between">
-                    <label className="text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase">
+                    <label className="ui-caption font-medium text-[var(--vscode-fg-subtle)]">
                       {t('card.styleExtractLabel')}
                     </label>
                     <button
@@ -364,6 +376,39 @@ export default function CardsPanel() {
           </>
         )}
       </div>
+
+      {relationGraphOpen &&
+        createPortal(
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-6">
+            <div className="anti-theme flex h-[80vh] w-full max-w-6xl flex-col overflow-hidden rounded-[10px] border border-[var(--vscode-sidebar-border)] bg-[var(--vscode-bg)] text-[var(--vscode-fg)] shadow-xl">
+              <div className="flex items-center justify-between border-b border-[var(--vscode-sidebar-border)] px-4 py-2">
+                <div className="flex items-center gap-2">
+                  <Network size={14} className="text-[var(--vscode-fg-subtle)]" />
+                  <span className="text-sm font-medium">{t('relationGraph.title')}</span>
+                </div>
+                <button
+                  onClick={() => setRelationGraphOpen(false)}
+                  className="p-1 hover:bg-[var(--vscode-list-hover)] rounded-[4px]"
+                  title={t('common.close')}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <Suspense
+                  fallback={
+                    <div className="flex h-full items-center justify-center text-xs text-[var(--vscode-fg-subtle)]">
+                      {t('relationGraph.loading')}
+                    </div>
+                  }
+                >
+                  <RelationGraphView projectId={projectId} />
+                </Suspense>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

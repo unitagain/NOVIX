@@ -11,22 +11,18 @@ License: PolyForm Noncommercial License 1.0.0
   Archivist Agent responsible for canon management, scene brief generation, and chapter summaries.
 """
 
-import asyncio
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.agents.base import BaseAgent
 from app.agents._fanfiction_mixin import FanfictionMixin
 from app.agents._summary_mixin import SummaryMixin
-from app.schemas.draft import SceneBrief
-from app.schemas.card import StyleCard
 from app.prompts import (
     get_archivist_system_prompt,
     archivist_style_profile_prompt,
 )
 from app.config import config
-from app.utils.chapter_id import ChapterIDValidator, normalize_chapter_id
-from app.utils.dynamic_ranges import get_chapter_window, get_previous_chapters_limit
+from app.utils.dynamic_ranges import get_chapter_window
 from app.utils.logger import get_logger
 from app.utils.stopwords import get_stopwords
 
@@ -103,7 +99,7 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
             "最多 5 条；只提炼真正值得长期记住的，没有则返回 []。"
         )
         messages = self.build_messages(system_prompt=system, user_prompt=user, context_items=[])
-        data, err, _ = await self.call_llm_json(messages, expected_type=list, config_agent="archivist")
+        data, err, _ = await self.call_llm_json(messages, expected_type=list, config_agent="writer")
         if err or not isinstance(data, list):
             return []
 
@@ -338,343 +334,12 @@ class ArchivistAgent(FanfictionMixin, SummaryMixin, BaseAgent):
         return [(item["statement"], item["confidence"]) for item in selected[: int(limit)]]
 
     def get_agent_name(self) -> str:
-        """获取智能体标识 - 返回 'archivist'"""
-        return "archivist"
+        """Internal analysis helpers share the single Writer model binding."""
+        return "writer"
 
     def get_system_prompt(self) -> str:
         """获取系统提示词 - 档案员专用"""
         return get_archivist_system_prompt(language=self.language)
-
-    async def execute(self, project_id: str, chapter: str, context: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        执行档案员任务 - 生成场景简要
-
-        Main entry point for scene brief generation. Collects all relevant context
-        (facts, characters, world-building, timeline) and generates a structured
-        scene brief to guide the writer.
-
-        Args:
-            project_id: Project identifier.
-            chapter: Chapter identifier.
-            context: Context dict with chapter_title, chapter_goal, characters, etc.
-
-        Returns:
-            Dict with success status, scene_brief object, and conflicts list.
-        """
-        style_card = await self.card_storage.get_style_card(project_id)
-
-        chapter_id = normalize_chapter_id(chapter) or chapter
-        chapter_title = context.get("chapter_title", "")
-        chapter_goal = context.get("chapter_goal", "")
-
-        instruction_text = " ".join([chapter_title, chapter_goal])
-        instruction_characters = await self._extract_mentions_from_texts(
-            project_id=project_id,
-            texts=[instruction_text],
-            card_type="character",
-        )
-        instruction_worlds = await self._extract_mentions_from_texts(
-            project_id=project_id,
-            texts=[instruction_text],
-            card_type="world",
-        )
-
-        # ============================================================================
-        # Calculate dynamic chapter windows / 计算动态章节窗口
-        # ============================================================================
-        # Get total chapters for dynamic range calculation
-        all_chapters = await self.draft_storage.list_chapters(project_id)
-        total_chapters = len(all_chapters)
-        dynamic_limit = get_previous_chapters_limit(total_chapters)
-
-        recent_chapters = await self._get_previous_chapters(project_id, chapter_id, limit=dynamic_limit)
-        fact_window = self._get_chapter_window("fact", len(recent_chapters))
-        recent_fact_chapters = recent_chapters[-fact_window:] if fact_window < len(recent_chapters) else recent_chapters
-        summary_chapters = recent_chapters[:-fact_window] if fact_window < len(recent_chapters) else []
-
-        try:
-            from app.services.chapter_binding_service import chapter_binding_service
-
-            seed_names = list(dict.fromkeys([*instruction_characters, *instruction_worlds]))
-            bound_chapters = await chapter_binding_service.get_chapters_for_entities(
-                project_id,
-                seed_names,
-                limit=4,
-            )
-            if bound_chapters:
-                recent_fact_chapters = bound_chapters
-        except Exception as exc:
-            logger.debug("Chapter binding lookup failed, using recent chapters: %s", exc)
-
-        # ============================================================================
-        # Build context blocks / 构建上下文块
-        # ============================================================================
-        summary_blocks = await self._build_summary_blocks(project_id, summary_chapters)
-        timeline_events = await self.canon_storage.get_timeline_events_near_chapter(
-            project_id=project_id,
-            chapter=chapter_id,
-            window=3,
-            max_events=10,
-        )
-
-        keywords = self._extract_keywords(" ".join([instruction_text] + summary_blocks))
-
-        chapter_texts = await self._load_chapter_texts(project_id, recent_fact_chapters)
-        mentioned_characters = await self._extract_mentions_from_texts(
-            project_id=project_id,
-            texts=chapter_texts,
-            card_type="character",
-        )
-        mentioned_worlds = await self._extract_mentions_from_texts(
-            project_id=project_id,
-            texts=chapter_texts,
-            card_type="world",
-        )
-
-        character_names = context.get("characters", []) or []
-        selected_character_names = self._merge_unique(
-            mentioned_characters,
-            instruction_characters,
-            character_names,
-        )
-        characters = await self._build_character_context(project_id, selected_character_names)
-
-        world_names = self._merge_unique(mentioned_worlds, instruction_worlds)
-        world_constraints = await self._build_world_constraints_from_names(project_id, world_names)
-
-        facts = await self._collect_facts_for_chapters(project_id, recent_fact_chapters)
-        extra_facts = await self._select_facts_by_instruction(
-            project_id=project_id,
-            keywords=keywords,
-            exclude_ids={fact.get("id") for fact in facts if fact.get("id")},
-            max_extra=5,
-        )
-        facts.extend(extra_facts)
-
-        style_reminder = self._build_style_reminder(style_card)
-        timeline_context = self._build_timeline_context_from_summaries(
-            chapter_goal=chapter_goal,
-            summaries=summary_blocks,
-            fallback_events=timeline_events,
-        )
-
-        scene_brief = SceneBrief(
-            chapter=chapter_id,
-            title=chapter_title or f"Chapter {chapter_id}",
-            goal=chapter_goal,
-            characters=characters,
-            timeline_context=timeline_context,
-            world_constraints=world_constraints,
-            facts=[fact.get("statement") for fact in facts if fact.get("statement")],
-            style_reminder=style_reminder,
-            forbidden=[],
-        )
-
-        await self.draft_storage.save_scene_brief(project_id, chapter_id, scene_brief)
-
-        return {
-            "success": True,
-            "scene_brief": scene_brief,
-            "conflicts": [],
-        }
-
-    async def _build_character_context(self, project_id: str, names: List[str]) -> List[Dict[str, str]]:
-        characters = []
-        for name in names:
-            card = await self.card_storage.get_character_card(project_id, name)
-            if not card:
-                continue
-            traits = card.description
-            characters.append(
-                {
-                    "name": card.name,
-                    "relevant_traits": traits,
-                }
-            )
-        return characters
-
-    def _build_timeline_context_from_summaries(
-        self,
-        chapter_goal: str,
-        summaries: List[str],
-        fallback_events: List[Any],
-    ) -> Dict[str, str]:
-        before = summaries[-1] if summaries else ""
-        if not before and fallback_events:
-            event = fallback_events[-1]
-            before = f"{event.time}: {event.event} @ {event.location}"
-        return {
-            "before": before,
-            "current": chapter_goal,
-            "after": "",
-        }
-
-    def _extract_keywords(self, text: str) -> List[str]:
-        if not text:
-            return []
-        candidates = re.findall(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", text)
-        keywords = []
-        for token in candidates:
-            if token in self.STOPWORDS:
-                continue
-            if token not in keywords:
-                keywords.append(token)
-        return keywords
-
-    def _score_text_match(self, text: str, keywords: List[str]) -> int:
-        if not text or not keywords:
-            return 0
-        score = 0
-        for kw in keywords:
-            if kw and kw in text:
-                score += 1
-        return score
-
-    async def _get_previous_chapters(
-        self,
-        project_id: str,
-        current_chapter: str,
-        limit: int,
-    ) -> List[str]:
-        limit = max(int(limit or 0), 0)
-        if limit <= 0:
-            return []
-
-        chapters = await self.draft_storage.list_chapters(project_id)
-        if not chapters:
-            return []
-
-        canonical_current = str(current_chapter or "").strip()
-        if canonical_current in chapters:
-            index = chapters.index(canonical_current)
-            return chapters[max(0, index - limit) : index]
-
-        # 当前章节尚未创建：退化为权重比较，但保持 chapters 的既有顺序（包含自定义排序）。
-        try:
-            current_weight = ChapterIDValidator.calculate_weight(canonical_current)
-        except Exception:
-            return chapters[max(0, len(chapters) - limit) :]
-        if current_weight <= 0:
-            return chapters[max(0, len(chapters) - limit) :]
-        previous = [ch for ch in chapters if ChapterIDValidator.calculate_weight(ch) < current_weight]
-        return previous[max(0, len(previous) - limit) :]
-
-    async def _build_summary_blocks(self, project_id: str, chapters: List[str]) -> List[str]:
-        blocks: List[str] = []
-        for ch in chapters:
-            summary = await self.draft_storage.get_chapter_summary(project_id, ch)
-            if not summary:
-                continue
-            title = summary.title or ch
-            brief = summary.brief_summary or ""
-            blocks.append(f"{ch}: {title}\n{brief}".strip())
-        return blocks
-
-    async def _load_chapter_texts(self, project_id: str, chapters: List[str]) -> List[str]:
-        # 限制并发数，避免大量章节同时打开文件句柄
-        # Limit concurrency to prevent too many open file handles.
-        sem = asyncio.Semaphore(20)
-
-        async def _load_one(ch: str) -> str:
-            async with sem:
-                final = await self.draft_storage.get_final_draft(project_id, ch)
-                if final:
-                    return final
-                versions = await self.draft_storage.list_draft_versions(project_id, ch)
-                if not versions:
-                    return ""
-                draft = await self.draft_storage.get_draft(project_id, ch, versions[-1])
-                return draft.content if draft else ""
-
-        return list(await asyncio.gather(*[_load_one(ch) for ch in chapters]))
-
-    async def _extract_mentions_from_texts(
-        self,
-        project_id: str,
-        texts: List[str],
-        card_type: str,
-    ) -> List[str]:
-        names = []
-        if card_type == "character":
-            names = await self.card_storage.list_character_cards(project_id)
-        elif card_type == "world":
-            names = await self.card_storage.list_world_cards(project_id)
-        if not names:
-            return []
-
-        mentioned = []
-        for name in names:
-            for text in texts:
-                if name and text and name in text:
-                    mentioned.append(name)
-                    break
-        return mentioned
-
-    def _merge_unique(self, *groups: List[str]) -> List[str]:
-        merged: List[str] = []
-        for group in groups:
-            for name in group or []:
-                if name and name not in merged:
-                    merged.append(name)
-        return merged
-
-    async def _build_world_constraints_from_names(
-        self,
-        project_id: str,
-        names: List[str],
-    ) -> List[str]:
-        constraints = []
-        for name in names:
-            card = await self.card_storage.get_world_card(project_id, name)
-            if not card:
-                continue
-            description = card.description or ""
-            constraints.append(f"{card.name}: {description}".strip())
-        return constraints
-
-    async def _collect_facts_for_chapters(
-        self,
-        project_id: str,
-        chapters: List[str],
-    ) -> List[Dict[str, Any]]:
-        if not chapters:
-            return []
-        chapter_set = {normalize_chapter_id(ch) for ch in chapters if ch}
-        facts = await self.canon_storage.get_eligible_facts_raw(project_id)
-        selected = []
-        for fact in facts:
-            raw_chapter = fact.get("introduced_in") or fact.get("source") or ""
-            fact_chapter = normalize_chapter_id(raw_chapter)
-            if fact_chapter in chapter_set:
-                selected.append(fact)
-        return selected
-
-    async def _select_facts_by_instruction(
-        self,
-        project_id: str,
-        keywords: List[str],
-        exclude_ids: set,
-        max_extra: int,
-    ) -> List[Dict[str, Any]]:
-        if not keywords:
-            return []
-        facts = await self.canon_storage.get_eligible_facts_raw(project_id)
-        scored: List[Tuple[int, Dict[str, Any]]] = []
-        for fact in facts:
-            if fact.get("id") in exclude_ids:
-                continue
-            statement = str(fact.get("statement") or fact.get("content") or "")
-            score = self._score_text_match(statement, keywords)
-            if score > 0:
-                scored.append((score, fact))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [fact for _, fact in scored[:max_extra]]
-
-    def _build_style_reminder(self, style_card: Optional[StyleCard]) -> str:
-        if not style_card:
-            return ""
-        style_text = getattr(style_card, "style", "") or ""
-        return style_text.strip()
 
     def _sample_text_for_style_profile(self, sample_text: str, max_chars: int = 20000) -> str:
         """

@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 文枢 WenShape - 深度上下文感知的智能体小说创作系统
 WenShape - Deep Context-Aware Agent-Based Novel Writing System
@@ -8,16 +8,15 @@ License: PolyForm Noncommercial License 1.0.0
 
 模块说明 / Module Description:
   会话路由 - 写作会话管理端点
-  Session Router - Writing session management endpoints including start,
-  feedback processing, and orchestrator lifecycle management.
+  Session Router - Unified Writer chat, plans, history, and explicit analysis endpoints.
 """
 
-from typing import Dict, List, Optional, Literal
+from typing import Dict, List, Optional
 import time
 from collections import OrderedDict
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 from app.orchestrator import Orchestrator, SessionStatus
 from app.error_contract import error_envelope
@@ -25,7 +24,6 @@ from app.agents.agent_task import MergePolicy
 from app.routers.websocket import broadcast_progress
 from app.schemas.draft import ChapterSummary
 from app.utils.language import normalize_language
-from app.utils.text import normalize_for_compare
 from app.jobs.runtime import enqueue_session_compact
 
 router = APIRouter(tags=["session"])
@@ -110,117 +108,6 @@ def get_orchestrator(project_id: str, request_language: Optional[str] = None) ->
     return _orchestrators[project_id]
 
 
-class StartSessionRequest(BaseModel):
-    """Request body for starting a session."""
-
-    dialog_max_chars: Literal[2000, 6000] = Field(2000, description="Dialog max chars tier: 2000 | 6000")
-    language: Optional[str] = Field(None, description="Writing language override: zh/en or locale-like values")
-    chapter: str = Field(..., min_length=1, max_length=50, description="Chapter ID")
-    chapter_title: str = Field(..., min_length=1, max_length=200, description="Chapter title")
-    chapter_goal: str = Field(..., min_length=1, max_length=6000, description="Chapter goal")
-    target_word_count: int = Field(3000, ge=100, le=50000, description="Target word count")
-    character_names: Optional[List[str]] = Field(None, description="Character names")
-
-    @model_validator(mode="after")
-    def _validate_chapter_goal_by_tier(self):
-        max_chars = int(self.dialog_max_chars)
-        if len(self.chapter_goal or "") > max_chars:
-            raise ValueError(f"chapter_goal exceeds dialog_max_chars ({max_chars})")
-        return self
-
-
-class FeedbackRequest(BaseModel):
-    """Request body for submitting feedback."""
-
-    dialog_max_chars: Literal[2000, 6000] = Field(2000, description="Dialog max chars tier: 2000 | 6000")
-    chapter: str = Field(..., min_length=1, max_length=50, description="Chapter ID")
-    feedback: str = Field(..., min_length=1, max_length=6000, description="User feedback")
-    action: str = Field("revise", description="Action: revise or confirm")
-    rejected_entities: Optional[List[str]] = Field(None, description="Rejected entity names")
-
-    @model_validator(mode="after")
-    def _validate_feedback_by_tier(self):
-        max_chars = int(self.dialog_max_chars)
-        if len(self.feedback or "") > max_chars:
-            raise ValueError(f"feedback exceeds dialog_max_chars ({max_chars})")
-        return self
-
-
-class EditSuggestRequest(BaseModel):
-    """Request body for suggesting an edit on current (unsaved) content."""
-
-    dialog_max_chars: Literal[2000, 6000] = Field(2000, description="Dialog max chars tier: 2000 | 6000")
-    chapter: Optional[str] = Field(None, max_length=50, description="Chapter ID (optional)")
-    content: str = Field(..., min_length=1, max_length=500000, description="Current content to edit (may be unsaved)")
-    instruction: str = Field(..., min_length=1, max_length=6000, description="Edit instruction")
-    rejected_entities: Optional[List[str]] = Field(None, description="Rejected entity names")
-    context_mode: Optional[str] = Field(
-        "quick",
-        description="Context mode: quick (use memory pack) | full (rebuild memory pack)",
-    )
-    selection_text: Optional[str] = Field(
-        None,
-        description="Optional selection text for selection-scoped editing (for validation / context).",
-    )
-    selection_start: Optional[int] = Field(
-        None,
-        description="Optional selection start offset (0-based, in normalized \\n text).",
-    )
-    selection_end: Optional[int] = Field(
-        None,
-        description="Optional selection end offset (0-based, in normalized \\n text).",
-    )
-
-    @model_validator(mode="after")
-    def _validate_instruction_by_tier(self):
-        max_chars = int(self.dialog_max_chars)
-        if len(self.instruction or "") > max_chars:
-            raise ValueError(f"instruction exceeds dialog_max_chars ({max_chars})")
-        return self
-
-
-class QuestionAnswer(BaseModel):
-    """Answer to a pre-writing question."""
-
-    type: str = Field(..., description="Question type")
-    question: Optional[str] = Field(None, description="Question text")
-    key: Optional[str] = Field(None, description="Stable question key")
-    answer: str = Field(..., description="User answer")
-
-
-class AnswerQuestionsRequest(BaseModel):
-    """Request to answer pre-writing questions."""
-
-    dialog_max_chars: Literal[2000, 6000] = Field(2000, description="Dialog max chars tier: 2000 | 6000")
-    language: Optional[str] = Field(None, description="Writing language override: zh/en or locale-like values")
-    chapter: str = Field(..., description="Chapter ID")
-    chapter_title: str = Field(..., description="Chapter title")
-    chapter_goal: str = Field(..., description="Chapter goal")
-    target_word_count: int = Field(3000, description="Target word count")
-    character_names: Optional[List[str]] = Field(None, description="Character names")
-    answers: List[QuestionAnswer] = Field(default_factory=list, description="Answers")
-
-    @model_validator(mode="after")
-    def _validate_chapter_goal_by_tier(self):
-        max_chars = int(self.dialog_max_chars)
-        if len(self.chapter_goal or "") > max_chars:
-            raise ValueError(f"chapter_goal exceeds dialog_max_chars ({max_chars})")
-        return self
-
-
-class ClassifyIntentRequest(BaseModel):
-    """Request for vibe-writing intent classification (Phase 5).
-
-    前端单输入框只需发：用户这句话 + 上下文信号（是否选中正文 / 是否已有草稿）；
-    后端判定 write/edit 并回传决策，前端据此调用既有 /session/start 或 /session/edit-suggest。
-    """
-
-    chapter: Optional[str] = Field(None, max_length=50, description="Chapter ID")
-    message: str = Field(..., min_length=1, max_length=6000, description="User chat message")
-    has_selection: bool = Field(False, description="Whether the editor currently has a selection")
-    has_draft: bool = Field(False, description="Whether the chapter already has a draft")
-
-
 class PlanRequest(BaseModel):
     """Request for Phase 11 plan generation（把复杂指令拆成串行 todo）。"""
 
@@ -241,15 +128,15 @@ class ChatTurnRequest(BaseModel):
     target_word_count: int = Field(3000, ge=100, le=20000, description="Target word count for write")
     auto_execute_plan: bool = Field(False, description="Auto-execute plan after generation")
     thinking: bool = Field(False, description="Enable deep thinking (provider param toggle) for this turn")
-    fallback_approval_action_id: Optional[str] = Field(
+    reasoning_level: Optional[str] = Field(
         None,
-        max_length=120,
-        description="Pending fallback approval action id returned by a previous chat turn",
+        pattern="^(auto|off|minimal|low|medium|high|xhigh|max)$",
+        description="Model-aware reasoning level; supersedes the legacy thinking boolean",
     )
-    fallback_approval_token: Optional[str] = Field(
-        None,
-        max_length=200,
-        description="Single-use fallback approval token returned by a previous chat turn",
+    selection_text: str = Field(
+        "",
+        max_length=6000,
+        description="编辑器当前选区的有限文本摘要，供编辑意图理解",
     )
 
 
@@ -260,6 +147,11 @@ class AppendMessageRequest(BaseModel):
     content: str = Field("", max_length=200000, description="Message content")
     type: Optional[str] = Field(None, max_length=40, description="Optional message kind, e.g. summary")
     ts: Optional[int] = Field(None, description="Client timestamp in ms; server fills if absent")
+    conversation_id: Optional[str] = Field(None, max_length=80, description="Target conversation; active one by default")
+
+
+class CreateConversationRequest(BaseModel):
+    title: str = Field("新对话", max_length=80)
 
 
 # 对话历史 compact 触发阈值（消息数）：超过则后台压缩早期轮次 + 提炼作者偏好 → creative_memory。
@@ -302,138 +194,6 @@ class AgentTaskRequest(BaseModel):
     merge_policy: str = Field(MergePolicy.NO_MERGE.value, description="auto | user_confirm | no_merge")
 
 
-@router.post("/projects/{project_id}/session/start")
-async def start_session(project_id: str, request: StartSessionRequest):
-    """Start a new writing session."""
-    orchestrator = get_orchestrator(project_id, request.language)
-    return await orchestrator.application.commands.run(
-        project_id=project_id,
-        chapter=request.chapter,
-        intent="write",
-        route_path="fallback_workflow",
-        target_word_count=request.target_word_count,
-        operation=lambda: orchestrator.start_session(
-            project_id=project_id,
-            chapter=request.chapter,
-            chapter_title=request.chapter_title,
-            chapter_goal=request.chapter_goal,
-            target_word_count=request.target_word_count,
-            character_names=request.character_names,
-        ),
-    )
-
-
-@router.get("/projects/{project_id}/session/status")
-async def get_session_status(project_id: str):
-    """Get current session status."""
-    orchestrator = get_orchestrator(project_id)
-    status = orchestrator.get_status()
-
-    if status["project_id"] != project_id:
-        return {"status": "idle", "message": "No active session for this project"}
-
-    return status
-
-
-@router.post("/projects/{project_id}/session/feedback")
-async def submit_feedback(project_id: str, request: FeedbackRequest):
-    """Submit user feedback."""
-    orchestrator = get_orchestrator(project_id)
-    return await orchestrator.application.commands.run(
-        project_id=project_id,
-        chapter=request.chapter,
-        intent="edit",
-        route_path="fallback_workflow",
-        operation=lambda: orchestrator.process_feedback(
-            project_id=project_id,
-            chapter=request.chapter,
-            feedback=request.feedback,
-            action=request.action,
-            rejected_entities=request.rejected_entities,
-        ),
-    )
-
-
-@router.post("/projects/{project_id}/session/edit-suggest")
-async def suggest_edit(project_id: str, request: EditSuggestRequest):
-    """Suggest a diff-style revision without persisting it."""
-    try:
-        orchestrator = get_orchestrator(project_id)
-        memory_pack_payload = None
-        if request.chapter:
-            mode = str(request.context_mode or "quick").strip().lower()
-            force_refresh = mode == "full"
-            memory_pack_payload = await orchestrator.application.context.ensure_memory_pack(
-                project_id=project_id,
-                chapter=request.chapter,
-                chapter_goal="",
-                scene_brief=None,
-                user_feedback=request.instruction,
-                force_refresh=force_refresh,
-                source="editor",
-                chapter_text_override=request.content,
-            )
-        if request.selection_start is not None and request.selection_end is not None:
-            revised = await orchestrator.editor.suggest_revision_selection_range(
-                project_id=project_id,
-                original_draft=request.content,
-                selection_start=request.selection_start,
-                selection_end=request.selection_end,
-                selection_text=request.selection_text,
-                user_feedback=request.instruction,
-                rejected_entities=request.rejected_entities or [],
-                memory_pack=memory_pack_payload,
-            )
-        elif request.selection_text:
-            # Backward compatible path: selection by substring matching (less reliable).
-            revised = await orchestrator.editor.suggest_revision_selection(
-                project_id=project_id,
-                original_draft=request.content,
-                selection_text=request.selection_text,
-                selection_occurrence=1,
-                user_feedback=request.instruction,
-                rejected_entities=request.rejected_entities or [],
-                memory_pack=memory_pack_payload,
-            )
-        else:
-            revised = await orchestrator.editor.suggest_revision(
-                project_id=project_id,
-                original_draft=request.content,
-                user_feedback=request.instruction,
-                rejected_entities=request.rejected_entities or [],
-                memory_pack=memory_pack_payload,
-            )
-        original_norm = normalize_for_compare(request.content)
-        revised_norm = normalize_for_compare(revised)
-        if revised_norm == original_norm:
-            return {
-                "success": False,
-                "error": "未能生成可应用的差异修改：请在指令中复制粘贴要修改的原句/段落，或使用\u201c选区编辑\u201d进行精确定位。",
-            }
-        return {"success": True, "revised_content": revised, "word_count": len(revised)}
-    except ValueError as exc:
-        # Expected: patch ops could not be applied, surface as user-facing error (no 500).
-        return {"success": False, "error": error_envelope(exc).to_dict()}
-
-
-@router.post("/projects/{project_id}/session/classify-intent")
-async def classify_intent(project_id: str, request: ClassifyIntentRequest):
-    """Phase 5（vibe writing）：判定本轮 chat 意图（write/edit），供前端单输入框路由。
-
-    后端只判定不执行：前端据返回的 action/scope 调用既有 /session/start 或 /session/edit-suggest，
-    复用已验证的撰写/编辑路径，避免重复逻辑。判定结果同时经 WS 以 intent 事件透明展示。
-    """
-    orchestrator = get_orchestrator(project_id)
-    decision = await orchestrator.decide_writing_action(
-        project_id=project_id,
-        chapter=request.chapter or "",
-        message=request.message,
-        has_selection=request.has_selection,
-        has_draft=request.has_draft,
-    )
-    return {"success": True, **decision}
-
-
 @router.post("/projects/{project_id}/session/plan")
 async def create_plan(project_id: str, request: PlanRequest):
     """Phase 11：把复杂指令拆成串行 plan（todo）并持久化；返回 plan（含 steps）。
@@ -462,8 +222,7 @@ async def execute_plan(project_id: str, plan_id: str):
 async def chat_turn(project_id: str, request: ChatTurnRequest):
     """Phase 12：单 Writer 主循环统一入口。一句话 → 意图自判 write/edit/continue/plan → 路由执行。
 
-    5 阶段写作能力保留为被路由调用的 human-in-the-loop 检查点（作者可随时打断/反问）。
-    前端单输入框只需调本端点，无需自行分步调 classify-intent + start/edit-suggest。
+    前端单输入框只调用本端点；正文变更通过 diff 交付作者采纳。
     """
     orchestrator = get_orchestrator(project_id)
     return await orchestrator.run_chat_turn(
@@ -475,17 +234,67 @@ async def chat_turn(project_id: str, request: ChatTurnRequest):
         target_word_count=request.target_word_count,
         auto_execute_plan=request.auto_execute_plan,
         thinking=request.thinking,
-        fallback_approval_action_id=request.fallback_approval_action_id or "",
-        fallback_approval_token=request.fallback_approval_token or "",
+        reasoning_level=request.reasoning_level or ("high" if request.thinking else "off"),
+        selection_text=request.selection_text,
     )
 
 
+class ClarifySettingsRequest(BaseModel):
+    """Writer 反问工具自动触发偏好。"""
+
+    auto_trigger: Optional[str] = Field(
+        None,
+        pattern="^(always|auto|off)$",
+        description="always=主动检查关键缺口 | auto=Writer 自行判断 | off=不主动触发",
+    )
+    mode: Optional[str] = Field(None, pattern="^(always|auto|off)$", description="兼容旧客户端的别名")
+
+
+@router.get("/projects/{project_id}/session/clarify-settings")
+async def get_clarify_settings(project_id: str):
+    """读取 Writer 反问工具策略（全局默认 + 项目覆盖）。"""
+    from app.services.clarify_settings import resolve_clarify_settings
+
+    orchestrator = get_orchestrator(project_id)
+    project_file = orchestrator.card_storage.get_project_path(project_id) / "project.yaml"
+    meta = await orchestrator.card_storage.read_yaml(project_file) if project_file.is_file() else {}
+    return {"success": True, "settings": resolve_clarify_settings(meta or {})}
+
+
+@router.put("/projects/{project_id}/session/clarify-settings")
+async def update_clarify_settings(project_id: str, request: ClarifySettingsRequest):
+    """更新项目级 Writer 反问工具策略。"""
+    from app.services.clarify_settings import resolve_clarify_settings
+
+    orchestrator = get_orchestrator(project_id)
+    project_file = orchestrator.card_storage.get_project_path(project_id) / "project.yaml"
+    if not project_file.is_file():
+        raise HTTPException(status_code=404, detail="Project not found")
+    meta = await orchestrator.card_storage.read_yaml(project_file) or {}
+    trigger = request.auto_trigger or request.mode or "auto"
+    writer_value = meta.get("writer")
+    writer = dict(writer_value) if isinstance(writer_value, dict) else {}
+    clarification_value = writer.get("clarification")
+    override = dict(clarification_value) if isinstance(clarification_value, dict) else {}
+    override["auto_trigger"] = trigger
+    writer["clarification"] = override
+    meta["writer"] = writer
+    await orchestrator.card_storage.write_yaml(project_file, meta)
+    return {"success": True, "settings": resolve_clarify_settings(meta)}
+
+
 @router.get("/projects/{project_id}/session/history")
-async def get_session_history(project_id: str, limit: int = 0):
+async def get_session_history(project_id: str, limit: int = 0, conversation_id: str = ""):
     """读取项目的持久化对话历史（Git-Native）。前端开项目时加载，取代脆弱的 localStorage 单点。"""
     orchestrator = get_orchestrator(project_id)
-    messages = await orchestrator.application.conversation.load(project_id, limit=max(0, int(limit or 0)))
-    return {"success": True, "messages": messages}
+    messages = await orchestrator.session_history.load(
+        project_id, limit=max(0, int(limit or 0)), conversation_id=conversation_id
+    )
+    return {
+        "success": True,
+        "conversation_id": conversation_id or orchestrator.session_history.active_conversation_id(project_id),
+        "messages": messages,
+    }
 
 
 @router.post("/projects/{project_id}/session/history")
@@ -495,8 +304,9 @@ async def append_session_history(project_id: str, request: AppendMessageRequest)
     item = await orchestrator.application.conversation.append(
         project_id,
         {"role": request.role, "content": request.content, "type": request.type, "ts": request.ts},
+        conversation_id=request.conversation_id or "",
     )
-    count = await orchestrator.session_history.count(project_id)
+    count = await orchestrator.session_history.count(project_id, conversation_id=request.conversation_id or "")
     should_compact = count > _HISTORY_COMPACT_TRIGGER
     queued_job = None
     if should_compact:
@@ -508,6 +318,48 @@ async def append_session_history(project_id: str, request: AppendMessageRequest)
         "compacting": should_compact,
         "compact_job_id": (queued_job or {}).get("id"),
     }
+
+
+@router.get("/projects/{project_id}/session/conversations")
+async def list_session_conversations(project_id: str):
+    orchestrator = get_orchestrator(project_id)
+    return {"success": True, "conversations": await orchestrator.session_history.list_conversations(project_id)}
+
+
+@router.post("/projects/{project_id}/session/conversations")
+async def create_session_conversation(project_id: str, request: CreateConversationRequest):
+    orchestrator = get_orchestrator(project_id)
+    conversation = await orchestrator.session_history.create_conversation(project_id, title=request.title)
+    return {"success": True, "conversation": conversation}
+
+
+@router.post("/projects/{project_id}/session/conversations/{conversation_id}/activate")
+async def activate_session_conversation(project_id: str, conversation_id: str):
+    orchestrator = get_orchestrator(project_id)
+    try:
+        conversation = await orchestrator.session_history.activate_conversation(project_id, conversation_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    return {"success": True, "conversation": conversation}
+
+
+@router.delete("/projects/{project_id}/session/conversations/{conversation_id}")
+async def delete_session_conversation(project_id: str, conversation_id: str):
+    orchestrator = get_orchestrator(project_id)
+    try:
+        result = await orchestrator.session_history.delete_conversation(project_id, conversation_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=error_envelope(exc).safe_detail) from exc
+    return {"success": True, "conversation": result}
+
+
+@router.post("/projects/{project_id}/session/conversations/{conversation_id}/rollback")
+async def rollback_session_conversation(project_id: str, conversation_id: str):
+    orchestrator = get_orchestrator(project_id)
+    result = await orchestrator.session_history.rollback_last_turn(project_id, conversation_id)
+    return {"success": True, **result}
 
 
 @router.post("/projects/{project_id}/session/history/compact")
@@ -577,29 +429,6 @@ async def run_agent_task(project_id: str, request: AgentTaskRequest):
     return {"success": result.status == "completed", "task": result.to_dict()}
 
 
-@router.post("/projects/{project_id}/session/answer-questions")
-async def answer_questions(project_id: str, request: AnswerQuestionsRequest):
-    """Continue session after answering pre-writing questions."""
-    orchestrator = get_orchestrator(project_id, request.language)
-    answers = [item.model_dump() for item in request.answers]
-    return await orchestrator.application.commands.run(
-        project_id=project_id,
-        chapter=request.chapter,
-        intent="continue",
-        route_path="fallback_workflow",
-        target_word_count=request.target_word_count,
-        operation=lambda: orchestrator.answer_questions(
-            project_id=project_id,
-            chapter=request.chapter,
-            chapter_title=request.chapter_title,
-            chapter_goal=request.chapter_goal,
-            target_word_count=request.target_word_count,
-            answers=answers,
-            character_names=request.character_names,
-        ),
-    )
-
-
 @router.post("/projects/{project_id}/session/cancel")
 async def cancel_session(project_id: str):
     """Cancel current session at any stage."""
@@ -659,6 +488,14 @@ class AnalyzeSyncRequest(BaseModel):
     chapters: List[str] = Field(default_factory=list, description="Chapter IDs")
 
 
+class ApplyTurnEffectRequest(BaseModel):
+    """Request body for applying the single Writer Agent's accepted terminal contract."""
+
+    language: Optional[str] = Field(None, description="Writing language override: zh/en or locale-like values")
+    chapter: str = Field(..., min_length=1, max_length=50, description="Accepted chapter ID")
+    turn_effect: Dict[str, object] = Field(default_factory=dict, description="Writer finish_turn payload")
+
+
 class AnalyzeBatchRequest(BaseModel):
     """Request body for batch analysis."""
 
@@ -710,6 +547,17 @@ async def analyze_sync(project_id: str, request: AnalyzeSyncRequest):
     """Batch analyze and overwrite summaries/facts/cards for selected chapters."""
     orchestrator = get_orchestrator(project_id, request.language)
     return await orchestrator.application.analysis.analyze_sync(project_id, request.chapters)
+
+
+@router.post("/projects/{project_id}/session/apply-turn-effect")
+async def apply_turn_effect(project_id: str, request: ApplyTurnEffectRequest):
+    """Validate and persist an accepted Writer turn effect without invoking another model."""
+    orchestrator = get_orchestrator(project_id, request.language)
+    return await orchestrator.application.analysis.apply_turn_effect(
+        project_id,
+        request.chapter,
+        dict(request.turn_effect or {}),
+    )
 
 
 @router.post("/projects/{project_id}/session/analyze-batch")

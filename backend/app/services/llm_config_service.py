@@ -222,9 +222,15 @@ class LLMConfigService:
 
             # 暴露「是否支持参数级 thinking 切换」给前端，用于对话栏「深度思考」按钮显隐（能力降级，异常默认 False）。
             try:
-                from app.llm_gateway.thinking import supports_thinking
+                from app.llm_gateway.model_catalog import reasoning_capability
 
-                profile["supports_thinking"] = supports_thinking(profile["provider"], str(profile.get("model") or ""))
+                capability = reasoning_capability(
+                    profile["provider"],
+                    str(profile.get("model") or ""),
+                    dialect=str(profile.get("reasoning_dialect") or ""),
+                )
+                profile["supports_thinking"] = bool(capability.get("supported"))
+                profile["reasoning_capability"] = capability
             except Exception:
                 profile["supports_thinking"] = False
 
@@ -252,20 +258,15 @@ class LLMConfigService:
         Returns:
             分配字典 (agent_name -> profile_id) / Assignment mapping.
         """
-        allowed = {"archivist", "writer", "editor"}
         assignments = self._load_json(self.assignments_path, {})
         if not isinstance(assignments, dict):
             assignments = {}
 
         profile_ids = {p.get("id") for p in self._profile_records() if p.get("id")}
-        cleaned: Dict[str, str] = {}
-        for agent in allowed:
-            raw = str(assignments.get(agent) or "").strip()
-            if raw and raw not in profile_ids:
-                raw = ""
-            cleaned[agent] = raw
-
-        return cleaned
+        raw = str(assignments.get("writer") or assignments.get("archivist") or assignments.get("editor") or "").strip()
+        if raw and raw not in profile_ids:
+            raw = ""
+        return {"writer": raw}
 
     def save_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -363,8 +364,7 @@ class LLMConfigService:
             self.save_assignments(assignments)
 
     def save_assignments(self, assignments: Dict[str, str]):
-        allowed = {"archivist", "writer", "editor"}
-        clean = {k: v for k, v in assignments.items() if k in allowed}
+        clean = {"writer": str(assignments.get("writer") or "").strip()}
         current = self.get_assignments()
         current.update(clean)
         self._save_json(self.assignments_path, current)
@@ -398,7 +398,7 @@ class LLMConfigService:
                     "name": "Legacy OpenAI",
                     "provider": "openai",
                     "api_key": openai_key,
-                    "model": app_config.settings.openai_model or "gpt-4o",
+                    "model": app_config.settings.openai_model or "gpt-5.6-terra",
                     "temperature": 0.7,
                 }
             )
@@ -412,7 +412,7 @@ class LLMConfigService:
                     "name": "Legacy Anthropic",
                     "provider": "anthropic",
                     "api_key": ant_key,
-                    "model": app_config.settings.anthropic_model or "claude-3-5-sonnet-20241022",
+                    "model": app_config.settings.anthropic_model or "claude-sonnet-5",
                     "temperature": 0.7,
                 }
             )
@@ -441,7 +441,7 @@ class LLMConfigService:
                     "name": "Legacy DeepSeek",
                     "provider": "deepseek",
                     "api_key": deepseek_key,
-                    "model": app_config.settings.deepseek_model or "deepseek-chat",
+                    "model": app_config.settings.deepseek_model or "deepseek-v4-flash",
                     "temperature": 0.7,
                 }
             )
@@ -485,7 +485,7 @@ class LLMConfigService:
             # Setup default assignments
             # Assume the first valid profile is the default
             default_id = secured_profiles[0]["id"]
-            assignments = {"archivist": default_id, "writer": default_id, "editor": default_id}
+            assignments = {"writer": default_id}
             self._save_json(self.assignments_path, assignments)
             logger.info("Migrated %s profiles", len(new_profiles))
 

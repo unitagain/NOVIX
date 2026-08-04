@@ -245,7 +245,7 @@ async def run_writing_judge_eval(
     case: Dict[str, Any],
     *,
     provider: Optional[str] = None,
-    agent_name: str = "editor",
+    agent_name: str = "writer",
     require_available: bool = False,
 ) -> Dict[str, Any]:
     """Run a real LLM rubric judge through the configured gateway."""
@@ -282,7 +282,7 @@ async def run_pairwise_judge_eval(
     case: Dict[str, Any],
     *,
     provider: Optional[str] = None,
-    agent_name: str = "editor",
+    agent_name: str = "writer",
     require_available: bool = False,
 ) -> Dict[str, Any]:
     """Run a real LLM pairwise judge through the configured gateway."""
@@ -333,7 +333,7 @@ async def run_pointwise_candidate_judge_eval(
 ) -> Dict[str, Any]:
     gateway = get_gateway()
     try:
-        profile_id = provider or gateway.get_provider_for_agent("editor")
+        profile_id = provider or gateway.get_provider_for_agent("writer")
         response = await gateway.chat(
             build_pointwise_candidate_judge_messages(case),
             provider=profile_id,

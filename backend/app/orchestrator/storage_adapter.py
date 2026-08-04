@@ -31,7 +31,7 @@ class UnifiedStorageAdapter:
         draft (DraftStorage): 草稿存储 / Draft and scene brief storage.
     """
 
-    def __init__(self, card_storage, canon_storage, draft_storage):
+    def __init__(self, card_storage, canon_storage, draft_storage, outline_storage=None, relation_storage=None):
         """
         初始化存储适配器 / Initialize the unified adapter.
 
@@ -39,10 +39,22 @@ class UnifiedStorageAdapter:
             card_storage: 卡片存储实例 / Character/world card storage instance.
             canon_storage: 事实表存储实例 / Canon storage instance.
             draft_storage: 草稿存储实例 / Draft storage instance.
+            outline_storage: 大纲存储实例 / Outline storage instance（缺省时按 draft 的 data_dir 惰性创建）。
+            relation_storage: 角色关系存储实例 / Character relation storage（缺省时按 card 的 data_dir 惰性创建）。
         """
         self.card = card_storage
         self.canon = canon_storage
         self.draft = draft_storage
+        if outline_storage is None:
+            from app.storage.outline import OutlineStorage
+
+            outline_storage = OutlineStorage(str(getattr(draft_storage, "data_dir", None) or "") or None)
+        self.outline = outline_storage
+        if relation_storage is None:
+            from app.storage.character_relations import CharacterRelationStorage
+
+            relation_storage = CharacterRelationStorage(str(getattr(card_storage, "data_dir", None) or "") or None)
+        self.character_relations = relation_storage
 
     # ========================================================================
     # 卡片查询接口 / Card Query Interface
@@ -97,6 +109,20 @@ class UnifiedStorageAdapter:
         (embed-once), instead of re-embedding every candidate on every query.
         """
         return self.canon.get_project_path(project_id) / "canon" / "embeddings_cache.jsonl"
+
+    async def get_card_relation_edges(self, project_id: str) -> List[Dict]:
+        """返回卡片层的作者设定关系边（U4，cards/relations.yaml）。
+
+        Returns authored relation edges from the card layer. These are *settings*
+        (what the author decided), not Canon facts extracted from prose; callers
+        merge both into one graph. Missing storage or missing file yields ``[]``
+        so relation queries degrade to Canon-only instead of failing.
+        """
+        storage = getattr(self, "character_relations", None)
+        if storage is None:
+            return []
+        document = await storage.load_document(project_id)
+        return list(document.get("edges") or [])
 
     # ========================================================================
     # 草稿查询接口 / Draft Query Interface

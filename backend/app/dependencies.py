@@ -20,6 +20,7 @@ License: PolyForm Noncommercial License 1.0.0
 """
 
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from app.storage.cards import CardStorage
 from app.storage.canon import CanonStorage
@@ -30,6 +31,10 @@ from app.storage.memory_pack import MemoryPackStorage
 from app.storage.creative_memory import CreativeMemoryStorage
 from app.storage.pending_actions import PendingActionStorage
 from app.storage.volumes import VolumeStorage
+
+if TYPE_CHECKING:  # 仅用于类型注解，运行时保持惰性导入，避免加重启动依赖图
+    from app.storage.character_relations import CharacterRelationStorage
+    from app.storage.outline import OutlineStorage
 
 
 @lru_cache(maxsize=1)
@@ -69,6 +74,22 @@ def get_draft_storage() -> DraftStorage:
         DraftStorage实例 / DraftStorage instance
     """
     return DraftStorage()
+
+
+@lru_cache(maxsize=1)
+def get_outline_storage() -> "OutlineStorage":
+    """获取或创建 OutlineStorage 单例（全文规划大纲，非章节）。"""
+    from app.storage.outline import OutlineStorage
+
+    return OutlineStorage()
+
+
+@lru_cache(maxsize=1)
+def get_character_relation_storage() -> "CharacterRelationStorage":
+    """获取或创建 CharacterRelationStorage 单例（角色关系图谱，作者设定层）。"""
+    from app.storage.character_relations import CharacterRelationStorage
+
+    return CharacterRelationStorage()
 
 
 @lru_cache(maxsize=1)

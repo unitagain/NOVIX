@@ -12,6 +12,7 @@ from app.utils.logger import get_logger
 from app.utils.openai_client import create_async_openai_client
 from app.utils.anthropic_client import create_async_anthropic_client
 from app.services.llm_config_service import llm_config_service
+from app.llm_gateway.model_catalog import fallback_models, filter_mainstream_text_models
 
 logger = get_logger(__name__)
 
@@ -58,26 +59,7 @@ def _default_base_url_for_provider(provider: str) -> Optional[str]:
     return None
 
 
-ANTHROPIC_FALLBACK_MODELS: List[str] = [
-    # Fallback when model list fetch fails; keep small and stable.
-    "claude-opus-4-6",
-    "claude-sonnet-4-6",
-    "claude-sonnet-4-5",
-    "claude-haiku-4-5",
-]
-
-GENERIC_FALLBACK_MODELS = {
-    "openai": ["gpt-5.4-mini", "gpt-4o", "gpt-4.1"],
-    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-    "gemini": ["gemini-2.5-flash", "gemini-3.1-pro-preview"],
-    "qwen": ["qwen3.5-plus", "qwen3-max", "qwen-turbo"],
-    "kimi": ["kimi-k2.5", "kimi-k2-thinking"],
-    "glm": ["glm-5", "glm-4.7"],
-    "grok": ["grok-4", "grok-4.1-fast"],
-    "wenxin": ["ernie-4.5-turbo-32k", "ernie-5.0"],
-    "aistudio": ["ernie-5.0-thinking-preview", "ernie-5.0"],
-    "custom": [],
-}
+ANTHROPIC_FALLBACK_MODELS: List[str] = fallback_models("anthropic")
 
 
 def _resolve_api_key(api_key: Optional[str], profile_id: Optional[str]) -> str:
@@ -93,10 +75,7 @@ def _resolve_api_key(api_key: Optional[str], profile_id: Optional[str]) -> str:
 
 
 def _fallback_models_for_provider(provider: str) -> List[str]:
-    normalized = str(provider or "").strip().lower()
-    if normalized == "anthropic":
-        return ANTHROPIC_FALLBACK_MODELS
-    return GENERIC_FALLBACK_MODELS.get(normalized, [])
+    return fallback_models(provider)
 
 
 @router.post("/fetch-models")
@@ -127,7 +106,7 @@ async def fetch_models(request: FetchModelsRequest):
 
                 if model_ids:
                     logger.info("Fetch Models Success: Found %s models (anthropic)", len(model_ids))
-                    return {"models": sorted(set(model_ids))}
+                    return {"models": filter_mainstream_text_models(model_ids)}
 
                 logger.warning("Fetch Models Warning (anthropic): empty models list")
                 return {
@@ -157,7 +136,7 @@ async def fetch_models(request: FetchModelsRequest):
         models_response = await client.models.list()
 
         # Extract model IDs
-        model_ids = [m.id for m in models_response.data]
+        model_ids = filter_mainstream_text_models(m.id for m in models_response.data)
         logger.info("Fetch Models Success: Found %s models", len(model_ids))
         return {"models": sorted(model_ids)}
 

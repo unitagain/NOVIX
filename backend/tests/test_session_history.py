@@ -59,6 +59,50 @@ def test_count(tmp_path):
     assert asyncio.run(s.count("p1")) == 5
 
 
+def test_multiple_conversations_are_isolated_and_switchable(tmp_path):
+    s = _store(tmp_path)
+    asyncio.run(s.append("p1", {"role": "user", "content": "legacy"}))
+    created = asyncio.run(s.create_conversation("p1", title="第二条线"))
+    asyncio.run(s.append("p1", {"role": "user", "content": "new"}))
+
+    assert [item["content"] for item in asyncio.run(s.load("p1"))] == ["new"]
+    assert [item["content"] for item in asyncio.run(s.load("p1", conversation_id="legacy"))] == ["legacy"]
+    conversations = asyncio.run(s.list_conversations("p1"))
+    assert any(item["id"] == created["id"] and item["active"] for item in conversations)
+
+    asyncio.run(s.activate_conversation("p1", "legacy"))
+    assert [item["content"] for item in asyncio.run(s.load("p1"))] == ["legacy"]
+
+
+def test_activate_unknown_conversation_fails_without_changing_active(tmp_path):
+    s = _store(tmp_path)
+    created = asyncio.run(s.create_conversation("p1"))
+    try:
+        asyncio.run(s.activate_conversation("p1", "missing"))
+        assert False, "expected missing conversation to fail"
+    except FileNotFoundError:
+        pass
+    assert s.active_conversation_id("p1") == created["id"]
+
+
+def test_rollback_last_turn_removes_user_message_and_following_responses(tmp_path):
+    s = _store(tmp_path)
+    created = asyncio.run(s.create_conversation("p1", title="回退测试"))
+    conversation_id = created["id"]
+    asyncio.run(s.append("p1", {"role": "user", "content": "第一轮"}, conversation_id=conversation_id))
+    asyncio.run(s.append("p1", {"role": "assistant", "content": "第一轮完成"}, conversation_id=conversation_id))
+    asyncio.run(s.append("p1", {"role": "user", "content": "第二轮"}, conversation_id=conversation_id))
+    asyncio.run(s.append("p1", {"role": "system", "content": "本轮执行失败"}, conversation_id=conversation_id))
+
+    result = asyncio.run(s.rollback_last_turn("p1", conversation_id))
+
+    assert result == {"removed": 2, "conversation_id": conversation_id, "restored_input": "第二轮"}
+    assert [item["content"] for item in asyncio.run(s.load("p1", conversation_id=conversation_id))] == [
+        "第一轮",
+        "第一轮完成",
+    ]
+
+
 # ---------------------------------------------------------------- compact --
 
 

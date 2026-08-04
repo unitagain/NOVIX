@@ -59,8 +59,20 @@ class CardStorage(BaseStorage):
 
         if file_path.exists():
             file_path.unlink()
+            await self._purge_card_index(project_id, character_name)
+            await self._relation_storage().purge_character(project_id, character_name)
             return True
         return False
+
+    def _relation_storage(self):
+        """按需构造角色关系存储（U4 设定层关系边）。
+
+        函数级导入 + 就地构造：避免 storage.cards → dependencies 的循环导入，
+        同时继承本实例的 data_dir（测试与多数据目录场景下不会写错位置）。
+        """
+        from app.storage.character_relations import CharacterRelationStorage
+
+        return CharacterRelationStorage(str(self.data_dir))
 
     async def get_world_card(self, project_id: str, card_name: str) -> Optional[WorldCard]:
         file_path = self.get_project_path(project_id) / "cards" / "world" / f"{card_name}.yaml"
@@ -101,8 +113,45 @@ class CardStorage(BaseStorage):
         file_path = self.get_project_path(project_id) / "cards" / "world" / f"{card_name}.yaml"
         if file_path.exists():
             file_path.unlink()
+            await self._purge_card_index(project_id, card_name)
             return True
         return False
+
+    async def _purge_card_index(self, project_id: str, card_name: str) -> None:
+        """删除卡片后立即使派生检索索引与关系快照失效，避免已删实体继续进入 Agent 上下文。"""
+        path = self.get_project_path(project_id) / "index" / "cards.jsonl"
+        rows = await self.read_jsonl(path)
+        if rows:
+            kept = []
+            for row in rows:
+                source = row.get("source") if isinstance(row, dict) else None
+                indexed_card = source.get("card") if isinstance(source, dict) else ""
+                if str(indexed_card or "") != str(card_name):
+                    kept.append(row)
+            if len(kept) != len(rows):
+                await self.write_jsonl(path, kept)
+        # 关系三元组是以实体为主语/宾语的派生快照：按 subject/object 精确匹配
+        # 失效，避免 query_relations 把已删除实体重新注入上下文。只做精确匹配——
+        # 旧实现用整行 JSON 子串匹配，卡名越短命中面越大（"王" 会命中 "国王"），
+        # 批量导入的世界书条目会把它放大成数据删除事故。本段不依赖卡片索引存在。
+        # canon/facts.jsonl 不在此清理：事实是从正文抽取的故事真相源，
+        # 其生命周期归章节级联管理，不因设定卡被删而销毁。
+        relations_path = self.get_project_path(project_id) / "canon" / "relations.jsonl"
+        relations = await self.read_jsonl(relations_path)
+        if not relations:
+            return
+        target = str(card_name).strip()
+        remaining = [
+            entry
+            for entry in relations
+            if not (
+                isinstance(entry, dict)
+                and target
+                and (str(entry.get("subject") or "").strip() == target or str(entry.get("object") or "").strip() == target)
+            )
+        ]
+        if len(remaining) != len(relations):
+            await self.write_jsonl(relations_path, remaining)
 
     async def get_style_card(self, project_id: str) -> Optional[StyleCard]:
         file_path = self.get_project_path(project_id) / "cards" / "style.yaml"
@@ -121,9 +170,16 @@ class CardStorage(BaseStorage):
         name = str(data.get("name", "")).strip()
         aliases = self._normalize_aliases(data.get("aliases"))
         stars = self._normalize_stars(data.get("stars"))
+        voice = str(data.get("voice") or "").strip() or None
         description = str(data.get("description", "")).strip()
         if description:
-            return {"name": name, "aliases": aliases, "description": description, "stars": stars}
+            return {
+                "name": name,
+                "aliases": aliases,
+                "description": description,
+                "voice": voice,
+                "stars": stars,
+            }
 
         parts = []
         identity = str(data.get("identity", "")).strip()
@@ -158,7 +214,13 @@ class CardStorage(BaseStorage):
         if arc:
             parts.append(f"角色弧线: {arc}")
 
-        return {"name": name, "aliases": aliases, "description": "\n".join(parts).strip(), "stars": stars}
+        return {
+            "name": name,
+            "aliases": aliases,
+            "description": "\n".join(parts).strip(),
+            "voice": voice,
+            "stars": stars,
+        }
 
     def _coerce_world_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
         name = str(data.get("name", "")).strip()

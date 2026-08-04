@@ -1,0 +1,150 @@
+{
+  "schema_version": 2,
+  "success": false,
+  "created_at": 1785636827.623613,
+  "code_revision": "f9ce68a57f3108d109494da68b6c3b4add4a6337",
+  "dirty_worktree": true,
+  "repository_checks": {
+    "clean_worktree": false,
+    "campaign_evidence_present": true,
+    "production_evidence_present": true
+  },
+  "checks": [
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "All checks passed!\n",
+      "stderr_tail": "",
+      "name": "ruff",
+      "command": [
+        "python",
+        "-m",
+        "ruff",
+        "check",
+        "app",
+        "tests",
+        "scripts"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "Success: no issues found in 27 source files\n",
+      "stderr_tail": "",
+      "name": "type_contract",
+      "command": [
+        "python",
+        "scripts/type_contract_check.py"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "ests\\test_review.py ...                                                 [ 64%]\ntests\\test_router_regressions.py ....                                    [ 65%]\ntests\\test_session_history.py ..................                         [ 68%]\ntests\\test_storage.py ...                                                [ 68%]\ntests\\test_stream_thinking.py ...                                        [ 69%]\ntests\\test_tavern_cards.py .............                                 [ 71%]\ntests\\test_thinking.py ..........                                        [ 72%]\ntests\\test_tool_registry.py .....                                        [ 73%]\ntests\\test_trace_persist.py ...                                          [ 73%]\ntests\\test_trace_replay.py .....                                         [ 74%]\ntests\\test_trust_boundary.py ....                                        [ 75%]\ntests\\test_utils.py ........................                             [ 78%]\ntests\\test_w1_security.py .......                                        [ 79%]\ntests\\test_w2_control_plane.py ..................                        [ 82%]\ntests\\test_w3_context_contract.py ......................                 [ 85%]\ntests\\test_w4_operations.py .............                                [ 87%]\ntests\\test_w6_error_contract.py ........                                 [ 88%]\ntests\\test_w7_architecture_contract.py .......                           [ 89%]\ntests\\test_w8_production_evidence.py ..........                          [ 91%]\ntests\\test_working_text_regression.py ....                               [ 91%]\ntests\\test_writer_tool_loadout_regression.py ...                         [ 92%]\ntests\\test_writer_toolset.py ....................                        [ 95%]\ntests\\test_writing_actions.py ..........................                 [ 98%]\ntests\\test_writing_judge.py .......                                      [100%]\n\n======================= 676 passed in 135.32s (0:02:15) =======================\n",
+      "stderr_tail": "",
+      "name": "pytest",
+      "command": [
+        "python",
+        "-m",
+        "pytest"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "No broken requirements found.\n",
+      "stderr_tail": "",
+      "name": "pip_check",
+      "command": [
+        "python",
+        "-m",
+        "pip",
+        "check"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "{\n  \"unsafe_external_sinks\": [],\n  \"silent_broad_catches\": []\n}\n",
+      "stderr_tail": "",
+      "name": "error_contract",
+      "command": [
+        "python",
+        "scripts/error_contract_audit.py"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "ntext_engine.tool_registry\",\n        \"app.eval.representative_scenarios\",\n        \"app.routers.canon\",\n        \"app.routers.memory\",\n        \"app.storage.pending_actions\",\n        \"app.utils.trust\"\n      ]\n    },\n    {\n      \"module\": \"app.llm_gateway\",\n      \"importers\": 7,\n      \"importer_modules\": [\n        \"app.agents.base\",\n        \"app.eval.longform_benchmark\",\n        \"app.eval.writing_judge\",\n        \"app.orchestrator.orchestrator\",\n        \"app.routers.cards\",\n        \"app.routers.config_llm\",\n        \"app.services.text_chunk_service\"\n      ]\n    },\n    {\n      \"module\": \"app.observability.usage_diagnostics\",\n      \"importers\": 7,\n      \"importer_modules\": [\n        \"app.agents.agentic\",\n        \"app.agents.writing_actions\",\n        \"app.eval.golden_replay\",\n        \"app.llm_gateway.gateway\",\n        \"app.main\",\n        \"app.orchestrator.writing_service\",\n        \"app.storage.creative_memory\"\n      ]\n    },\n    {\n      \"module\": \"app.schemas.canon\",\n      \"importers\": 7,\n      \"importer_modules\": [\n        \"app.agents._summary_mixin\",\n        \"app.eval.eval_suite\",\n        \"app.eval.longform_benchmark\",\n        \"app.eval.representative_scenarios\",\n        \"app.orchestrator._analysis_mixin\",\n        \"app.routers.canon\",\n        \"app.storage.canon\"\n      ]\n    },\n    {\n      \"module\": \"app.utils.trust\",\n      \"importers\": 7,\n      \"importer_modules\": [\n        \"app.agents.agent_task\",\n        \"app.eval.eval_suite\",\n        \"app.eval.longform_benchmark\",\n        \"app.routers.cards\",\n        \"app.services.tavern_cards\",\n        \"app.storage.canon\",\n        \"app.storage.creative_memory\"\n      ]\n    },\n    {\n      \"module\": \"app.context_engine.trace_collector\",\n      \"importers\": 6,\n      \"importer_modules\": [\n        \"app.agents.agent_task\",\n        \"app.agents.base\",\n        \"app.llm_gateway.gateway\",\n        \"app.llm_gateway.telemetry\",\n        \"app.orchestrator.context_planning_service\",\n        \"app.routers.websocket\"\n      ]\n    }\n  ],\n  \"violations\": []\n}\n",
+      "stderr_tail": "",
+      "name": "architecture",
+      "command": [
+        "python",
+        "scripts/architecture_profile.py",
+        "--check"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "Requirements sync check passed.\n",
+      "stderr_tail": "",
+      "name": "requirements_sync",
+      "command": [
+        "python",
+        "scripts/check_requirements_sync.py"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": "",
+      "name": "sidecar_syntax",
+      "command": [
+        "node",
+        "--check",
+        "desktop/scripts/build-sidecar.mjs"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "",
+      "stderr_tail": "the working copy of 'frontend/src/components/ide/ExportDialog.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/components/ide/IDELayout.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/components/ide/PanelResizeHandle.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/components/ide/SidePanel.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/components/ide/TitleBar.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/components/ide/panels/AgentsPanel.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/features/agent/model/agentProtocol.test.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/features/agent/model/agentProtocol.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/i18n/locales/en-US.js', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/i18n/locales/zh-CN.js', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/lib/agentThread.js', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/lib/agentThread.test.js', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/types.ts', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/utils/writingSessionHelpers.js', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'frontend/src/utils/writingSessionHelpers.test.js', LF will be replaced by CRLF the next time Git touches it\n",
+      "name": "diff_check",
+      "command": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main"
+    },
+    {
+      "success": true,
+      "returncode": 0,
+      "stdout_tail": "============================= test session starts =============================\nplatform win32 -- Python 3.13.3, pytest-8.3.5, pluggy-1.6.0\nrootdir: F:\\Github-WenShape\\WenShape-main\\backend\nconfigfile: pyproject.toml\nplugins: anyio-4.9.0, Faker-37.3.0, langsmith-0.4.32, asyncio-0.25.3\nasyncio: mode=Mode.AUTO, asyncio_default_fixture_loop_scope=function\ncollected 10 items\n\ntests\\test_p14_production.py ..........                                  [100%]\n\n============================= 10 passed in 3.89s ==============================\n",
+      "stderr_tail": "",
+      "name": "fault_injection",
+      "command": [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_p14_production.py"
+      ],
+      "cwd": "F:\\Github-WenShape\\WenShape-main\\backend"
+    }
+  ],
+  "campaigns": [],
+  "production": [],
+  "fingerprint": "29f0f866f3f4f5e1960c306a5c1d741afcbe6b4573752aacd4483907a92e5e73"
+}

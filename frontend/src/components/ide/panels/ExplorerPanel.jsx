@@ -33,8 +33,9 @@ import AnalysisSyncDialog from '../AnalysisSyncDialog';
 import AnalysisReviewDialog from '../../writing/AnalysisReviewDialog';
 import VolumeManageDialog from '../VolumeManageDialog';
 import VolumeTree from '../VolumeTree';
-import { Layers, RefreshCw, Plus, ArrowUpDown } from 'lucide-react';
+import { Layers, RefreshCw, Plus, ArrowUpDown, FileText } from 'lucide-react';
 import { cn } from '../../ui/core';
+import { SidebarPanelHeader } from '../SidebarPanelHeader';
 import logger from '../../../utils/logger';
 import { useLocale } from '../../../i18n';
 
@@ -205,12 +206,10 @@ export default function ExplorerPanel({ className }) {
       )}
     >
       {/* VS Code 风格工具栏 */}
-      <div className="flex items-center h-[35px] px-4 font-sans text-[11px] font-bold tracking-wide text-[var(--vscode-fg-subtle)] uppercase bg-[var(--vscode-sidebar-bg)] border-b border-[var(--vscode-sidebar-border)]">
-        <span>{t('panels.explorer.title')}</span>
-        <div className="flex-1" />
-
-        {/* 右侧工具按钮 */}
-        <div className="flex items-center gap-0.5">
+      <SidebarPanelHeader
+        title={t('panels.explorer.title')}
+        actions={
+          <>
           <ActionButton
             onClick={() => setReorderMode((prev) => !prev)}
             icon={ArrowUpDown}
@@ -239,11 +238,29 @@ export default function ExplorerPanel({ className }) {
             icon={Layers}
             title={t('panels.explorer.manageVolumes')}
           />
-        </div>
-      </div>
+          </>
+        }
+      />
 
       <div className="flex-1 overflow-hidden relative">
         <div className="absolute inset-0 overflow-y-auto custom-scrollbar px-1.5 py-1">
+          {/* 大纲：始终置于所有分卷之前的第一项（全文规划资产，非章节） */}
+          <button
+            type="button"
+            onClick={() =>
+              dispatch({ type: 'SET_ACTIVE_DOCUMENT', payload: { type: 'outline', id: 'outline' } })
+            }
+            className={[
+              'mb-1 flex w-full items-center gap-2 rounded-[6px] px-2 py-1.5 text-left text-[13px] transition-colors',
+              state.activeDocument?.type === 'outline'
+                ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
+                : 'text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)]',
+            ].join(' ')}
+            title={t('outline.explorerHint') || '全文规划大纲'}
+          >
+            <FileText size={14} className="shrink-0 text-[var(--vscode-fg-subtle)]" />
+            <span className="font-medium">{t('outline.title') || '大纲'}</span>
+          </button>
           <VolumeTree
             projectId={state.activeProjectId}
             onChapterSelect={handleChapterSelect}

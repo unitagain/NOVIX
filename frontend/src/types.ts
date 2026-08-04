@@ -36,6 +36,29 @@ export interface CharacterCard {
   stars?: number; // 重要度评分（0-5星）
   identity?: string; // 身份/职位
   appearance?: string; // 外貌描述
+  voice?: string; // 角色口吻样本（示例对白，仅描述说话方式，非故事事实）
+}
+
+/**
+ * SillyTavern 卡片导入结果 / Tavern card import result
+ */
+export interface TavernImportPlan {
+  source_format: string; // 识别到的源格式（chara_card_v1/v2/v3, lorebook_v3, world_info）
+  source_filename: string;
+  characters: CharacterCard[];
+  world_cards: WorldCard[];
+  dropped: { field: string; reason: string; count: number }[]; // 被有意剥离的字段清单
+  warnings: string[];
+  injection_detected: boolean; // 存留文本命中注入启发式（仅提示）
+}
+
+export interface TavernImportResponse {
+  committed: boolean; // false = dry-run 预案，未落盘
+  permission: string;
+  plan: TavernImportPlan;
+  created_characters: string[];
+  created_world_cards: string[];
+  skipped_existing: string[];
 }
 
 /**
@@ -58,6 +81,32 @@ export interface WorldCard {
  */
 export interface StyleCard {
   style: string; // 文风描述
+}
+
+/**
+ * 角色关系边 / Character relation edge
+ *
+ * 作者设定层的人物关系（与角色卡同层，不是 Canon 中从正文抽取的关系事实）。
+ * 方向语义：from 是 to 的 relation；appellation 是 to 对 from 的称呼，
+ * reverse_appellation 是 from 对 to 的称呼（两者独立填写，不自动互推）。
+ */
+export interface RelationEdge {
+  id?: string; // 稳定边 ID（缺省由服务端生成）
+  from: string; // 被描述的角色（关系的主语）
+  to: string; // 视角所属角色（关系的宾语）
+  relation: string; // 关系（如 姐姐），≤20 字符
+  appellation?: string | null; // to 对 from 的称呼（如 阿姐），≤20 字符
+  reverse_appellation?: string | null; // from 对 to 的称呼（如 小河），≤20 字符
+}
+
+/**
+ * 角色关系文档 / Character relation document
+ *
+ * cards/relations.yaml 的全量视图：设定边 + 画布坐标（坐标为纯视图状态）。
+ */
+export interface RelationsDocument {
+  edges: RelationEdge[];
+  layout: Record<string, { x: number; y: number }>;
 }
 
 /**
@@ -116,31 +165,6 @@ export interface Fact {
   source: string; // 信息来源（哪个章节、卡片等）
   introduced_in: string; // 首次引入位置
   confidence: number; // 置信度（0-1）
-}
-
-/**
- * 会话状态 / Session Status
- *
- * 实时写作会话的当前状态。
- */
-export interface SessionStatus {
-  status: 'idle' | 'asking' | 'researching' | 'writing' | 'editing' | 'analyzing';
-  message?: string; // 状态说明信息
-  project_id?: string; // 项目 ID
-  chapter?: string; // 当前章节
-  iteration?: number; // 迭代次数
-}
-
-/**
- * 编辑建议结果 / Edit Suggest Result
- *
- * AI 编辑建议的返回结果。
- */
-export interface EditSuggestResult {
-  success: boolean; // 操作是否成功
-  revised_content?: string; // 修订后的内容
-  word_count?: number; // 修订后的字数
-  error?: string; // 错误信息（如果失败）
 }
 
 /**

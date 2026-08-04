@@ -977,7 +977,7 @@ class LongformBenchmarkHarness:
             },
         ]
         try:
-            profile_id = provider or gateway.get_provider_for_agent("editor")
+            profile_id = provider or gateway.get_provider_for_agent("writer")
             response = await gateway.chat(
                 messages,
                 provider=profile_id,
@@ -4658,7 +4658,7 @@ class LongformBenchmarkHarness:
                 {"role": "user", "content": str(row.get("query") or "")},
             ]
             try:
-                profile_id = provider or gateway.get_provider_for_agent("editor")
+                profile_id = provider or gateway.get_provider_for_agent("writer")
                 response = await gateway.chat(messages, provider=profile_id, temperature=0.0, max_tokens=300)
             except Exception as exc:
                 if require_available:

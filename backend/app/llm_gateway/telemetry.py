@@ -80,7 +80,8 @@ class GatewayTelemetryPort:
                     ).encode("utf-8")
                 ).hexdigest(),
             }
-        await trace_collector.record(TraceEventType.LLM_REQUEST, "llm_gateway", record)
+        trace_snapshot = json.loads(json.dumps(record, ensure_ascii=False, default=str))
+        await trace_collector.record(TraceEventType.LLM_REQUEST, "llm_gateway", trace_snapshot)
         return record
 
     async def record_egress(

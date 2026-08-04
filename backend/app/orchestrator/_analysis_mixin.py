@@ -13,6 +13,8 @@ License: PolyForm Noncommercial License 1.0.0
   所有方法通过 self 访问 Orchestrator 的 storage / agent / select_engine 等属性。
 """
 
+import hashlib
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -20,10 +22,11 @@ from app.schemas.canon import Fact, TimelineEvent, CharacterState
 from app.schemas.draft import ChapterSummary
 from app.schemas.card import StyleCard
 from app.schemas.evidence import EvidenceItem
-from app.utils.chapter_id import ChapterIDValidator
+from app.utils.chapter_id import ChapterIDValidator, normalize_chapter_id
 from app.error_contract import safe_error_code
 from app.utils.logger import get_logger
 from app.orchestrator.contracts import SessionStatus
+from app.agents.turn_effects import normalize_turn_effect, validated_fact_candidates
 
 logger = get_logger(__name__)
 
@@ -60,7 +63,7 @@ class AnalysisMixin:
                 volume_id = str(summary.get("volume_id") or "").strip()
                 if volume_id:
                     return volume_id
-        normalized = self._normalize_chapter_id(chapter)
+        normalized = normalize_chapter_id(chapter)
         return ChapterIDValidator.extract_volume_id(normalized) or "V1"
 
     async def analyze_chapter(
@@ -88,15 +91,12 @@ class AnalysisMixin:
         try:
             draft_content = content or ""
             if not draft_content:
-                versions = await self.draft_storage.list_draft_versions(project_id, chapter)
-                if not versions:
+                working_text, working_path = await self.draft_storage.get_working_text(project_id, chapter)
+                if working_path is None:
                     return {"success": False, "error": "No draft found"}
-
-                latest = versions[-1]
-                draft = await self.draft_storage.get_draft(project_id, chapter, latest)
-                if not draft:
+                if not working_text:
                     return {"success": False, "error": "Draft content missing"}
-                draft_content = draft.content
+                draft_content = working_text
 
             self.current_project_id = project_id
             self.current_chapter = chapter
@@ -113,6 +113,99 @@ class AnalysisMixin:
             return {"success": True, "analysis": analysis}
         except Exception as exc:
             return await self._handle_error("Analysis failed", exc=exc)
+
+    async def apply_turn_effect(self, project_id: str, chapter: str, turn_effect: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and persist the single Writer Agent's accepted turn effect without another LLM call."""
+        normalized_chapter = normalize_chapter_id(chapter)
+        content, working_path = await self.draft_storage.get_working_text(project_id, normalized_chapter)
+        if working_path is None or not str(content or "").strip():
+            return {"success": False, "reason": "draft_missing"}
+        effect = normalize_turn_effect(turn_effect)
+        change_type = str(effect.get("change_type") or "conversation")
+        operation = str(effect.get("fact_operation") or "none")
+        candidates = validated_fact_candidates(effect, content)
+        rejected_evidence = max(0, len(list(effect.get("fact_candidates") or [])) - len(candidates))
+        existing_summary = await self.draft_storage.get_chapter_summary(project_id, normalized_chapter)
+        summary_updated = False
+        if change_type in {"chapter_write", "plot_edit"} and str(effect.get("chapter_summary") or "").strip():
+            summary = existing_summary or ChapterSummary(
+                chapter=normalized_chapter,
+                volume_id=ChapterIDValidator.extract_volume_id(normalized_chapter) or "V1",
+                title=normalized_chapter,
+            )
+            summary.brief_summary = str(effect.get("chapter_summary") or "").strip()
+            summary.word_count = len(content)
+            summary.new_facts = [str(item.get("statement") or "") for item in candidates]
+            await self.draft_storage.save_chapter_summary(project_id, summary)
+            summary_updated = True
+
+        if operation == "replace_chapter":
+            await self.canon_storage.delete_unconfirmed_generated_facts_by_chapter(project_id, normalized_chapter)
+
+        existing_facts = await self.canon_storage.get_all_facts_raw(project_id)
+        existing_statements = {
+            re.sub(r"[\s\W_]+", "", str(item.get("statement") or item.get("content") or "")).lower()
+            for item in existing_facts
+        }
+        existing_ids = {str(item.get("id") or "") for item in existing_facts}
+        next_fact_index = 1
+        for existing_id in existing_ids:
+            match = re.match(r"^F(\d+)$", existing_id, re.IGNORECASE)
+            if match:
+                next_fact_index = max(next_fact_index, int(match.group(1)) + 1)
+
+        facts_saved = 0
+        if operation != "none":
+            for candidate in candidates:
+                statement = str(candidate.get("statement") or "").strip()
+                normalized_statement = re.sub(r"[\s\W_]+", "", statement).lower()
+                if not statement or not normalized_statement or normalized_statement in existing_statements:
+                    continue
+                while f"F{next_fact_index:04d}" in existing_ids:
+                    next_fact_index += 1
+                fact_id = f"F{next_fact_index:04d}"
+                next_fact_index += 1
+                evidence = str(candidate.get("evidence") or "").strip()
+                evidence_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
+                await self.canon_storage.add_fact(
+                    project_id,
+                    Fact(
+                        id=fact_id,
+                        statement=statement,
+                        source=normalized_chapter,
+                        introduced_in=normalized_chapter,
+                        confidence=0.8,
+                        status="needs_review",
+                        context_prefix=f"证据：{evidence[:240]}",
+                        source_refs=[f"writer_turn:{normalized_chapter}"],
+                        evidence_refs=[f"chapter:{normalized_chapter}#sha256:{evidence_hash}"],
+                        confidence_method="model_declared",
+                    ),
+                )
+                existing_ids.add(fact_id)
+                existing_statements.add(normalized_statement)
+                facts_saved += 1
+
+        try:
+            from app.services.chapter_binding_service import chapter_binding_service
+
+            await chapter_binding_service.build_bindings(project_id, normalized_chapter, force=True)
+        except Exception as exc:
+            logger.warning("Failed to refresh bindings after accepted-content sync: %s", exc)
+
+        return {
+            "success": True,
+            "applied": summary_updated or facts_saved > 0 or operation == "replace_chapter",
+            "chapter": normalized_chapter,
+            "change_type": change_type,
+            "fact_operation": operation,
+            "summary_updated": summary_updated,
+            "stats": {
+                "facts_saved": facts_saved,
+                "facts_rejected_evidence": rejected_evidence,
+                "facts_deduplicated": max(0, len(candidates) - facts_saved),
+            },
+        }
 
     async def _build_analysis(
         self,
@@ -219,19 +312,17 @@ class AnalysisMixin:
             try:
                 completed += 1
                 await emit_progress(f"同步分析中 ({completed}/{total})：{chapter}")
-                versions = await self.draft_storage.list_draft_versions(project_id, chapter)
-                if not versions:
+                working_text, working_path = await self.draft_storage.get_working_text(project_id, chapter)
+                if working_path is None:
                     results.append({"chapter": chapter, "success": False, "error": "No draft found"})
                     continue
-                latest = versions[-1]
-                draft = await self.draft_storage.get_draft(project_id, chapter, latest)
-                if not draft:
+                if not working_text:
                     results.append({"chapter": chapter, "success": False, "error": "Draft content missing"})
                     continue
                 analysis = await self._build_analysis(
                     project_id=project_id,
                     chapter=chapter,
-                    content=draft.content,
+                    content=working_text,
                     chapter_title=None,
                 )
                 await emit_progress(f"同步保存中 ({completed}/{total})：{chapter}")
@@ -253,7 +344,7 @@ class AnalysisMixin:
                         focus_characters = await self.archivist.bind_focus_characters(
                             project_id=project_id,
                             chapter=chapter,
-                            final_draft=draft.content,
+                            final_draft=working_text,
                             limit=5,
                         )
                     except Exception as exc:
@@ -301,19 +392,17 @@ class AnalysisMixin:
         results = []
         for chapter in chapters:
             try:
-                versions = await self.draft_storage.list_draft_versions(project_id, chapter)
-                if not versions:
+                working_text, working_path = await self.draft_storage.get_working_text(project_id, chapter)
+                if working_path is None:
                     results.append({"chapter": chapter, "success": False, "error": "No draft found"})
                     continue
-                latest = versions[-1]
-                draft = await self.draft_storage.get_draft(project_id, chapter, latest)
-                if not draft:
+                if not working_text:
                     results.append({"chapter": chapter, "success": False, "error": "Draft content missing"})
                     continue
                 analysis = await self._build_analysis(
                     project_id=project_id,
                     chapter=chapter,
-                    content=draft.content,
+                    content=working_text,
                     chapter_title=None,
                 )
                 results.append({"chapter": chapter, "success": True, "analysis": analysis})
@@ -395,7 +484,7 @@ class AnalysisMixin:
         """
         try:
             summary_data = analysis.get("summary", {}) or {}
-            summary_data["chapter"] = self._normalize_chapter_id(summary_data.get("chapter") or chapter)
+            summary_data["chapter"] = normalize_chapter_id(summary_data.get("chapter") or chapter)
             existing_summary = await self.draft_storage.get_chapter_summary(project_id, summary_data["chapter"])
             if existing_summary:
                 # Preserve manual chapter ordering and stable metadata during analysis overwrite.
@@ -442,7 +531,11 @@ class AnalysisMixin:
             # Load existing fact IDs once before the loop (avoid N × O(M) scans)
             existing_facts = await self.canon_storage.get_all_facts_raw(project_id)
             existing_ids = {item.get("id") for item in existing_facts if item.get("id")}
-            next_fact_index = len(existing_facts) + 1
+            next_fact_index = 1
+            for existing_id in existing_ids:
+                match = re.match(r"^F(\d+)$", str(existing_id or ""), re.IGNORECASE)
+                if match:
+                    next_fact_index = max(next_fact_index, int(match.group(1)) + 1)
 
             facts_input = analysis.get("facts", []) or []
             if len(facts_input) > 5:
@@ -456,7 +549,11 @@ class AnalysisMixin:
                 fact_data["statement"] = fact_data.get("statement") or fact_data.get("content") or ""
                 fact_data["source"] = fact_data.get("source") or summary.chapter
                 fact_data["introduced_in"] = fact_data.get("introduced_in") or summary.chapter
+                fact_data.setdefault("confidence_method", "model_declared")
+                fact_data.setdefault("source_refs", [f"chapter_analysis:{summary.chapter}"])
                 if not fact_data.get("id") or fact_data.get("id") in existing_ids:
+                    while f"F{next_fact_index:04d}" in existing_ids:
+                        next_fact_index += 1
                     fact_data["id"] = f"F{next_fact_index:04d}"
                     next_fact_index += 1
                 existing_ids.add(fact_data["id"])
@@ -517,7 +614,7 @@ class AnalysisMixin:
             content: 最终草稿内容 / Final draft content text.
         """
         try:
-            normalized_chapter = self._normalize_chapter_id(chapter)
+            normalized_chapter = normalize_chapter_id(chapter)
             scene_brief = await self.draft_storage.get_scene_brief(project_id, chapter)
             chapter_title = scene_brief.title if scene_brief and scene_brief.title else chapter
 

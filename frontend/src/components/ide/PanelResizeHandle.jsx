@@ -40,7 +40,9 @@ export function PanelResizeHandle({ side, width, min, max, onResize }) {
         const direction = event.key === 'ArrowRight' ? 1 : -1;
         onResize(Math.max(min, Math.min(max, width + direction * 12 * (side === 'left' ? 1 : -1))));
       }}
-      className={`absolute inset-y-0 z-50 w-1 cursor-col-resize outline-none transition-colors hover:bg-blue-400/60 focus-visible:bg-blue-500 ${side === 'left' ? 'right-0' : 'left-0'}`}
+      data-resize-handle={side}
+      style={{ touchAction: 'none' }}
+      className={`absolute inset-y-0 z-50 w-[14px] cursor-col-resize outline-none transition-colors before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-transparent hover:before:bg-blue-400 focus-visible:before:bg-blue-500 ${side === 'left' ? '-right-[7px]' : '-left-[7px]'}`}
     />
   );
 }

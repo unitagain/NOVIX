@@ -32,6 +32,10 @@ import { PanelResizeHandle } from './PanelResizeHandle';
 export const SidePanel = () => {
   const { state, dispatch } = useIDE();
   const { sidePanelVisible, activeActivity, sidePanelWidth } = state;
+  const maxWidth = Math.min(
+    480,
+    Math.max(280, (typeof window === 'undefined' ? 1440 : window.innerWidth) - 44 - 360 - 16),
+  );
 
   if (!sidePanelVisible) return null;
 
@@ -73,7 +77,7 @@ export const SidePanel = () => {
         side="left"
         width={sidePanelWidth}
         min={180}
-        max={420}
+        max={maxWidth}
         onResize={(width) => dispatch({ type: 'SET_PANEL_WIDTH', panel: 'left', width })}
       />
     </div>

@@ -7,13 +7,12 @@ Copyright © 2025-2026 WenShape Team
 License: PolyForm Noncommercial License 1.0.0
 
 模块说明 / Module Description:
-  工作记忆服务 - 编译写作工作记忆，通过缺口检测生成针对性问题，支持证据检索和用户交互。
-  Working memory compilation and gap-driven questions - Builds working memory packs with evidence retrieval and generates user questions based on content gaps.
+  工作记忆服务 - 编译写作工作记忆，通过缺口检测生成机器可读候选，支持证据检索和用户交互。
+  Working memory compilation and gap candidates - Builds evidence for the existing Writer tool loop.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Optional
 
 from app.services.evidence_service import evidence_service
@@ -47,15 +46,14 @@ from app.services.working_memory_helpers import (
     _dedup_items,
     _count_types,
     _answer_to_evidence_items,
-    _make_question_key,
 )
 
 
 class WorkingMemoryService:
     """
-    工作记忆编译服务 - 为写作过程编译上下文和生成缺口问题。
+    工作记忆编译服务 - 为写作过程编译上下文和机器可读缺口候选；不生成作者问卷。
 
-    Compile working memory, evidence packs, and generates gap-driven questions to guide user research.
+    Compile working memory and evidence packs for the Writer's own tool decisions.
     Supports semantic reranking, entity tracking, and memory persistence.
 
     Attributes:
@@ -476,7 +474,19 @@ class WorkingMemoryService:
             },
         }
 
-        questions = self._build_questions(unresolved_gaps, chapter, language=lang, unknown_gap_texts=unknown_gap_texts)
+        # Keep unresolved gaps as machine-readable retrieval candidates. They
+        # are never converted into author-facing fixed questions; only the
+        # Writer may call ask_clarification with model-authored questions.
+        question_candidates = [
+            {
+                "type": str(gap.get("kind") or "clarify"),
+                "text": str(gap.get("text") or "").strip(),
+                "queries": list(gap.get("queries") or []),
+            }
+            for gap in unresolved_gaps[:5]
+            if str(gap.get("text") or "").strip()
+        ]
+        questions: List[Dict[str, str]] = []
 
         working_memory = self._compile_working_memory(
             scene_brief=scene_brief,
@@ -494,6 +504,7 @@ class WorkingMemoryService:
             "seed_entities": seed_entities,
             "seed_window": seed_window,
             "questions": questions,
+            "question_candidates": question_candidates,
             "sufficiency_report": sufficiency_report,
         }
 
@@ -503,7 +514,7 @@ class WorkingMemoryService:
         supported: Dict[str, bool],
         gap_support_scores: Dict[str, float],
         focus_terms: List[str],
-        force_minimum_questions: bool = True,
+        force_minimum_questions: bool = False,
     ) -> List[Dict[str, Any]]:
         askable = [g for g in gaps if g.get("ask_user", True)]
         if not askable:
@@ -520,8 +531,6 @@ class WorkingMemoryService:
             seen.add(text)
 
         if force_minimum_questions:
-            # Always ask at least one plot-focused question to confirm the intended
-            # chapter push, even when retrieval finds related evidence.
             for gap in askable:
                 if gap.get("kind") == "plot_point":
                     add_gap(gap)
@@ -548,57 +557,6 @@ class WorkingMemoryService:
                 add_gap(gap)
 
         return selected
-
-    def _build_questions(
-        self,
-        gaps: List[Dict[str, Any]],
-        chapter: str,
-        language: str = "zh",
-        unknown_gap_texts: Optional[set] = None,
-    ) -> List[Dict[str, str]]:
-        questions = []
-        lang = normalize_language(language, default="zh")
-        for gap in gaps[:3]:
-            kind = gap.get("kind") or "detail_gap"
-            text = gap.get("text") or ""
-            if not text:
-                continue
-            if unknown_gap_texts and text in unknown_gap_texts:
-                continue
-            if lang == "en":
-                q = str(text).strip()
-                starts_like_question = bool(
-                    re.match(r"^(what|who|which|where|when|why|how|does|do|is|are|can|should)\b", q, re.I)
-                )
-                if starts_like_question or "?" in q:
-                    question = q
-                    if not question.endswith("?"):
-                        question += "?"
-                else:
-                    if kind == "plot_point":
-                        question = f"To achieve this chapter goal, {q.rstrip('.')}?"
-                    elif kind == "character_change":
-                        question = f"Character: {q.rstrip('.')}?"
-                    else:
-                        question = f"Details: {q.rstrip('.')}?"
-                reason = f"Insufficient evidence; gap: {q}"
-            else:
-                if kind == "plot_point":
-                    question = f"为达成本章目标，{text}？"
-                elif kind == "character_change":
-                    question = f"角色方面：{text}？"
-                else:
-                    question = f"细节方面：{text}？"
-                reason = f"证据不足，缺口：{text}"
-            questions.append(
-                {
-                    "type": kind,
-                    "text": question,
-                    "key": _make_question_key(chapter, kind, text),
-                    "reason": reason,
-                }
-            )
-        return questions
 
     def _gap_support_score(self, gap: Dict[str, Any], items: List[Dict[str, Any]]) -> float:
         queries = [q for q in gap.get("queries", []) if q]

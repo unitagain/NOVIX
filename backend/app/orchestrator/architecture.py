@@ -32,7 +32,6 @@ class RuntimeStage(str, Enum):
     PERMISSION_GATE = "permission_gate"
     WRITE_BACK = "write_back"
     COMPRESS = "compress"
-    FALLBACK_WORKFLOW = "fallback_workflow"
 
 
 class RuntimeService(str, Enum):
@@ -42,7 +41,6 @@ class RuntimeService(str, Enum):
     CONTEXT_PLANNING = "ContextPlanningService"
     CONTEXT_ASSEMBLY = "ContextAssemblyService"
     WRITING = "WritingService"
-    COMMIT = "CommitCoordinator"
     POST_TURN = "PostTurnService"
 
 
@@ -105,12 +103,6 @@ SERVICE_BOUNDARIES: Tuple[Dict[str, str], ...] = (
         "owner": ControlOwner.AGENT.value,
     },
     {
-        "name": "commit_coordination",
-        "current": "CommitCoordinator for orchestrated draft write-back",
-        "target": "CommitCoordinator",
-        "owner": ControlOwner.WORKFLOW.value,
-    },
-    {
         "name": "post_turn",
         "current": "PostTurnService",
         "target": "PostTurnService",
@@ -132,12 +124,6 @@ SERVICE_BOUNDARIES: Tuple[Dict[str, str], ...] = (
         "name": "plan_execution",
         "current": "PlanExecutionService",
         "target": "PlanExecutionService",
-        "owner": ControlOwner.WORKFLOW.value,
-    },
-    {
-        "name": "finalize_analysis",
-        "current": "FinalizePipeline delegates analysis to AnalysisMixin",
-        "target": "FinalizePipeline + incremental AnalysisMixin extraction",
         "owner": ControlOwner.WORKFLOW.value,
     },
     {
@@ -230,12 +216,6 @@ MAINTENANCE_FREEZE_POLICIES: Tuple[Dict[str, str], ...] = (
         "refactor_gate": "new_consumer_contract_and_recovery_evidence",
     },
     {
-        "area": "legacy_fallback",
-        "policy": "compatibility_safety_only",
-        "expansion_gate": "no_new_context_features",
-        "refactor_gate": "observable_parity_with_agentic_path",
-    },
-    {
         "area": "permission_policy",
         "policy": "code_owned_static_policy",
         "expansion_gate": "validated_user_configuration_need",
@@ -271,7 +251,6 @@ def maintenance_freeze_policies() -> List[Dict[str, str]]:
 def route_contract(
     action: str,
     *,
-    fallback: bool = False,
     auto_execute_plan: bool = False,
 ) -> Dict[str, Any]:
     """Build the observable route contract for a chat turn.
@@ -281,10 +260,7 @@ def route_contract(
     """
 
     normalized = str(action or "write").strip() or "write"
-    if fallback:
-        path = "fallback_workflow"
-        stages = [RuntimeStage.INTENT_ROUTING, RuntimeStage.FALLBACK_WORKFLOW, RuntimeStage.PERMISSION_GATE]
-    elif normalized == "plan":
+    if normalized == "plan":
         path = "plan_workflow"
         stages = [RuntimeStage.INTENT_ROUTING, RuntimeStage.PLAN_WORKFLOW]
         if auto_execute_plan:
@@ -294,16 +270,8 @@ def route_contract(
         stages = [RuntimeStage.INTENT_ROUTING, RuntimeStage.CONTEXT_PLAN, RuntimeStage.WRITER_AGENT]
 
     stage_rows = {item["stage"]: item for item in RUNTIME_MAIN_PATH}
-    if RuntimeStage.FALLBACK_WORKFLOW.value not in stage_rows:
-        stage_rows[RuntimeStage.FALLBACK_WORKFLOW.value] = {
-            "stage": RuntimeStage.FALLBACK_WORKFLOW.value,
-            "owner": ControlOwner.WORKFLOW.value,
-            "responsibility": "use mature write/edit workflows when agentic writing is unavailable",
-        }
-
     return {
         "intent": normalized,
         "path": path,
-        "fallback": bool(fallback),
         "stages": [dict(stage_rows[stage.value]) for stage in stages],
     }

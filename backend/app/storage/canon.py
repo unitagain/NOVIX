@@ -339,6 +339,35 @@ class CanonStorage(BaseStorage):
             await get_index_cache().invalidate(project_id)
         return deleted
 
+    async def delete_unconfirmed_generated_facts_by_chapter(self, project_id: str, chapter: str) -> int:
+        """Delete replaceable AI-derived facts while preserving manual or confirmed canon."""
+        file_path = self.get_project_path(project_id) / "canon" / "facts.jsonl"
+        items = await self.read_jsonl(file_path)
+        target = self._extract_chapter_id(chapter)
+        kept = []
+        deleted = 0
+        for item in items:
+            source = item.get("source") or item.get("introduced_in") or item.get("chapter")
+            introduced = item.get("introduced_in") or item.get("source") or item.get("chapter")
+            chapter_ref = item.get("chapter_ref") or item.get("chapterRef") or item.get("chapter_id")
+            candidates = [self._extract_chapter_id(value) for value in (source, introduced, chapter_ref) if value]
+            generated = (
+                str(item.get("confidence_method") or "") == "model_declared"
+                or (
+                    str(item.get("status") or "") == "needs_review"
+                    and str(item.get("source_type") or "internal") == "internal"
+                )
+            )
+            confirmed = str(item.get("status") or "") == "confirmed" or bool(item.get("confirmed_by"))
+            if target and target in candidates and generated and not confirmed:
+                deleted += 1
+                continue
+            kept.append(item)
+        if deleted:
+            await self.write_jsonl(file_path, kept)
+            await get_index_cache().invalidate(project_id)
+        return deleted
+
     async def delete_and_normalize_by_chapter(self, project_id: str, chapter: str) -> int:
         """
         Normalize all facts and delete those belonging to a chapter in a single pass.

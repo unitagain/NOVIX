@@ -74,6 +74,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
     has_api_key: false,
     api_key_mask: '',
     clear_api_key: false,
+    reasoning_dialect: 'openai_chat',
   });
 
   useEffect(() => {
@@ -100,6 +101,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
           has_api_key: Boolean(profile.has_api_key),
           api_key_mask: profile.api_key_mask || '',
           clear_api_key: false,
+          reasoning_dialect: profile.reasoning_dialect || 'openai_chat',
         });
       } else {
         setFormData({
@@ -115,6 +117,7 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
           has_api_key: false,
           api_key_mask: '',
           clear_api_key: false,
+          reasoning_dialect: 'openai_chat',
         });
       }
     }
@@ -141,81 +144,60 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
   ].sort((a, b) => a.label.localeCompare(b.label));
 
   const OPENAI_MODELS = [
-    { id: 'gpt-5.5', label: 'GPT-5.5' },
-    { id: 'gpt-5.5-thinking', label: 'GPT-5.5 Thinking' },
-    { id: 'gpt-5.5-instant', label: 'GPT-5.5 Instant' },
-    { id: 'gpt-5.4', label: 'GPT-5.4' },
-    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-    { id: 'o3', label: 'o3' },
-    { id: 'o3-pro', label: 'o3-pro' },
-    { id: 'o4-mini', label: 'o4-mini' },
-    { id: 'gpt-4.1', label: 'GPT-4.1' },
-    { id: 'gpt-4o', label: 'GPT-4o' },
+    { id: 'gpt-5.6', label: 'GPT-5.6' },
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' },
   ];
 
   const ANTHROPIC_MODELS = [
+    { id: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+    { id: 'claude-mythos-5', label: 'Claude Mythos 5' },
+    { id: 'claude-fable-5', label: 'Claude Fable 5' },
     { id: 'claude-opus-4-8', label: 'Claude Opus 4.8' },
-    { id: 'claude-mythos-preview', label: 'Claude Mythos Preview' },
-    { id: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-    { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-    { id: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5' },
     { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
   ];
 
   const DEEPSEEK_MODELS = [
-    { id: 'deepseek-chat', label: 'DeepSeek-V4 (chat)' },
-    { id: 'deepseek-reasoner', label: 'DeepSeek-R1 (reasoner)' },
-    { id: 'deepseek-v3.2', label: 'DeepSeek-V3.2' },
-    { id: 'deepseek-v3.1', label: 'DeepSeek-V3.1' },
+    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' },
+    { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   ];
 
   const GEMINI_MODELS = [
-    { id: 'gemini-3.5-pro', label: 'Gemini 3.5 Pro' },
     { id: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
     { id: 'gemini-3.1-pro', label: 'Gemini 3.1 Pro' },
-    { id: 'gemini-3-pro', label: 'Gemini 3 Pro' },
+    { id: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite' },
     { id: 'gemini-3-flash', label: 'Gemini 3 Flash' },
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-    { id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
   ];
 
   const GROK_MODELS = [
-    { id: 'grok-4.3', label: 'Grok 4.3' },
-    { id: 'grok-4.2', label: 'Grok 4.2' },
-    { id: 'grok-4-fast', label: 'Grok 4 Fast' },
-    { id: 'grok-4', label: 'Grok 4' },
-    { id: 'grok-3', label: 'Grok 3' },
-    { id: 'grok-3-mini', label: 'Grok 3 Mini' },
+    { id: 'grok-4.5', label: 'Grok 4.5' },
+    { id: 'grok-4.20-reasoning-latest', label: 'Grok 4.20 Reasoning' },
+    { id: 'grok-4.20-non-reasoning-latest', label: 'Grok 4.20 Non-reasoning' },
   ];
 
   const KIMI_MODELS = [
+    { id: 'kimi-k2.6', label: 'Kimi K2.6' },
     { id: 'kimi-k2.5', label: 'Kimi K2.5' },
-    { id: 'kimi-k2-turbo-preview', label: 'Kimi K2 Turbo' },
-    { id: 'kimi-k2-thinking', label: 'Kimi K2 Thinking' },
+    { id: 'kimi-latest', label: 'Kimi Latest' },
   ];
 
   const GLM_MODELS = [
     { id: 'glm-5.2', label: 'GLM-5.2' },
-    { id: 'glm-5.1', label: 'GLM-5.1' },
+    { id: 'glm-5-turbo', label: 'GLM-5 Turbo' },
     { id: 'glm-5', label: 'GLM-5' },
     { id: 'glm-4.7-flash', label: 'GLM-4.7 Flash' },
-    { id: 'glm-4.7', label: 'GLM-4.7' },
   ];
 
   const QWEN_MODELS = [
     { id: 'qwen3.7-max', label: 'Qwen 3.7 Max' },
     { id: 'qwen3.7-plus', label: 'Qwen 3.7 Plus' },
-    { id: 'qwen3.6-plus', label: 'Qwen 3.6 Plus' },
+    { id: 'qwen3.6-flash', label: 'Qwen 3.6 Flash' },
     { id: 'qwen3.5-plus', label: 'Qwen 3.5 Plus' },
-    { id: 'qwen3-max-thinking', label: 'Qwen 3 Max Thinking' },
-    { id: 'qwen-plus', label: 'Qwen Plus' },
   ];
 
   const WENXIN_MODELS = [
     { id: 'ernie-5.0', label: 'ERNIE 5.0' },
-    { id: 'ernie-x1-turbo-32k', label: 'ERNIE X1 Turbo 32K' },
-    { id: 'ernie-4.5-turbo-32k', label: 'ERNIE 4.5 Turbo 32K' },
-    { id: 'ernie-4.5-8k', label: 'ERNIE 4.5 8K' },
   ];
 
   const AISTUDIO_MODELS = [
@@ -413,16 +395,16 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                 onChange={(e) => {
                   const newProvider = e.target.value;
                   let defaultModel = '';
-                  if (newProvider === 'openai') defaultModel = 'gpt-5.4-mini';
-                  if (newProvider === 'anthropic') defaultModel = 'claude-sonnet-4-6';
-                  if (newProvider === 'deepseek') defaultModel = 'deepseek-chat';
+                  if (newProvider === 'openai') defaultModel = 'gpt-5.6-terra';
+                  if (newProvider === 'anthropic') defaultModel = 'claude-sonnet-5';
+                  if (newProvider === 'deepseek') defaultModel = 'deepseek-v4-flash';
                   if (newProvider === 'gemini') defaultModel = 'gemini-3.5-flash';
-                  if (newProvider === 'grok') defaultModel = 'grok-4';
-                  if (newProvider === 'kimi') defaultModel = 'kimi-k2.5';
-                  if (newProvider === 'glm') defaultModel = 'glm-5';
-                  if (newProvider === 'qwen') defaultModel = 'qwen3.5-plus';
-                  if (newProvider === 'wenxin') defaultModel = 'ernie-4.5-turbo-32k';
-                  if (newProvider === 'aistudio') defaultModel = 'ernie-5.0-thinking-preview';
+                  if (newProvider === 'grok') defaultModel = 'grok-4.5';
+                  if (newProvider === 'kimi') defaultModel = 'kimi-k2.6';
+                  if (newProvider === 'glm') defaultModel = 'glm-5.2';
+                  if (newProvider === 'qwen') defaultModel = 'qwen3.7-plus';
+                  if (newProvider === 'wenxin') defaultModel = 'ernie-5.0';
+                  if (newProvider === 'aistudio') defaultModel = 'ernie-5.0';
                   const defaultBaseUrl = getDefaultBaseUrl(newProvider);
 
                   setFormData({
@@ -628,6 +610,29 @@ export default function LLMProfileModal({ open, profile, onClose, onSave, onDele
                 <div className="text-[11px] leading-snug text-[var(--vscode-fg-subtle)]">{fetchWarning}</div>
               ) : null}
             </motion.div>
+
+            {formData.provider === 'custom' ? (
+              <div className="space-y-2">
+                <label className="text-xs font-semibold text-[var(--vscode-fg-subtle)] uppercase">
+                  思考参数兼容格式
+                </label>
+                <select
+                  value={formData.reasoning_dialect || 'openai_chat'}
+                  onChange={(event) => setFormData({ ...formData, reasoning_dialect: event.target.value })}
+                  className="h-10 w-full rounded-[8px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] px-3 text-sm"
+                >
+                  <option value="openai_chat">OpenAI Chat · reasoning_effort</option>
+                  <option value="openai_responses">OpenAI Responses · reasoning.effort</option>
+                  <option value="deepseek">DeepSeek · thinking + reasoning_effort</option>
+                  <option value="qwen">Qwen · enable_thinking</option>
+                  <option value="kimi">Kimi · thinking.type</option>
+                  <option value="glm">GLM · thinking.type</option>
+                </select>
+                <p className="text-xs text-[var(--vscode-fg-subtle)]">
+                  未知 OpenAI 兼容服务优先选择 OpenAI Chat；自动档位不会发送额外参数。
+                </p>
+              </div>
+            ) : null}
 
             <motion.div
               initial={{ opacity: 0 }}

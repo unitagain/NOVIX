@@ -4,8 +4,9 @@
 import json
 import asyncio
 
-from app.context_engine.trace_collector import TraceEventType, trace_collector
+from app.context_engine.trace_collector import TraceCollector, TraceEventType, trace_collector
 from app.eval.trace_replay import replay_trace_file, replay_trace_payload, summarize_trace
+from app.llm_gateway.telemetry import GatewayTelemetryPort
 
 
 def _payload():
@@ -86,3 +87,24 @@ def test_trace_collector_summary_prefers_gateway_usage_without_double_counting()
     assert summary["llm_responses"] == 1
     assert summary["llm_tokens"] == 120
     assert summary["tokens"] == 120
+
+
+def test_gateway_telemetry_records_an_immutable_json_snapshot(monkeypatch):
+    collector = TraceCollector()
+    monkeypatch.setattr("app.llm_gateway.telemetry.trace_collector", collector)
+    telemetry = GatewayTelemetryPort()
+
+    record = asyncio.run(
+        telemetry.record_request_plan(
+            messages=[{"role": "user", "content": "修改正文"}],
+            provider="fake",
+            temperature=0.2,
+            max_tokens=100,
+            tools=[],
+        )
+    )
+    record["_deadline"] = object()
+
+    event = collector.get_recent_events(1)[0]
+    assert "_deadline" not in event["data"]
+    json.dumps(event, ensure_ascii=False)

@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from app.agents.agentic import run_agentic_chat
-from app.agents.fallback_policy import build_fallback_context
 from app.agents.runtime_result import AgentRunStatus
 from app.agents.writing_actions import WritingActionToolset
 from app.context_engine.select_engine import ContextSelectEngine
@@ -22,7 +21,6 @@ from app.context_engine.tool_artifact import ToolArtifactStore, ToolExecutionSta
 from app.eval.retrieval_eval import evaluate_retrieval_recall
 from app.llm_gateway.capabilities import CapabilityNegotiator
 from app.llm_gateway.providers.base import BaseLLMProvider
-from app.orchestrator.architecture import route_contract
 from app.schemas.canon import Fact
 from app.storage.creative_memory import CreativeMemoryStorage
 from app.utils.permissions import decide_permission
@@ -122,17 +120,6 @@ SCENARIO_MANIFESTS: Tuple[ScenarioManifest, ...] = (
         edit_target="none",
         allowed_terminal_states=("incomplete",),
         permission_boundary="tool_policy",
-        fallback_allowed=True,
-    ),
-    ScenarioManifest(
-        id="fallback-classification",
-        layer="deterministic",
-        capability="fallback_contract",
-        required_sources=("fallback.context",),
-        acceptable_sources=("context.supply.report", "tool.artifact.ref"),
-        edit_target="middle",
-        allowed_terminal_states=("incomplete",),
-        permission_boundary="write_requires_approval",
         fallback_allowed=True,
     ),
     ScenarioManifest(
@@ -452,29 +439,6 @@ async def _iteration_limit(manifest: ScenarioManifest) -> Dict[str, Any]:
     )
 
 
-async def _fallback_classification(manifest: ScenarioManifest) -> Dict[str, Any]:
-    context = build_fallback_context(
-        reason="no_tool_calls",
-        agent_run={"iterations": 1, "tool_results": [], "degradations": []},
-        context_supply={"used": ["draft"]},
-    )
-    contract = route_contract("edit", fallback=True, auto_execute_plan=False)
-    passed = context.get("category") == "no_tool_calls" and contract.get("path") == "fallback_workflow"
-    return _result(
-        manifest,
-        passed=passed,
-        evidence_status="partial",
-        diagnostics=_diagnostics(
-            manifest,
-            observed_sources=("fallback.context", "context.supply.report"),
-            terminal_state="incomplete",
-            fallback_category=str(context.get("category") or "unknown"),
-            permission="ask",
-        ),
-        failure="fallback reason or route classification regressed",
-    )
-
-
 async def _provider_degradation(manifest: ScenarioManifest) -> Dict[str, Any]:
     provider = _CapabilityProvider(api_key="synthetic", model="synthetic")
     negotiated = CapabilityNegotiator().negotiate(provider, {"response_format": {"type": "json_object"}})
@@ -528,7 +492,6 @@ async def evaluate_representative_scenarios() -> List[Dict[str, Any]]:
         await _edit_target(manifests["edit-tail"], "尾部", "新尾部"),
         await _tool_failure(manifests["tool-failure-recovery"]),
         await _iteration_limit(manifests["iteration-limit"]),
-        await _fallback_classification(manifests["fallback-classification"]),
         await _provider_degradation(manifests["provider-capability-degradation"]),
         await _permission_boundary(manifests["permission-boundary"]),
     ]

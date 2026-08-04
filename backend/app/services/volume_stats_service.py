@@ -22,9 +22,9 @@ class VolumeStatsService:
         total_words = 0
         for chapter in volume_chapters:
             try:
-                draft = await self.draft_storage.get_latest_draft(project_id, chapter)
-                if draft:
-                    total_words += draft.word_count
+                working_text, working_path = await self.draft_storage.get_working_text(project_id, chapter)
+                if working_path is not None:
+                    total_words += len(working_text)
             except Exception as exc:
                 record_degradation("volume_draft_stats", exc)
         return VolumeStats(

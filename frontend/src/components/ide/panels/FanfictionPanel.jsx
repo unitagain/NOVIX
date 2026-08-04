@@ -10,8 +10,8 @@
  *   Fanfiction panel for guiding users through wiki page extraction and card generation.
  */
 
-import { Library } from 'lucide-react';
 import { useLocale } from '../../../i18n';
+import { SidebarPanelHeader } from '../SidebarPanelHeader';
 
 /**
  * 同人导入面板 - Wiki 导入工作流的指引面板
@@ -32,12 +32,7 @@ const FanfictionPanel = () => {
   return (
     <div className="anti-theme flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)]">
       {/* 面板头部 / Panel header */}
-      <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
-        <h2 className="text-sm font-bold flex items-center gap-2 text-[var(--vscode-fg)]">
-          <Library size={16} className="text-[var(--vscode-fg-subtle)]" />
-          <span>{t('activityBar.fanfiction')}</span>
-        </h2>
-      </div>
+      <SidebarPanelHeader title={t('activityBar.fanfiction')} />
       {/* 指引说明 / Usage guide */}
       <div className="flex-1 p-4 text-xs text-[var(--vscode-fg-subtle)] leading-relaxed">
         {t('panels.fanfiction.hint')}

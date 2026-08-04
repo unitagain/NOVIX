@@ -39,15 +39,6 @@ async def list_chapter_summaries(project_id: str, volume_id: Optional[str] = Non
     return await draft_storage.list_chapter_summaries(project_id, volume_id=volume_id)
 
 
-@router.get("/{chapter}/scene-brief")
-async def get_scene_brief(project_id: str, chapter: str):
-    """Get scene brief / 获取场景简报"""
-    brief = await draft_storage.get_scene_brief(project_id, chapter)
-    if not brief:
-        raise HTTPException(status_code=404, detail="Scene brief not found")
-    return brief
-
-
 @router.get("/{chapter}/versions")
 async def list_draft_versions(project_id: str, chapter: str) -> List[str]:
     """List all draft versions for a chapter / 列出章节草稿版本"""

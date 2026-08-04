@@ -27,28 +27,44 @@
  * @param {string} [props.mode='assistant'] - 面板模式 / Panel mode (assistant|config)
  * @returns {JSX.Element} 智能体面板 / Agents panel element
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import useSWR, { mutate } from 'swr';
-import { Bot, Search, Edit3, Plus } from 'lucide-react';
+import { Bot, Edit3, Plus, History, Check, Trash2 } from 'lucide-react';
 import { AnimatePresence } from 'framer-motion';
 import { configAPI } from '../../../api';
 import { cn, Button } from '../../ui/core';
 import LLMProfileModal from '../../../components/LLMProfileModal';
 import logger from '../../../utils/logger';
 import { useLocale } from '../../../i18n';
+import { SidebarPanelHeader } from '../SidebarPanelHeader';
 
 // SWR 数据获取器 / SWR data fetcher
 const fetcher = (fn) => fn().then((res) => res.data);
 
-const AgentsPanel = ({ children, mode = 'assistant' }) => {
+const AgentsPanel = ({
+  children,
+  mode = 'assistant',
+  conversations = [],
+  activeConversationId = '',
+  onNewConversation = () => {},
+  onSelectConversation = () => {},
+  onDeleteConversation = () => {},
+}) => {
   // mode: 'assistant'（右侧 AI 面板）| 'config'（左侧：仅配置）
   // mode: 'assistant' (right AI panel) | 'config' (left: config only)
 
   const { t } = useLocale();
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historyRef = useRef(null);
+  useEffect(() => {
+    if (!historyOpen) return undefined;
+    const close = (event) => { if (!historyRef.current?.contains(event.target)) setHistoryOpen(false); };
+    document.addEventListener('pointerdown', close);
+    return () => document.removeEventListener('pointerdown', close);
+  }, [historyOpen]);
 
   const BINDING_ROLES = [
-    { id: 'archivist', label: t('panels.agents.roleArchivist'), desc: t('panels.agents.roleArchivistDesc') },
-    { id: 'writing', label: t('panels.agents.roleWriting'), desc: t('panels.agents.roleWritingDesc') },
+    { id: 'writer', label: t('panels.agents.roleWriting'), desc: t('panels.agents.roleWritingDesc') },
   ];
 
   // 数据获取
@@ -117,7 +133,8 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
   if (mode === 'config') {
     return (
       <div className="anti-theme flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)] overflow-hidden">
-        <div className="p-4 space-y-6 overflow-y-auto h-full scrollbar-hide">
+        <SidebarPanelHeader title={t('activityBar.agents')} />
+        <div className="px-3 pb-4 pt-1 space-y-5 overflow-y-auto h-full scrollbar-hide">
           {isLoading ? (
             [1, 2, 3, 4].map((i) => (
               <div key={i} className="h-24 bg-[var(--vscode-list-hover)] animate-pulse rounded-[6px]" />
@@ -126,23 +143,12 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
             <>
               {/* 角色模型绑定 */}
               <div className="space-y-3">
-                <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider mb-2">
+                <div className="ui-section-title mb-2 text-[var(--vscode-fg-subtle)]">
                   {t('panels.agents.roleBinding')}
                 </div>
                 {BINDING_ROLES.map((role) => {
-                  const assignedProfileId =
-                    role.id === 'writing'
-                      ? assignments.writer && assignments.writer === assignments.editor
-                        ? assignments.writer
-                        : assignments.writer || assignments.editor || ''
-                      : assignments[role.id];
-                  const writingMismatch =
-                    role.id === 'writing'
-                      ? Boolean(assignments.writer && assignments.editor && assignments.writer !== assignments.editor)
-                      : false;
-
-                  // 动态图标选择
-                  const Icon = role.id === 'archivist' ? Search : Edit3;
+                  const assignedProfileId = assignments.writer || '';
+                  const Icon = Edit3;
 
                   return (
                     <div
@@ -154,7 +160,7 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
                           <div
                             className={cn(
                               'p-2 rounded-[6px] text-[var(--vscode-fg)] bg-[var(--vscode-list-hover)]',
-                              role.id === 'writing' && 'font-semibold',
+                              'font-semibold',
                             )}
                           >
                             <Icon size={16} />
@@ -172,11 +178,7 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
                             value={assignedProfileId || ''}
                             onChange={(e) => {
                               const next = e.target.value;
-                              if (role.id === 'writing') {
-                                handleAssignmentChange(['writer', 'editor'], next);
-                                return;
-                              }
-                              handleAssignmentChange(role.id, next);
+                              handleAssignmentChange('writer', next);
                             }}
                             className="w-full text-xs py-2 pl-2 pr-6 bg-[var(--vscode-input-bg)] border border-[var(--vscode-input-border)] rounded-[6px] focus:border-[var(--vscode-focus-border)] focus:ring-2 focus:ring-[var(--vscode-focus-border)] outline-none transition-none appearance-none cursor-pointer text-[var(--vscode-fg)] font-mono truncate"
                           >
@@ -193,11 +195,6 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
                             <Bot size={12} />
                           </div>
                         </div>
-                        {writingMismatch && (
-                          <div className="mt-2 text-[10px] text-[var(--vscode-fg-subtle)]">
-                            {t('panels.agents.writingMismatch')}
-                          </div>
-                        )}
                       </div>
                     </div>
                   );
@@ -207,7 +204,7 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
               {/* 模型库 */}
               <div className="pt-4 border-t border-[var(--vscode-sidebar-border)]">
                 <div className="flex items-center justify-between mb-3">
-                  <div className="text-xs font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                  <div className="ui-section-title text-[var(--vscode-fg-subtle)]">
                     {t('panels.agents.modelLibrary')}
                   </div>
                   <Button
@@ -273,6 +270,49 @@ const AgentsPanel = ({ children, mode = 'assistant' }) => {
   // --- 渲染：助手模式（右侧栏）---
   return (
     <div className="anti-theme flex flex-col h-full bg-[var(--vscode-bg)] text-[var(--vscode-fg)]">
+      <div ref={historyRef} className="relative">
+      <SidebarPanelHeader
+        title="WenShape Agent"
+        actions={
+          <>
+          <button
+            type="button"
+            onClick={onNewConversation}
+            className="flex h-7 items-center gap-1 rounded-[6px] px-2 text-[10px] text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]"
+            title="新建对话"
+          >
+            <Plus size={12} /><span>新建对话</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((value) => !value)}
+            className="flex h-7 items-center gap-1 rounded-[6px] px-2 text-[10px] text-[var(--vscode-fg-subtle)] hover:bg-[var(--vscode-list-hover)] hover:text-[var(--vscode-fg)]"
+            title="历史对话"
+            aria-expanded={historyOpen}
+          >
+            <History size={12} /><span>历史对话</span>
+          </button>
+          </>
+        }
+      />
+        {historyOpen ? (
+          <div className="absolute right-3 top-9 z-50 w-64 rounded-[9px] border border-[var(--vscode-input-border)] bg-white p-1 shadow-[0_10px_30px_rgba(15,23,42,0.12)]">
+            <div className="px-2 py-1.5 text-[10px] font-medium text-[var(--vscode-fg-subtle)]">历史对话</div>
+            <div className="max-h-72 overflow-y-auto">
+              {conversations.length ? conversations.map((conversation) => (
+                <div
+                  key={conversation.id}
+                  className="flex w-full items-center gap-2 rounded-[6px] px-2 py-2 text-left text-xs hover:bg-[var(--vscode-list-hover)]"
+                >
+                  <button type="button" className="min-w-0 flex-1 truncate text-left" onClick={() => { onSelectConversation(conversation.id); setHistoryOpen(false); }}>{conversation.title || '未命名对话'}</button>
+                  {conversation.id === activeConversationId ? <Check size={12} /> : null}
+                  {conversation.id !== 'legacy' ? <button type="button" title="删除对话" onClick={() => onDeleteConversation(conversation)} className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-500"><Trash2 size={12} /></button> : null}
+                </div>
+              )) : <div className="px-2 py-5 text-center text-[10px] text-[var(--vscode-fg-subtle)]">暂无历史对话</div>}
+            </div>
+          </div>
+        ) : null}
+      </div>
       {/* 内容区 */}
       <div className="flex-1 overflow-hidden relative bg-[var(--vscode-bg)]">
         <div className="h-full flex flex-col overflow-hidden">{children}</div>

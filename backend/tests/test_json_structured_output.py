@@ -80,9 +80,9 @@ def test_call_llm_json_metric_keyed_by_config_agent():
     """指标按 config_agent 归类（editor 复用 base 时记到 editor 名下）。"""
     reset_json_metrics()
     agent, _ = _make_agent('{"x": 1}')
-    asyncio.run(agent.call_llm_json([{"role": "user", "content": "x"}], expected_type=dict, config_agent="editor"))
+    asyncio.run(agent.call_llm_json([{"role": "user", "content": "x"}], expected_type=dict, config_agent="writer"))
     snap = json_metrics_snapshot()
-    assert "editor" in snap and snap["editor"]["success"] == 1
+    assert "writer" in snap and snap["writer"]["success"] == 1
     assert "stub_agent" not in snap  # 未用默认名
 
 

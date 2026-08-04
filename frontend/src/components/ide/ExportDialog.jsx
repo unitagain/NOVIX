@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, FileText, FileType2, FileCode2, X } from 'lucide-react';
-import { draftsAPI, exportAPI } from '../../api';
+import { Download, FileText, FileType2, FileCode2, X, Upload, Users, Globe } from 'lucide-react';
+import { cardsAPI, draftsAPI, exportAPI } from '../../api';
 import { Button } from '../ui/core';
 import { useLocale } from '../../i18n';
 import { extractErrorDetail } from '../../utils/extractError';
@@ -37,14 +37,30 @@ function triggerBlobDownload(blob, filename) {
   window.URL.revokeObjectURL(objectUrl);
 }
 
+function downloadJson(data, filename) {
+  triggerBlobDownload(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), filename);
+}
+
 export default function ExportDialog({ open, onClose, projectId, currentChapter }) {
   const { t } = useLocale();
+  const [tab, setTab] = useState('manuscript');
   const [chapters, setChapters] = useState([]);
   const [selectedChapters, setSelectedChapters] = useState([]);
   const [format, setFormat] = useState('txt');
   const [includeTitles, setIncludeTitles] = useState(true);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+
+  // Tavern 卡片互操作状态
+  const [tavernCharacters, setTavernCharacters] = useState([]);
+  const [tavernCharacter, setTavernCharacter] = useState('');
+  const [tavernIncludeWorld, setTavernIncludeWorld] = useState(true);
+  const [tavernBusy, setTavernBusy] = useState(false);
+  const [tavernImportPlan, setTavernImportPlan] = useState(null);
+  const [tavernImportFile, setTavernImportFile] = useState(null);
+  const [tavernImportResult, setTavernImportResult] = useState(null);
+  const [tavernOverwrite, setTavernOverwrite] = useState(false);
+  const tavernFileInputRef = useRef(null);
 
   const chapterCount = chapters.length;
   const allSelected = chapterCount > 0 && selectedChapters.length === chapterCount;
@@ -105,6 +121,100 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
     return () => window.removeEventListener('keydown', handleEsc);
   }, [open, onClose]);
 
+  // 打开对话框时重置 Tavern 导入导出状态
+  useEffect(() => {
+    if (!open) return;
+    setTab('manuscript');
+    setTavernImportPlan(null);
+    setTavernImportFile(null);
+    setTavernImportResult(null);
+    setTavernOverwrite(false);
+  }, [open]);
+
+  // Tavern 页：加载角色卡列表供导出选择
+  useEffect(() => {
+    if (!open || !projectId || tab !== 'tavern') return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await cardsAPI.listCharactersIndex(projectId);
+        if (cancelled) return;
+        const names = (res.data || []).map((card) => card.name).filter(Boolean);
+        setTavernCharacters(names);
+        setTavernCharacter((prev) => (prev && names.includes(prev) ? prev : names[0] || ''));
+      } catch {
+        if (!cancelled) setTavernCharacters([]);
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectId, tab]);
+
+  const handleTavernExportCharacter = async () => {
+    if (!projectId || !tavernCharacter) return;
+    setTavernBusy(true);
+    try {
+      const res = await cardsAPI.exportTavernCharacter(projectId, tavernCharacter, tavernIncludeWorld);
+      downloadJson(res.data, `${tavernCharacter}.json`);
+    } catch (error) {
+      alert(t('exportDialog.tavernExportFailed', { message: extractErrorDetail(error) }));
+    } finally {
+      setTavernBusy(false);
+    }
+  };
+
+  const handleTavernExportLorebook = async () => {
+    if (!projectId) return;
+    setTavernBusy(true);
+    try {
+      const res = await cardsAPI.exportTavernLorebook(projectId);
+      downloadJson(res.data, `${projectId}_lorebook.json`);
+    } catch (error) {
+      alert(t('exportDialog.tavernExportFailed', { message: extractErrorDetail(error) }));
+    } finally {
+      setTavernBusy(false);
+    }
+  };
+
+  // 第一步：上传文件做 dry-run，返回预案（含丢弃字段清单）供用户确认
+  const handleTavernFileChosen = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !projectId) return;
+    setTavernBusy(true);
+    setTavernImportPlan(null);
+    setTavernImportResult(null);
+    try {
+      const res = await cardsAPI.importTavern(projectId, file, { commit: false });
+      setTavernImportFile(file);
+      setTavernImportPlan(res.data?.plan || null);
+    } catch (error) {
+      alert(t('exportDialog.tavernImportFailed', { message: extractErrorDetail(error) }));
+    } finally {
+      setTavernBusy(false);
+    }
+  };
+
+  // 第二步：用户确认预案后重放同一文件落盘（import_tavern_card = ask 的前端实现）
+  const handleTavernConfirmImport = async () => {
+    if (!projectId || !tavernImportFile) return;
+    setTavernBusy(true);
+    try {
+      const res = await cardsAPI.importTavern(projectId, tavernImportFile, {
+        commit: true,
+        overwrite: tavernOverwrite,
+      });
+      setTavernImportResult(res.data);
+      setTavernImportPlan(null);
+    } catch (error) {
+      alert(t('exportDialog.tavernImportFailed', { message: extractErrorDetail(error) }));
+    } finally {
+      setTavernBusy(false);
+    }
+  };
+
   const toggleChapter = (chapterId) => {
     setSelectedChapters((prev) =>
       prev.includes(chapterId) ? prev.filter((item) => item !== chapterId) : [...prev, chapterId],
@@ -155,6 +265,199 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
             </button>
           </div>
 
+          <div className="px-4 pt-3">
+            <div className="inline-flex rounded-[8px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] p-0.5">
+              {[
+                { id: 'manuscript', label: t('exportDialog.tabManuscript') },
+                { id: 'tavern', label: t('exportDialog.tabTavern') },
+              ].map((item) => (
+                <button
+                  key={item.id}
+                  onClick={() => setTab(item.id)}
+                  className={[
+                    'px-3 py-1.5 rounded-[6px] text-sm transition-colors',
+                    tab === item.id
+                      ? 'bg-[var(--vscode-list-active)] text-[var(--vscode-list-active-fg)]'
+                      : 'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
+                  ].join(' ')}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {tab === 'tavern' ? (
+            <div className="p-4 space-y-5 max-h-[60vh] overflow-y-auto">
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wide text-[var(--vscode-fg-subtle)] mb-3">
+                  {t('exportDialog.tavernExportTitle')}
+                </div>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Users size={14} className="text-[var(--vscode-fg-subtle)] shrink-0" />
+                    <select
+                      value={tavernCharacter}
+                      onChange={(e) => setTavernCharacter(e.target.value)}
+                      disabled={tavernCharacters.length === 0}
+                      className="flex-1 min-w-0 rounded-[6px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] px-2 py-1.5 text-sm"
+                    >
+                      {tavernCharacters.length === 0 ? (
+                        <option value="">{t('exportDialog.tavernNoCharacters')}</option>
+                      ) : (
+                        tavernCharacters.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleTavernExportCharacter}
+                      disabled={tavernBusy || !tavernCharacter}
+                      className="gap-1.5 shrink-0"
+                    >
+                      <Download size={13} />
+                      {t('exportDialog.tavernExportCharacter')}
+                    </Button>
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-[var(--vscode-fg-subtle)]">
+                    <input
+                      type="checkbox"
+                      checked={tavernIncludeWorld}
+                      onChange={(e) => setTavernIncludeWorld(e.target.checked)}
+                    />
+                    <span>{t('exportDialog.tavernIncludeWorld')}</span>
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <Globe size={14} className="text-[var(--vscode-fg-subtle)] shrink-0" />
+                    <span className="flex-1 text-sm">{t('exportDialog.tavernLorebookLabel')}</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleTavernExportLorebook}
+                      disabled={tavernBusy}
+                      className="gap-1.5 shrink-0"
+                    >
+                      <Download size={13} />
+                      {t('exportDialog.tavernExportLorebook')}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-[var(--vscode-input-border)] pt-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-[var(--vscode-fg-subtle)] mb-1">
+                  {t('exportDialog.tavernImportTitle')}
+                </div>
+                <p className="text-xs text-[var(--vscode-fg-subtle)] mb-3">{t('exportDialog.tavernImportHint')}</p>
+                <input
+                  ref={tavernFileInputRef}
+                  type="file"
+                  accept=".json,.png"
+                  className="hidden"
+                  onChange={handleTavernFileChosen}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => tavernFileInputRef.current?.click()}
+                  disabled={tavernBusy}
+                  className="gap-1.5"
+                >
+                  <Upload size={13} />
+                  {tavernBusy ? t('exportDialog.tavernImporting') : t('exportDialog.tavernChooseFile')}
+                </Button>
+
+                {tavernImportPlan && (
+                  <div className="mt-3 rounded-[8px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] p-3 space-y-2">
+                    <div className="text-sm font-medium">
+                      {t('exportDialog.tavernPreviewTitle')}（{tavernImportPlan.source_format}）
+                    </div>
+                    <div className="text-xs text-[var(--vscode-fg-subtle)]">
+                      {t('exportDialog.tavernPreviewSummary', {
+                        characters: tavernImportPlan.characters.length,
+                        world: tavernImportPlan.world_cards.length,
+                      })}
+                    </div>
+                    {(tavernImportPlan.characters.length > 0 || tavernImportPlan.world_cards.length > 0) && (
+                      <div className="text-xs max-h-24 overflow-y-auto">
+                        {[...tavernImportPlan.characters, ...tavernImportPlan.world_cards].map((card) => (
+                          <div key={card.name} className="truncate py-0.5">
+                            {card.name}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {tavernImportPlan.injection_detected && (
+                      <div className="text-xs text-amber-500">{t('exportDialog.tavernInjectionWarning')}</div>
+                    )}
+                    {tavernImportPlan.dropped.length > 0 && (
+                      <div>
+                        <div className="text-xs font-medium mt-1">{t('exportDialog.tavernDroppedTitle')}</div>
+                        <div className="text-xs text-[var(--vscode-fg-subtle)] max-h-20 overflow-y-auto">
+                          {tavernImportPlan.dropped.map((item) => (
+                            <div key={item.field} className="py-0.5">
+                              {item.field}
+                              {item.count > 1 ? ` ×${item.count}` : ''}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <label className="flex items-center gap-2 text-xs text-[var(--vscode-fg-subtle)]">
+                      <input
+                        type="checkbox"
+                        checked={tavernOverwrite}
+                        onChange={(e) => setTavernOverwrite(e.target.checked)}
+                      />
+                      <span>{t('exportDialog.tavernOverwrite')}</span>
+                    </label>
+                    <div className="flex items-center gap-2 pt-1">
+                      <Button size="sm" onClick={handleTavernConfirmImport} disabled={tavernBusy} className="gap-1.5">
+                        <Upload size={13} />
+                        {t('exportDialog.tavernConfirmImport')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setTavernImportPlan(null);
+                          setTavernImportFile(null);
+                        }}
+                        disabled={tavernBusy}
+                      >
+                        {t('common.cancel')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {tavernImportResult && (
+                  <div className="mt-3 rounded-[8px] border border-[var(--vscode-input-border)] bg-[var(--vscode-input-bg)] p-3 text-xs space-y-1">
+                    <div className="text-sm font-medium text-[var(--vscode-fg)]">
+                      {t('exportDialog.tavernImportDone')}
+                    </div>
+                    <div>
+                      {t('exportDialog.tavernImportCreated', {
+                        characters: tavernImportResult.created_characters.length,
+                        world: tavernImportResult.created_world_cards.length,
+                      })}
+                    </div>
+                    {tavernImportResult.skipped_existing.length > 0 && (
+                      <div className="text-[var(--vscode-fg-subtle)]">
+                        {t('exportDialog.tavernImportSkipped', {
+                          names: tavernImportResult.skipped_existing.join('、'),
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
           <div className="grid grid-cols-1 md:grid-cols-[1.15fr_0.85fr] gap-0">
             <div className="p-4 border-b md:border-b-0 md:border-r border-[var(--vscode-input-border)]">
               <div className="flex items-center justify-between mb-3">
@@ -241,7 +544,9 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
               </div>
             </div>
           </div>
+          )}
 
+          {tab === 'manuscript' && (
           <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-[var(--vscode-input-border)] bg-[var(--vscode-bg)]">
             <div className="text-xs text-[var(--vscode-fg-subtle)]">{t('exportDialog.footerHint')}</div>
             <div className="flex items-center gap-2">
@@ -259,6 +564,7 @@ export default function ExportDialog({ open, onClose, projectId, currentChapter 
               </Button>
             </div>
           </div>
+          )}
         </div>
       </div>
     </>,

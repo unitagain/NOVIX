@@ -91,9 +91,12 @@ def writer_tool_schemas() -> List[Dict[str, Any]]:
             "function": {
                 "name": "query_relations",
                 "description": (
-                    "沿关系图查询某个实体的关系网，或两个实体之间的全部关系/恩怨（含演变与章节出处）。"
-                    "用于回答『张三与李四的全部恩怨』『某势力都和谁有关联』这类纯向量/词法答不准的"
-                    "『连点成线』问题。本地遍历、确定性、不调用模型。"
+                    "沿关系图查询某个实体的关系网，或两个实体之间的全部关系/恩怨。"
+                    "返回两层内容：作者设定的人物关系与双向称呼（如『A 是 B 的姐姐，B 称 A「阿姐」；A 称 B「小河」』），"
+                    "以及正文中已发生的关系事实（含演变与章节出处 @VxCyyy）。"
+                    "写对白前查一次即可确认该怎么称呼对方；也用于回答『张三与李四的全部恩怨』"
+                    "『某势力都和谁有关联』这类纯向量/词法答不准的『连点成线』问题。"
+                    "本地遍历、确定性、不调用模型。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -135,6 +138,53 @@ def writer_tool_schemas() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_outline",
+                "description": (
+                    "读取全文规划大纲（作者对整部作品的结构/走向/伏笔/卷章安排）。"
+                    "动笔前查阅可确保本章符合整体规划、不偏离主线、按计划铺垫或回收伏笔。"
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_outline",
+                "description": (
+                    "修改全文规划大纲。仅在作者要求调整规划（新增卷章安排、改走向、补伏笔计划、"
+                    "把已确定的设定写进大纲等）时调用；不要因为写完本章就顺手改写作者的规划。"
+                    "写入立即生效并绑定 revision，与常规正文编辑同一套语义："
+                    "mode=edit 精确替换唯一出现的一处；mode=append 追加到末尾；mode=replace 整体重写。"
+                    "改动前建议先 read_outline 取得原文。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["edit", "append", "replace"],
+                            "description": "edit=精确替换一处（默认）；append=末尾追加；replace=整体重写",
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "edit 模式必填：要被替换的大纲原文片段（须与大纲逐字一致且唯一出现）",
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "edit 模式必填：替换后的文本（删除该片段则传空字符串）",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "append/replace 模式必填：要追加或整体写入的大纲文本（Markdown）",
+                        },
+                    },
+                    "required": ["mode"],
+                },
+            },
+        },
     ]
 
 
@@ -142,21 +192,32 @@ class WriterToolset:
     """把 storage_adapter + select_engine 封装为 Writer 可调用的检索工具。"""
 
     def __init__(
-        self, project_id, storage_adapter, select_engine, *, current_chapter: str = "", total_chapters: int = 0
+        self,
+        project_id,
+        storage_adapter,
+        select_engine,
+        *,
+        current_chapter: str = "",
+        total_chapters: int = 0,
+        outline_enabled: bool = True,
     ):
         self.project_id = project_id
         self.adapter = storage_adapter
         self.select_engine = select_engine
         self.current_chapter = current_chapter
         self.total_chapters = total_chapters
+        self.outline_enabled = bool(outline_enabled)
 
-    @staticmethod
-    def schemas() -> List[Dict[str, Any]]:
-        return writer_tool_schemas()
+    def schemas(self) -> List[Dict[str, Any]]:
+        schemas = writer_tool_schemas()
+        if not self.outline_enabled:
+            # 禁用大纲时 read_outline/edit_outline 都不进入工具面，AI 无从查阅或改写。
+            schemas = [s for s in schemas if s.get("function", {}).get("name") not in {"read_outline", "edit_outline"}]
+        return schemas
 
     @staticmethod
     def is_result_recoverable(name: str) -> bool:
-        return name in {"lookup_card", "query_canon", "query_relations", "read_chapter", "search_prose"}
+        return name in {"lookup_card", "query_canon", "query_relations", "read_chapter", "search_prose", "read_outline"}
 
     async def execute(self, name: str, arguments: Any) -> str:
         """根据工具名分发执行；任何异常都转为可读的工具结果文本，避免中断 agentic 循环。"""
@@ -180,6 +241,10 @@ class WriterToolset:
                 result = await self._search_prose(
                     str(args.get("query") or "").strip(), self._as_int(args.get("top_k"), 5)
                 )
+            elif name == "read_outline":
+                result = await self._read_outline()
+            elif name == "edit_outline":
+                result = await self._edit_outline(args)
         except Exception as exc:
             logger.warning("Tool %s failed: %s", name, exc)
             result = tool_error_text(name, exc)
@@ -215,6 +280,7 @@ class WriterToolset:
             "query_relations": "relations",
             "read_chapter": "prose",
             "search_prose": "prose",
+            "read_outline": "outline",
         }
         identity = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
         identity_sha = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
@@ -246,6 +312,10 @@ class WriterToolset:
     async def _lookup_card(self, name: str) -> str:
         if not name:
             return "[lookup_card 需要 name 参数]"
+        # 章节标题不是设定卡名称；阻止模型把“第一章/章节设定”等工作对象误路由到卡片检索。
+        normalized = name.replace(" ", "").replace("　", "")
+        if ("章节" in normalized or normalized.startswith("第") and "章" in normalized) and not await self.adapter.get_character_card(self.project_id, name):
+            return f"『{name}』看起来是章节或写作任务，不是设定卡名称；请改用 read_chapter 或 query_canon 查询。"
         card = await self.adapter.get_character_card(self.project_id, name)
         kind = "角色"
         if not card:
@@ -286,24 +356,119 @@ class WriterToolset:
         if get_path is None:
             return "（当前存储不支持关系图查询。）"
         try:
-            from app.context_engine.relation_graph import RelationGraph
+            from app.context_engine.relation_graph import Relation, RelationGraph
 
             path = get_path(self.project_id)
             # 关系图为小文件、纯本地读取；放线程池避免阻塞事件循环。
             graph = await asyncio.to_thread(RelationGraph.load, path)
+            relations = list(graph.relations)
             if self.current_chapter:
-                graph = RelationGraph(
-                    [
-                        relation
-                        for relation in graph.relations
-                        if not relation.chapter
-                        or not ChapterIDValidator.is_after(relation.chapter, self.current_chapter)
-                    ]
-                )
+                relations = [
+                    relation
+                    for relation in relations
+                    if not relation.chapter or not ChapterIDValidator.is_after(relation.chapter, self.current_chapter)
+                ]
+            # 合并卡片层设定边（U4）：作者手绘的人物关系与称呼没有章节出处，
+            # 是「作者设定」而非「已发生事实」，因此不参与上面的未来章节过滤。
+            relations.extend(await self._card_relation_edges(Relation))
+            graph = RelationGraph(relations)
         except Exception as exc:
             logger.warning("query_relations load failed: %s", exc)
             return f"[relation_graph_error code={safe_error_code(exc)}]"
         return _truncate(graph.describe(entity, other or None))
+
+    async def _card_relation_edges(self, relation_cls) -> List[Any]:
+        """读取卡片层设定关系边并转为 Relation；存储不支持时返回空列表。"""
+        get_edges = getattr(self.adapter, "get_card_relation_edges", None)
+        if get_edges is None:
+            return []
+        edges = await get_edges(self.project_id) or []
+        return [relation_cls.from_card_edge(edge) for edge in edges if isinstance(edge, dict)]
+
+    async def _read_outline(self) -> str:
+        if not self.outline_enabled:
+            return "大纲功能当前已禁用。"
+        outline = getattr(self.adapter, "outline", None)
+        if outline is None:
+            return "[read_outline 不可用]"
+        try:
+            data = await outline.get_outline(self.project_id)
+        except Exception as exc:
+            logger.warning("read_outline load failed: %s", exc)
+            return f"[outline_error code={safe_error_code(exc)}]"
+        content = str(data.get("content") or "").strip()
+        if not content:
+            return "大纲暂为空白。可在资源管理器顶部的「大纲」中规划全文结构、走向与伏笔。"
+        return _truncate(f"【全文规划大纲】\n{content}", 6000)
+
+    async def _edit_outline(self, args: Dict[str, Any]) -> str:
+        """修改大纲（作者规划资产）。写入即落盘，语义与正文编辑工具一致。
+
+        大纲仍然**不进入事实提取**：本工具只改写作者的规划文本，不产生 Canon/Summary 事实。
+        并发以 ``expected_revision`` 乐观控制：读到的 revision 与写入时不一致即冲突，
+        交回模型重读，绝不覆盖作者在本轮期间的手工改动。
+        """
+        from app.control_plane.store import RevisionConflict
+        from app.utils.permissions import PermissionLevel, decide_permission
+
+        if not self.outline_enabled:
+            return "大纲功能当前已禁用，无法修改。"
+        outline = getattr(self.adapter, "outline", None)
+        if outline is None:
+            return "[edit_outline 不可用]"
+        mode = str(args.get("mode") or "edit").strip().lower()
+        if mode not in {"edit", "append", "replace"}:
+            return f"[edit_outline 的 mode 无效：{mode}（可选 edit / append / replace）]"
+
+        data = await outline.get_outline(self.project_id)
+        current = str(data.get("content") or "")
+        revision = int(data.get("revision") or 0)
+
+        if mode == "edit":
+            old_text = str(args.get("old_text") or "")
+            new_text = str(args.get("new_text") or "")
+            if not old_text:
+                return "[edit_outline 的 edit 模式需要 old_text]"
+            occurrences = current.count(old_text)
+            if occurrences == 0:
+                return "未找到要替换的大纲片段：old_text 未在大纲中出现。请先 read_outline 逐字核对。"
+            if occurrences > 1:
+                return (
+                    f"old_text 在大纲中出现 {occurrences} 次、不唯一，无法安全定位。"
+                    "请提供更长、包含上下文的唯一片段后重试。"
+                )
+            updated = current.replace(old_text, new_text, 1)
+        elif mode == "append":
+            addition = str(args.get("content") or "").strip()
+            if not addition:
+                return "[edit_outline 的 append 模式需要非空 content]"
+            updated = f"{current.rstrip()}\n\n{addition}" if current.strip() else addition
+        else:
+            replacement = str(args.get("content") or "")
+            if not replacement.strip():
+                return "[edit_outline 的 replace 模式需要非空 content]"
+            updated = replacement
+
+        if updated == current:
+            return "大纲内容未发生变化，未写入。"
+
+        # 副作用在执行点消费权限决策：策略若被收紧为 ask/deny，这里直接拒绝而不是静默写入。
+        decision = decide_permission(
+            "edit_outline",
+            resource_scope={"project_id": self.project_id, "asset": "outline"},
+            payload={"mode": mode, "chars": len(updated)},
+        )
+        if decision.level is not PermissionLevel.ALLOW:
+            return f"[permission_{decision.level.value}] 大纲写入未获许可，本次未修改。"
+
+        try:
+            saved = await outline.save_outline(self.project_id, updated, expected_revision=revision)
+        except RevisionConflict:
+            return "[outline_revision_conflict] 大纲在本轮期间已被改动，请重新 read_outline 后再修改。"
+        return (
+            f"已更新大纲（mode={mode}，当前 {int(saved.get('word_count') or 0)} 字，"
+            f"revision={int(saved.get('revision') or 0)}）。"
+        )
 
     async def _read_chapter(self, chapter_id: str) -> str:
         if not chapter_id:

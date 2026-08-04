@@ -44,7 +44,7 @@ PROVIDER_ADAPTER_PROFILES: Dict[str, ProviderAdapterProfile] = {
         "non_stream_fallback",
         False,
         False,
-        False,
+        True,
         "https://generativelanguage.googleapis.com/v1beta/openai/",
     ),
     "qwen": ProviderAdapterProfile(
@@ -71,7 +71,7 @@ PROVIDER_ADAPTER_PROFILES: Dict[str, ProviderAdapterProfile] = {
         "openai_compatible_tool_stream",
         True,
         True,
-        False,
+        True,
         "https://open.bigmodel.cn/api/paas/v4",
     ),
     "grok": ProviderAdapterProfile(
@@ -80,7 +80,7 @@ PROVIDER_ADAPTER_PROFILES: Dict[str, ProviderAdapterProfile] = {
         "openai_compatible_tool_stream",
         True,
         True,
-        False,
+        True,
         "https://api.x.ai/v1",
     ),
     "wenxin": ProviderAdapterProfile(
@@ -89,7 +89,7 @@ PROVIDER_ADAPTER_PROFILES: Dict[str, ProviderAdapterProfile] = {
         "openai_compatible_tool_stream",
         True,
         True,
-        False,
+        True,
         "https://qianfan.baidubce.com/v2",
     ),
     "aistudio": ProviderAdapterProfile(
@@ -98,11 +98,11 @@ PROVIDER_ADAPTER_PROFILES: Dict[str, ProviderAdapterProfile] = {
         "openai_compatible_tool_stream",
         True,
         True,
-        False,
+        True,
         "https://aistudio.baidu.com/llm/lmapi/v3",
     ),
     "custom": ProviderAdapterProfile(
-        "custom", "CustomProvider", "openai_compatible_tool_stream", True, True, False
+        "custom", "CustomProvider", "openai_compatible_tool_stream", True, True, True
     ),
 }
 

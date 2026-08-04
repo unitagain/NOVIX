@@ -4,7 +4,8 @@
  */
 import { useMemo, useState } from 'react';
 import useSWR from 'swr';
-import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Loader2, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { SidebarPanelHeader } from './SidebarPanelHeader';
 import { useParams } from 'react-router-dom';
 import { bindingsAPI, canonAPI, draftsAPI, volumesAPI } from '../../api';
 import { Button, Card, Input, cn } from '../ui/core';
@@ -227,21 +228,10 @@ const FactsEncyclopedia = ({ projectId: overrideProjectId, onFactSelect }) => {
 
   return (
     <div className="anti-theme h-full flex flex-col overflow-hidden bg-[var(--vscode-bg)] text-[var(--vscode-fg)] text-[12px]">
-      <div className="px-3 pt-3 pb-2 border-b border-[var(--vscode-sidebar-border)] bg-[var(--vscode-sidebar-bg)]">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-[6px] bg-[var(--vscode-list-hover)] border border-[var(--vscode-sidebar-border)] flex items-center justify-center">
-              <Sparkles size={16} className="text-[var(--vscode-fg-subtle)]" />
-            </div>
-            <div className="leading-tight">
-              <div className="flex items-baseline gap-2">
-                <div className="text-sm font-bold text-[var(--vscode-fg)]">{t('facts.encyclopediaTitle')}</div>
-                <div className="text-[11px] text-[var(--vscode-fg-subtle)]">
-                  {stats.chapterCount} {t('facts.chapterUnit')} · {stats.factCount} {t('facts.factUnit')}
-                </div>
-              </div>
-            </div>
-          </div>
+      <SidebarPanelHeader
+        title={t('facts.encyclopediaTitle')}
+        meta={`${stats.chapterCount} ${t('facts.chapterUnit')} · ${stats.factCount} ${t('facts.factUnit')}`}
+        actions={
           <button
             onClick={() => setRefreshingSummary(true)}
             className="p-2 rounded-[6px] text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] transition-none"
@@ -249,8 +239,8 @@ const FactsEncyclopedia = ({ projectId: overrideProjectId, onFactSelect }) => {
           >
             <RefreshCw size={14} />
           </button>
-        </div>
-      </div>
+        }
+      />
 
       <div className="flex-1 overflow-hidden relative">
         <div className="h-full overflow-y-auto custom-scrollbar facts-scroll p-2 space-y-3">

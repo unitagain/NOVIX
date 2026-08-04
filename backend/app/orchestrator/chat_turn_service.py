@@ -7,7 +7,6 @@ import time
 from typing import Any, Dict
 
 from app.context_engine.turn_scope import bind_turn_scope, current_turn_scope, new_turn_scope
-from app.agents.fallback_policy import build_fallback_context
 from app.orchestrator.architecture import route_contract
 from app.orchestrator.turn_runtime import TurnState
 from app.orchestrator.runtime_contracts import ChatTurnOwnerPort, ChatTurnResult, WritingResult
@@ -31,8 +30,8 @@ class ChatTurnService:
         target_word_count: int = 3000,
         auto_execute_plan: bool = False,
         thinking: bool = False,
-        fallback_approval_action_id: str = "",
-        fallback_approval_token: str = "",
+        reasoning_level: str = "off",
+        selection_text: str = "",
     ) -> ChatTurnResult:
         started_at = time.monotonic()
         scope = new_turn_scope(project_id=project_id, chapter_id=chapter)
@@ -58,13 +57,13 @@ class ChatTurnService:
                     target_word_count=target_word_count,
                     auto_execute_plan=auto_execute_plan,
                     thinking=thinking,
-                    fallback_approval_action_id=fallback_approval_action_id,
-                    fallback_approval_token=fallback_approval_token,
+                    reasoning_level=reasoning_level,
+                    selection_text=selection_text,
                 )
                 terminal_state = str(result.get("terminal_state") or "")
                 if result.get("cancelled") or scope.cancelled:
                     scope.runtime.cancel()
-                elif terminal_state in {"requires_input", "requires_approval", "incomplete"} or result.get(
+                elif terminal_state in {"requires_input", "incomplete"} or result.get(
                     "incomplete"
                 ):
                     scope.runtime.incomplete(str(result.get("reason") or "incomplete"))
@@ -77,7 +76,7 @@ class ChatTurnService:
 
                 if terminal_state == "cancelled" or result.get("cancelled") or scope.cancelled:
                     metric = "writer.turn.cancelled"
-                elif terminal_state in {"requires_input", "requires_approval", "incomplete"} or result.get(
+                elif terminal_state in {"requires_input", "incomplete"} or result.get(
                     "incomplete"
                 ):
                     metric = "writer.turn.incomplete"
@@ -113,16 +112,21 @@ class ChatTurnService:
         target_word_count: int,
         auto_execute_plan: bool,
         thinking: bool,
-        fallback_approval_action_id: str,
-        fallback_approval_token: str,
+        reasoning_level: str,
+        selection_text: str = "",
     ) -> ChatTurnResult:
-        # Kept in the API for compatibility; storage is authoritative for routing.
-        del has_draft
+        # Kept in the API for compatibility; storage and the Writer tool loop
+        # are authoritative.
+        del has_draft, selection_text
         try:
             self.owner.select_engine.reset_ranking_trace()
         except Exception as exc:
             record_degradation("chat_turn_ranking_trace_reset", exc)
-        backend_has_draft = bool(chapter and await self.owner.draft_storage.list_draft_versions(project_id, chapter))
+        backend_has_draft = False
+        current_text = ""
+        if chapter:
+            current_text, working_path = await self.owner.draft_storage.get_working_text(project_id, chapter)
+            backend_has_draft = working_path is not None and bool(current_text.strip())
         decision = await self.owner.decide_writing_action(
             project_id,
             chapter,
@@ -169,95 +173,88 @@ class ChatTurnService:
                 scope.runtime.transition(TurnState.CONTEXT_PLANNING, reason="plan_generation_unavailable")
             action = "write"
 
-        if chapter:
-            if scope is not None:
-                self.owner.context_planning_service.prepare_context_plan(
-                    scope=scope,
-                    project_id=project_id,
-                    chapter=chapter,
-                    intent=action,
-                    route_path="agentic_writer",
-                    target_word_count=target_word_count,
-                )
-                scope.runtime.transition(TurnState.WRITER_RUNNING)
-            agent_result: WritingResult = await self.owner.writing_service.run(
-                project_id,
-                chapter,
-                message,
-                has_selection=has_selection,
-                thinking=thinking,
-                target_word_count=target_word_count,
-            )
-            if not agent_result.get("fallback"):
-                result_action = str(agent_result.get("action") or action)
-                return await self.owner.context_planning_service.attach_chat_context_plan(
-                    {
-                        **agent_result,
-                        "decision": decision,
-                        "route_contract": route_contract(result_action),
-                    },
-                    project_id=project_id,
-                    chapter=chapter,
-                    intent=result_action,
-                    target_word_count=target_word_count,
-                )
-            fallback_reason = str(agent_result.get("reason") or "")
-            fallback_context = dict(agent_result.get("fallback_context") or {})
-            if not fallback_context:
-                fallback_context = build_fallback_context(
-                    reason=fallback_reason,
-                    agent_run=agent_result,
-                    context_supply=agent_result.get("context_supply") or {},
-                )
-            if scope is not None and str(fallback_context.get("category") or "") != "deadline":
-                scope.ensure_active()
-        else:
-            fallback_reason = "no_chapter"
-            fallback_context = {"schema_version": 1, "reason": fallback_reason, "category": "routing"}
-
-        try:
-            from app.observability.usage_diagnostics import record_fallback
-
-            record_fallback(str(fallback_context.get("category") or "unknown"))
-        except Exception as exc:
-            record_degradation("chat_turn_fallback_diagnostics", exc)
-
         if scope is not None:
-            if scope.runtime.state != TurnState.FALLBACK_RUNNING:
-                scope.runtime.transition(
-                    TurnState.FALLBACK_RUNNING,
-                    reason=fallback_reason,
-                    metadata={
-                        "category": str(fallback_context.get("category") or "unknown"),
-                        "iterations": int(fallback_context.get("iterations") or 0),
-                    },
-                )
             self.owner.context_planning_service.prepare_context_plan(
                 scope=scope,
                 project_id=project_id,
                 chapter=chapter,
                 intent=action,
-                route_path="fallback_workflow",
+                route_path="agentic_writer",
                 target_word_count=target_word_count,
-                fallback_reason=fallback_reason,
             )
-        fallback_result = await self.owner.fallback_execution_service.execute(
-            project_id=project_id,
-            chapter=chapter,
-            message=message,
-            action=action,
-            fallback_context=fallback_context,
-            target_word_count=target_word_count,
-            approval_action_id=fallback_approval_action_id,
-            approval_token=fallback_approval_token,
+            scope.runtime.transition(TurnState.WRITER_RUNNING)
+
+        writer_options: Dict[str, Any] = {
+            "has_selection": has_selection,
+            "thinking": thinking,
+            "target_word_count": target_word_count,
+        }
+        if reasoning_level not in {"auto", "off"}:
+            writer_options["reasoning_level"] = reasoning_level
+        agent_result: WritingResult = await self.owner.writing_service.run(
+            project_id, chapter, message, **writer_options
         )
-        fallback_result["decision"] = decision
-        fallback_result["fallback_context"] = fallback_context
+        chapter_target = agent_result.get("chapter_target")
+        result_chapter = (
+            str(chapter_target.get("chapter") or "")
+            if isinstance(chapter_target, dict)
+            else str(chapter or "")
+        )
+        auto_commit = agent_result.get("auto_commit")
+        if isinstance(auto_commit, dict) and auto_commit.get("committed") and result_chapter:
+            turn_effect = agent_result.get("turn_effect")
+            if isinstance(turn_effect, dict):
+                try:
+                    canon_sync = await self.owner.application.analysis.apply_turn_effect(
+                        project_id,
+                        result_chapter,
+                        turn_effect,
+                    )
+                except Exception as exc:
+                    record_degradation("created_chapter_turn_effect_sync", exc)
+                    canon_sync = {"success": False, "reason": "turn_effect_sync_failed"}
+                auto_commit["canon_sync"] = canon_sync
+        await self._attach_writing_memory(
+            agent_result,
+            project_id=project_id,
+            chapter=result_chapter,
+        )
+        result_action = str(agent_result.get("action") or action)
         return await self.owner.context_planning_service.attach_chat_context_plan(
-            fallback_result,
+            {
+                **agent_result,
+                "decision": decision,
+                "route_contract": route_contract(result_action),
+            },
             project_id=project_id,
             chapter=chapter,
-            intent=action,
+            intent=result_action,
             target_word_count=target_word_count,
-            fallback_reason=fallback_reason,
         )
+
+    async def _attach_writing_memory(
+        self,
+        result: WritingResult,
+        *,
+        project_id: str,
+        chapter: str,
+    ) -> None:
+        """Attach persisted memory status and the context supply used by this completed turn."""
+        storage = getattr(self.owner, "memory_pack_storage", None)
+        read_pack = getattr(storage, "read_pack", None)
+        build_status = getattr(storage, "build_status", None)
+        if not callable(read_pack) or not callable(build_status):
+            return
+        try:
+            pack = await read_pack(project_id, chapter)
+            status = dict(build_status(chapter, pack) or {})
+            supply = dict(result.get("context_supply") or {})
+            status["turn_context"] = {
+                "available": list(supply.get("available") or []),
+                "retrieved": list(supply.get("retrieved") or []),
+                "used": list(supply.get("used") or []),
+                "omitted": list(supply.get("omitted") or []),
+            }
+            result["writing_memory"] = status
+        except Exception as exc:
+            record_degradation("agentic_writing_memory_status", exc)

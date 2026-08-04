@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useIDE } from '../../context/IDEContext';
 import useSWR, { mutate } from 'swr';
-import { projectsAPI } from '../../api';
+import { projectsAPI, sessionAPI } from '../../api';
 import { Bot, ChevronDown, Folder, Plus, Check, Trash2, Home, Pencil, Settings, Download } from 'lucide-react';
 import { cn } from '../ui/core';
 import logger from '../../utils/logger';
@@ -22,6 +22,15 @@ const fetcher = (fn) => fn().then((res) => res.data);
 const STREAMING_PREF_KEY = 'wenshape_output_streaming';
 const DIALOG_MAX_CHARS_PREF_KEY = 'wenshape_dialog_max_chars';
 const DIALOG_MAX_CHARS_VALUES = new Set([2000, 6000]);
+
+// Writer 反问工具策略（项目级，后端为唯一持久化 owner）：
+// always=主动检查 | auto=模型自行判断 | off=不主动触发。文案复用 agentPanel.clarify*Full。
+const CLARIFY_MODES = new Set(['always', 'auto', 'off']);
+const CLARIFY_MODE_OPTIONS = [
+  { mode: 'always', labelKey: 'agentPanel.clarifyAlwaysFull' },
+  { mode: 'auto', labelKey: 'agentPanel.clarifyAutoFull' },
+  { mode: 'off', labelKey: 'agentPanel.clarifyOffFull' },
+];
 
 /** Read streaming preference from localStorage (default: true) */
 export function getStreamingPreference() {
@@ -117,6 +126,7 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
   const [creating, setCreating] = useState(false);
   const [streamingEnabled, setStreamingEnabled] = useState(getStreamingPreference);
   const [dialogMaxChars, setDialogMaxChars] = useState(getDialogMaxCharsPreference);
+  const [clarifyMode, setClarifyMode] = useState('auto');
   const [exportOpen, setExportOpen] = useState(false);
   const menuRef = useRef(null);
   const settingsRef = useRef(null);
@@ -137,6 +147,23 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // 载入项目级反问策略（后端为唯一 owner；无 projectId 时不请求）。
+  useEffect(() => {
+    if (!projectId) return undefined;
+    let cancelled = false;
+    sessionAPI
+      .getClarifySettings(projectId)
+      .then((resp) => {
+        if (cancelled) return;
+        const mode = String(resp?.data?.settings?.auto_trigger || resp?.data?.settings?.mode || 'auto');
+        if (CLARIFY_MODES.has(mode)) setClarifyMode(mode);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId]);
 
   const languageOptions = [
     { locale: 'zh-CN', label: t('titleBar.uiLanguageZh') },
@@ -159,6 +186,19 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
     const normalized = DIALOG_MAX_CHARS_VALUES.has(Number(nextValue)) ? Number(nextValue) : 2000;
     setDialogMaxChars(normalized);
     setDialogMaxCharsPreference(normalized);
+  };
+
+  const handleClarifyModeChange = async (mode) => {
+    if (!projectId) return;
+    const next = CLARIFY_MODES.has(mode) ? mode : 'auto';
+    const prev = clarifyMode;
+    if (next === prev) return;
+    setClarifyMode(next);
+    try {
+      await sessionAPI.updateClarifySettings(projectId, { auto_trigger: next });
+    } catch {
+      setClarifyMode(prev);
+    }
   };
 
   const handleDesktopAction = async (action) => {
@@ -450,6 +490,27 @@ export function TitleBar({ projectName, chapterTitle, currentChapter, rightActio
                 </div>
                 {!streamingEnabled && <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />}
               </button>
+
+              {projectId && (
+                <>
+                  <div className="border-t border-[var(--vscode-sidebar-border)] my-1" />
+                  <div className="px-3 py-2 text-[10px] font-bold text-[var(--vscode-fg-subtle)] uppercase tracking-wider">
+                    {t('titleBar.settingsClarifyMode')}
+                  </div>
+                  {CLARIFY_MODE_OPTIONS.map(({ mode, labelKey }) => (
+                    <button
+                      key={mode}
+                      onClick={() => handleClarifyModeChange(mode)}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-[var(--vscode-fg)] hover:bg-[var(--vscode-list-hover)] transition-colors"
+                    >
+                      <span className="flex-1 text-left">{t(labelKey)}</span>
+                      {clarifyMode === mode && (
+                        <Check size={14} className="text-[var(--vscode-focus-border)] flex-shrink-0" />
+                      )}
+                    </button>
+                  ))}
+                </>
+              )}
 
               {desktopRuntime && (
                 <>

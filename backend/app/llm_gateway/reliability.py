@@ -171,6 +171,28 @@ class GatewayReliabilityController:
             resolved.control.circuit.half_open_inflight = False
         self._release(resolved)
 
+    def retry_release(self, lease: ProviderLease | ProviderControl) -> None:
+        """Release a lease for an attempt that will be retried.
+
+        中文说明：单次逻辑请求的中间重试不应各自记为一次熔断失败——否则一个失败请求
+        （max_retries 次重试）就能把熔断计数顶到阈值、误开熔断，拖垮后续所有请求。
+        重试释放只归还并发额度，不惩罚熔断；由 ``note_failure`` 在请求终态时计一次。
+        """
+        resolved = self._lease(lease)
+        if resolved.released:
+            return
+        if resolved.half_open:
+            resolved.control.circuit.half_open_inflight = False
+        self._release(resolved)
+
+    def note_failure(self, provider_key: str) -> None:
+        """Record exactly one terminal (post-retry) failure for a provider without a lease."""
+        state = self.control(provider_key).circuit
+        state.failures += 1
+        state.half_open_inflight = False
+        if state.failures >= self.failure_threshold:
+            state.opened_at = time.monotonic()
+
     @staticmethod
     def _lease(value: ProviderLease | ProviderControl) -> ProviderLease:
         return value if isinstance(value, ProviderLease) else ProviderLease(control=value)

@@ -18,9 +18,9 @@ def test_golden_replay_suite_passes_default_gate():
 
 
 def test_golden_replay_suite_reports_threshold_failure():
-    result = asyncio.run(run_golden_replay_suite({"fallback_rate_max": 0.0}))
+    result = asyncio.run(run_golden_replay_suite({"retrieval_recall_min": 1.1}))
     assert result["success"] is False
-    assert "fallback_rate_ok" in result["aggregate_failures"]
+    assert "retrieval_recall_ok" in result["aggregate_failures"]
 
 
 def test_t0_representative_manifest_is_bounded_and_complete():
@@ -45,10 +45,8 @@ def test_t0_baseline_classifies_gate_candidates_and_evidence_gaps():
     assert decisions["token_latency"] == "diagnostic_only"
     assert decisions["provider_degradation"] == "engineering_gate"
     assert baseline["resolved_evidence_gaps"] == [
-        "backend_fallback_execution_owner",
         "provider_adapter_conformance",
     ]
-    assert "backend_fallback_execution_owner" not in baseline["evidence_gaps"]
     assert "provider_adapter_conformance" not in baseline["evidence_gaps"]
     assert baseline["diagnostics"]["edit_target_outcome"] == {
         "head": {"changed": True},

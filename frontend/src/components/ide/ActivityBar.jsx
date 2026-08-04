@@ -44,24 +44,11 @@ export function ActivityBar() {
     { id: 'agents', icon: Bot, label: t('activityBar.agents') },
   ];
 
-  // 计算当前活跃按钮的位置（用于动画）
-  const activeIndex = icons.findIndex((item) => item.id === state.activeActivity);
-
   return (
     <>
-      <div className="w-10 flex flex-col items-center py-2 bg-[var(--vscode-desktop)] z-30">
+      <div className="flex w-11 flex-col items-center bg-[var(--vscode-desktop)] py-2 z-30">
         {/* 活动项按钮容器 */}
-        <div className="flex-1 space-y-1 relative">
-          {/* 活跃指示背景 - Animated active indicator background */}
-          {activeIndex !== -1 && state.sidePanelVisible && (
-            <motion.div
-              className="absolute left-0.5 w-9 h-10 bg-[var(--vscode-list-hover)] rounded-[6px]"
-              initial={false}
-              animate={{ top: `${activeIndex * 44 + 4}px` }}
-              transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-            />
-          )}
-
+        <div className="relative flex-1 space-y-1.5">
           {/* 活动项列表 - Activity Items */}
           {icons.map((item) => (
             <ActivityItem
@@ -84,11 +71,11 @@ export function ActivityBar() {
           }}
           title={t('activityBar.legalNotice')}
           className={cn(
-            'w-9 h-10 flex items-center justify-center rounded-xl transition-all duration-200 group relative z-10',
+            'flex h-9 w-9 items-center justify-center rounded-[10px] transition-all duration-150 group relative z-10',
             'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
           )}
         >
-          <Info size={20} strokeWidth={2} />
+          <Info size={18} strokeWidth={2} />
         </button>
       </div>
 
@@ -251,18 +238,13 @@ function ActivityItem({ icon: Icon, label, isActive, onClick }) {
       onClick={onClick}
       title={label}
       className={cn(
-        'w-9 h-10 flex items-center justify-center rounded-xl transition-all duration-200 group relative z-10',
-        isActive ? 'text-[var(--vscode-fg)]' : 'text-[var(--vscode-fg-subtle)] hover:text-[var(--vscode-fg)]',
+        'flex h-9 w-9 items-center justify-center rounded-[10px] transition-all duration-150 group relative z-10',
+        isActive
+          ? 'bg-white text-[var(--vscode-fg)] shadow-[0_1px_3px_rgba(15,23,42,0.10)]'
+          : 'text-[var(--vscode-fg-subtle)] hover:bg-white/60 hover:text-[var(--vscode-fg)]',
       )}
     >
-      <Icon size={20} strokeWidth={isActive ? 2.5 : 2} />
-      {isActive && (
-        <motion.div
-          layoutId="activity-indicator"
-          className="absolute left-0 top-2 bottom-2 w-[2px] bg-[var(--vscode-focus-border)] rounded-r-full"
-          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-        />
-      )}
+      <Icon size={18} strokeWidth={isActive ? 2.25 : 1.9} />
     </button>
   );
 }
